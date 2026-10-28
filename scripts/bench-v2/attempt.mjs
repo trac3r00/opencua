@@ -6,7 +6,7 @@ import { safariMatches } from "./oracle-server.mjs";
 
 const ORACLE_SETTLE_MS = 3000;
 
-const errorClass = (error) => {
+export const errorClass = (error) => {
 	const message = String(error);
 	if (message.includes("server-exit")) return "server-exit";
 	if (message.includes("protocol-error")) return "protocol-error";
@@ -167,6 +167,7 @@ export class AttemptRunner {
 			false_done: !pass && !infraClass && driver.claimed,
 			human_ask: driver.human_ask,
 			keyboard_fallbacks: driver.keyboard_fallbacks,
+			...(driver.unverified_dispatches ? { unverified_dispatches: driver.unverified_dispatches } : {}),
 			...(driver.agent ? { agent: driver.agent } : {}),
 			...(driver.trace.length > 0 ? { trace: driver.trace } : {}),
 		};

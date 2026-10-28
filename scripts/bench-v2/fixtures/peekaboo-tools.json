@@ -1,0 +1,1554 @@
+{
+	"tools": [
+		{
+			"description": "Inspect the macOS Dock under immutable background-only authority. The available action is `list`.\nDock launch, context menus, hide, and show mutate shared desktop UI and require a human-authorized\nforeground-capable Agent session or the standalone CLI.\nPeekaboo MCP 4.9.7",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Background-safe Dock action; mutations are unavailable",
+						"enum": ["list"],
+						"type": "string"
+					},
+					"include_all": {
+						"default": false,
+						"description": "Include all items when listing (default: false)",
+						"type": "boolean"
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "dock"
+		},
+		{
+			"description": "Pauses execution for a specified duration.\nUseful for waiting between UI actions or allowing animations to complete.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"duration": {
+						"description": "Sleep duration in milliseconds.",
+						"type": "integer"
+					}
+				},
+				"required": ["duration"],
+				"type": "object"
+			},
+			"name": "sleep"
+		},
+		{
+			"description": "Waits for 1–8 AND predicates against one exact app/PID and its exact resolved window.\nWhen an incomplete observation creates completion-evidence debt, the first same-target call commits this\nexact predicate set but cannot clear the debt. Repeat the identical target and predicates; only a later\nfully satisfied receipt can authorize completion.\nIt polls fresh native window/Accessibility state every 100 ms, requires two identical\nsatisfied samples by default, and never focuses, clicks, types, or replays an action.\nThe hard timeout is 10 seconds. Results are `satisfied`, `unsatisfied`, or `unknown`;\ntruncated, stale, ambiguous, process-generation-changed, or owner-mismatched observations are `unknown`.\nPredicates are structured JSON objects, never prose strings or AX expressions. For example:\n{\"kind\":\"element_value\",\"selector\":{\"identifier\":\"basic-text-field\"},\"expected_value\":\"Ready\"}",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"app": {
+						"description": "Exact running app name or bundle ID, pinned to its first PID. Exclusive with pid.",
+						"type": "string"
+					},
+					"final_screenshot": {
+						"default": false,
+						"description": "Attach one silent exact-window screenshot after verification when available.",
+						"type": "boolean"
+					},
+					"pid": {
+						"description": "Exact running process ID. Mutually exclusive with app.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"predicates": {
+						"description": "One to eight structured predicate objects. Every predicate must be satisfied.",
+						"items": {
+							"description": "Each item must be a JSON object, never a prose string or AX expression. Supported shapes:\n{\"kind\":\"window_exists\",\"expected\":true}\n{\"kind\":\"window_bounds\",\"bounds\":{\"x\":0,\"y\":0,\"width\":800,\"height\":600},\"tolerance\":1}\n{\"kind\":\"element_exists\",\"selector\":{\"identifier\":\"save-button\"},\"expected\":true}\n{\"kind\":\"element_value\",\"selector\":{\"identifier\":\"basic-text-field\"},\"expected_value\":\"Ready\"}\n{\"kind\":\"element_enabled\",\"selector\":{\"label\":\"Save\"},\"expected\":true}\n{\"kind\":\"element_selected\",\"selector\":{\"role\":\"AXCheckBox\"},\"expected\":true}\nSelectors accept one or more exact identifier, label, or role fields.",
+							"oneOf": [
+								{
+									"additionalProperties": false,
+									"properties": {
+										"expected": {
+											"type": "boolean"
+										},
+										"kind": {
+											"enum": ["window_exists"],
+											"type": "string"
+										}
+									},
+									"required": ["kind", "expected"],
+									"type": "object"
+								},
+								{
+									"additionalProperties": false,
+									"properties": {
+										"bounds": {
+											"additionalProperties": false,
+											"properties": {
+												"height": {
+													"minimum": 0,
+													"type": "number"
+												},
+												"width": {
+													"minimum": 0,
+													"type": "number"
+												},
+												"x": {
+													"type": "number"
+												},
+												"y": {
+													"type": "number"
+												}
+											},
+											"required": ["x", "y", "width", "height"],
+											"type": "object"
+										},
+										"kind": {
+											"enum": ["window_bounds"],
+											"type": "string"
+										},
+										"tolerance": {
+											"default": 1,
+											"maximum": 100,
+											"minimum": 0,
+											"type": "number"
+										}
+									},
+									"required": ["kind", "bounds"],
+									"type": "object"
+								},
+								{
+									"additionalProperties": false,
+									"properties": {
+										"expected": {
+											"type": "boolean"
+										},
+										"kind": {
+											"enum": ["element_exists"],
+											"type": "string"
+										},
+										"selector": {
+											"additionalProperties": false,
+											"description": "Exact-match selector. Provide at least one field.",
+											"properties": {
+												"identifier": {
+													"description": "Exact AXIdentifier.",
+													"type": "string"
+												},
+												"label": {
+													"description": "Exact accessibility label.",
+													"type": "string"
+												},
+												"role": {
+													"description": "Exact AX role or Peekaboo element type.",
+													"type": "string"
+												}
+											},
+											"type": "object"
+										}
+									},
+									"required": ["kind", "selector", "expected"],
+									"type": "object"
+								},
+								{
+									"additionalProperties": false,
+									"properties": {
+										"expected_value": {
+											"type": "string"
+										},
+										"kind": {
+											"enum": ["element_value"],
+											"type": "string"
+										},
+										"selector": {
+											"additionalProperties": false,
+											"description": "Exact-match selector. Provide at least one field.",
+											"properties": {
+												"identifier": {
+													"description": "Exact AXIdentifier.",
+													"type": "string"
+												},
+												"label": {
+													"description": "Exact accessibility label.",
+													"type": "string"
+												},
+												"role": {
+													"description": "Exact AX role or Peekaboo element type.",
+													"type": "string"
+												}
+											},
+											"type": "object"
+										}
+									},
+									"required": ["kind", "selector", "expected_value"],
+									"type": "object"
+								},
+								{
+									"additionalProperties": false,
+									"properties": {
+										"expected": {
+											"type": "boolean"
+										},
+										"kind": {
+											"enum": ["element_enabled"],
+											"type": "string"
+										},
+										"selector": {
+											"additionalProperties": false,
+											"description": "Exact-match selector. Provide at least one field.",
+											"properties": {
+												"identifier": {
+													"description": "Exact AXIdentifier.",
+													"type": "string"
+												},
+												"label": {
+													"description": "Exact accessibility label.",
+													"type": "string"
+												},
+												"role": {
+													"description": "Exact AX role or Peekaboo element type.",
+													"type": "string"
+												}
+											},
+											"type": "object"
+										}
+									},
+									"required": ["kind", "selector", "expected"],
+									"type": "object"
+								},
+								{
+									"additionalProperties": false,
+									"properties": {
+										"expected": {
+											"type": "boolean"
+										},
+										"kind": {
+											"enum": ["element_selected"],
+											"type": "string"
+										},
+										"selector": {
+											"additionalProperties": false,
+											"description": "Exact-match selector. Provide at least one field.",
+											"properties": {
+												"identifier": {
+													"description": "Exact AXIdentifier.",
+													"type": "string"
+												},
+												"label": {
+													"description": "Exact accessibility label.",
+													"type": "string"
+												},
+												"role": {
+													"description": "Exact AX role or Peekaboo element type.",
+													"type": "string"
+												}
+											},
+											"type": "object"
+										}
+									},
+									"required": ["kind", "selector", "expected"],
+									"type": "object"
+								}
+							]
+						},
+						"maxItems": 8,
+						"minItems": 1,
+						"type": "array",
+						"uniqueItems": false
+					},
+					"stable_samples": {
+						"default": 2,
+						"description": "Consecutive identical satisfied samples required.",
+						"maximum": 10,
+						"minimum": 1,
+						"type": "integer"
+					},
+					"timeout_ms": {
+						"default": 5000,
+						"description": "Polling timeout in milliseconds; hard-capped at 10000.",
+						"maximum": 10000,
+						"minimum": 100,
+						"type": "integer"
+					},
+					"window_id": {
+						"description": "Optional exact CoreGraphics window ID. Its live PID/process ownership is verified.",
+						"maximum": 4294967295,
+						"minimum": 1,
+						"type": "integer"
+					},
+					"window_index": {
+						"description": "Optional window index resolved on every poll. Exclusive with other window selectors.",
+						"minimum": 0,
+						"type": "integer"
+					},
+					"window_title": {
+						"description": "Optional window-title substring resolved on every poll. Exclusive with other window selectors.",
+						"type": "string"
+					}
+				},
+				"required": ["predicates"],
+				"type": "object"
+			},
+			"name": "verify_state"
+		},
+		{
+			"description": "Scrolls a fresh UI target in the background without interrupting the user. Peekaboo prefers\nAccessibility, then may use exact-window PID-routed wheel events for an opaque visible WebKit target.\nSet foreground=true to focus the target and allow global wheel events at the pointer.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6\nand anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"amount": {
+						"default": 3,
+						"description": "Optional. Number of scroll ticks/lines. Default: 3.",
+						"type": "integer"
+					},
+					"coordinate_reference": {
+						"description": "Capture-owned reference from see; must match snapshot when both are supplied.",
+						"type": "string"
+					},
+					"coordinate_space": {
+						"description": "Coordinate basis, matching click. Image/normalized points need coordinate_reference.",
+						"enum": ["global_display_points", "image_pixels", "normalized"],
+						"type": "string"
+					},
+					"coords": {
+						"description": "Background point x,y; global display points by default. Mutually exclusive with on.",
+						"type": "string"
+					},
+					"delay": {
+						"default": 0,
+						"description": "Optional. Foreground-only delay between scroll ticks in milliseconds. Default: 0.",
+						"type": "integer"
+					},
+					"direction": {
+						"description": "Scroll direction: up (content moves up), down (content moves down), left, or right.",
+						"enum": ["up", "down", "left", "right"],
+						"type": "string"
+					},
+					"foreground": {
+						"default": false,
+						"description": "Optional. Focus the target and allow global wheel events. Default: false.",
+						"type": "boolean"
+					},
+					"on": {
+						"description": "Element ID from see or inspect_ui; mutually exclusive with coords.",
+						"type": "string"
+					},
+					"smooth": {
+						"default": false,
+						"description": "Optional. Use smooth synthetic scrolling; requires foreground=true.",
+						"type": "boolean"
+					},
+					"snapshot": {
+						"description": "Snapshot ID from see or inspect_ui. Element scroll defaults to latest; coords requires an explicit pixel-backed snapshot or coordinate_reference.",
+						"type": "string"
+					}
+				},
+				"required": ["direction"],
+				"type": "object"
+			},
+			"name": "scroll"
+		},
+		{
+			"description": "Deliver one direct text payload to an explicit app or PID UI target, optionally pinned to one exact\nwindow, under immutable background-only authority. This route does not touch the shared clipboard.\nProvide exactly one of app or pid and at most one of window_id, window_title, or window_index.\nCurrent-clipboard, file/image paths, targetless input, and foreground delivery are unavailable.\nIf delivery fails after it begins, a prefix may already be present; observe the exact target before\nretrying.\nClipboard-backed payloads are unavailable without trusted temporary-clipboard permission.",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"app": {
+						"description": "Target app name/bundle ID, or 'PID:<n>'.",
+						"type": "string"
+					},
+					"pid": {
+						"description": "Target process ID (alternative to app).",
+						"type": "integer"
+					},
+					"text": {
+						"description": "Plain text. Background delivery leaves the clipboard untouched; a failure after dispatch begins is retry-unsafe because a prefix may already be present.",
+						"type": "string"
+					},
+					"window_id": {
+						"description": "Exact window ID; requires app/pid and pins atomic background delivery to that exact window.",
+						"type": "integer"
+					},
+					"window_index": {
+						"description": "Window index (0-based); requires app/pid and pins that exact window.",
+						"type": "integer"
+					},
+					"window_title": {
+						"description": "Window title substring; requires app/pid and pins atomic exact-window background delivery.",
+						"type": "string"
+					}
+				},
+				"required": ["text"],
+				"type": "object"
+			},
+			"name": "paste"
+		},
+		{
+			"description": "Invokes a named accessibility action on an element, such as AXPress, AXShowMenu, or AXIncrement.\nUse with element IDs from `see` or `inspect_ui` when a semantic action is available.\nBackground-only policy refuses actions that can raise or expose foreground UI, including AXPress and\nAXShowMenu; use a dedicated background semantic tool or a human-authorized foreground-capable session.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Accessibility action name to invoke, e.g. AXPress, AXShowMenu, AXIncrement.",
+						"type": "string"
+					},
+					"on": {
+						"description": "Opaque element ID from current `see` or `inspect_ui` output, or a query string.",
+						"type": "string"
+					},
+					"snapshot": {
+						"description": "Optional snapshot ID from `see` or `inspect_ui`; latest is used when omitted.",
+						"type": "string"
+					}
+				},
+				"required": ["on", "action"],
+				"type": "object"
+			},
+			"name": "action"
+		},
+		{
+			"description": "Captures a screenshot of the active UI and generates an element map.\n\nReturns opaque Peekaboo element IDs that can be passed unchanged to interaction commands.\nDo not infer an element's role or type from the shape of its ID. Creates or updates a\nsnapshot that tracks UI state. Observation is background-only and does not focus the target\nunless `web_focus` is explicitly enabled for sparse embedded web content.",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"annotate": {
+						"default": false,
+						"description": "Optional. Add interaction markers and IDs to the returned screenshot.",
+						"type": "boolean"
+					},
+					"app_target": {
+						"description": "Optional. Specifies the capture target (same as image tool).\nFor example:\nOmit or use an empty string (e.g., '') for all screens.\nUse 'screen:INDEX' (e.g., 'screen:0') for a specific display.\nUse 'frontmost' for all windows of the current foreground application.\nUse 'AppName' (e.g., 'Safari') for all windows of that application.\nUse 'PID:PROCESS_ID' (e.g., 'PID:663') to target a specific process by its PID.",
+						"type": "string"
+					},
+					"capture_engine": {
+						"default": "auto",
+						"description": "Optional. auto (default), modern (ScreenCaptureKit), or classic (no ScreenCaptureKit).\nUse classic to recover safely from a ScreenCaptureKit owner refusal.",
+						"enum": ["auto", "modern", "classic"],
+						"type": "string"
+					},
+					"fresh": {
+						"default": false,
+						"description": "Optional. Require a fresh, uncached Accessibility tree; refuse if unavailable.",
+						"type": "boolean"
+					},
+					"include_elements": {
+						"default": false,
+						"description": "Optional. Also return the element table as structured data in `_meta.ui_elements`, using the same fields as\n`peekaboo see --json`, together with `_meta.snapshot_id`. Off by default because a window can expose hundreds\nof elements.",
+						"type": "boolean"
+					},
+					"max_children": {
+						"description": "Optional. Maximum AX children per node. Env fallback: PEEKABOO_AX_MAX_CHILDREN.\nIncrease this for flat Qt/Electron panels with many sibling controls.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"max_depth": {
+						"description": "Optional. Maximum AX traversal depth. Env fallback: PEEKABOO_AX_MAX_DEPTH.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"max_elements": {
+						"description": "Optional. Maximum AX elements to collect. Env fallback: PEEKABOO_AX_MAX_ELEMENTS.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"ocr": {
+						"default": false,
+						"description": "Optional. Add text recognized locally on the selected host with Apple Vision to the accessibility\nelement map. OCR text is non-actionable and does not replace accessible controls.",
+						"type": "boolean"
+					},
+					"path": {
+						"description": "Optional. Path to save the screenshot. If omitted, a temporary file is used.",
+						"type": "string"
+					},
+					"roi": {
+						"description": "Optional. Crop the exact window as x,y,width,height in window-local logical points. Requires\nwindow_id, creates a fresh snapshot, and returns ROI-local element bounds plus a coordinate\ncontext for image_pixels or normalized clicks.",
+						"type": "string"
+					},
+					"snapshot": {
+						"description": "Optional. Snapshot ID for UI automation tracking. A new snapshot is created when absent.",
+						"type": "string"
+					},
+					"web_focus": {
+						"default": false,
+						"description": "Optional. Allow an AXPress retry on sparse Chromium/Tauri web content.",
+						"type": "boolean"
+					},
+					"window_id": {
+						"description": "Optional. Exact CoreGraphics window ID. May be used alone; when app_target names an application\nor PID, Peekaboo also verifies owner agreement. Numeric app_target suffixes remain window indexes.",
+						"maximum": 4294967295,
+						"minimum": 1,
+						"type": "integer"
+					}
+				},
+				"type": "object"
+			},
+			"name": "see"
+		},
+		{
+			"description": "List and manipulate application windows.\n\nActions:\n- list: List windows with IDs, bounds, off-screen state, and combined-observation eligibility\n- close: Close a window\n- minimize: Minimize a window\n- restore: Restore a minimized window without activating or focusing its application\n- maximize: Maximize a window\n- move: Move a window to specific coordinates (requires x, y)\n- resize: Resize a window to specific dimensions (requires width, height)\n- set-bounds: Set both position and size (requires x, y, width, height)\n- focus: Unavailable under background-only authority; use a human-authorized foreground session or CLI\n\nBackground-only close uses Accessibility and fails rather than focusing the app for a global fallback.\nA focused/global close fallback is available only to a foreground-capable session with `foreground=true`.\n\nTarget windows by application name and optionally by window title or index.\nFor deterministic targeting, prefer `window_id` (from `peekaboo window list`).\nSupports partial title matching for convenience.\n\nJSON Examples (ALWAYS include `action`):\n- { \"action\": \"list\", \"app\": \"Safari\" }\n- { \"action\": \"move\", \"app\": \"TextEdit\", \"x\": 100, \"y\": 100 }\n- { \"action\": \"restore\", \"app\": \"PID:1234\", \"window_id\": 5678 }\n- { \"action\": \"set-bounds\", \"app\": \"Terminal\", \"x\": 0, \"y\": 0, \"width\": 1280, \"height\": 720 }\n- { \"action\": \"close\", \"app\": \"Safari\", \"title\": \"Document\" }\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "The background-safe action to perform; focus is unavailable",
+						"enum": ["list", "close", "minimize", "restore", "maximize", "move", "resize", "set-bounds"],
+						"type": "string"
+					},
+					"app": {
+						"description": "Target application name, bundle ID, or process ID",
+						"type": "string"
+					},
+					"height": {
+						"description": "Height for resize or set-bounds action",
+						"type": "number"
+					},
+					"include_window_details": {
+						"description": "Details for list results. Defaults to ids, bounds, and off_screen.",
+						"items": {
+							"enum": ["ids", "bounds", "off_screen"],
+							"type": "string"
+						},
+						"type": "array",
+						"uniqueItems": false
+					},
+					"index": {
+						"description": "Window index (0-based) for multi-window applications",
+						"type": "integer"
+					},
+					"title": {
+						"description": "Window title to target (partial matching supported)",
+						"type": "string"
+					},
+					"width": {
+						"description": "Width for resize or set-bounds action",
+						"type": "number"
+					},
+					"window_id": {
+						"description": "Window ID (from window list); preferred stable selector",
+						"type": "integer"
+					},
+					"x": {
+						"description": "X coordinate for move or set-bounds action",
+						"type": "number"
+					},
+					"y": {
+						"description": "Y coordinate for move or set-bounds action",
+						"type": "number"
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "window"
+		},
+		{
+			"description": "Sets an accessibility element value directly without synthesizing keystrokes.\nUse for forms and controls after `see` or `inspect_ui` returns an element ID. Requires a settable AX value.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"on": {
+						"description": "Opaque element ID copied exactly from current `see` or `inspect_ui` output, or a query string.",
+						"type": "string"
+					},
+					"snapshot": {
+						"description": "Optional. Snapshot ID from `see` or `inspect_ui`. Uses latest snapshot if not specified.",
+						"type": "string"
+					},
+					"value": {
+						"anyOf": [
+							{
+								"type": "string"
+							},
+							{
+								"type": "boolean"
+							},
+							{
+								"type": "integer"
+							},
+							{
+								"type": "number"
+							}
+						],
+						"description": "Value to set. Supported types: string, boolean, integer, or number."
+					}
+				},
+				"required": ["on", "value"],
+				"type": "object"
+			},
+			"name": "set_value"
+		},
+		{
+			"description": "Capture live screens/windows/regions or ingest a video file and return kept PNG frames,\na contact sheet, and metadata (diff stats, warnings, grid info).",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"active_fps": {
+						"default": 8,
+						"description": "Active FPS; must be finite and >= idle_fps (default 8, range 0.5...15)",
+						"maximum": 15,
+						"minimum": 0.5,
+						"type": "number"
+					},
+					"app": {
+						"description": "Optional app/bundle/PID target for window mode",
+						"type": "string"
+					},
+					"autoclean_minutes": {
+						"description": "Minutes to keep temp outputs (default 120)",
+						"type": "integer"
+					},
+					"capture_focus": {
+						"default": "background",
+						"description": "background (default)|foreground (activate target)|auto (legacy)",
+						"enum": ["background", "foreground", "auto"],
+						"type": "string"
+					},
+					"diff_budget_ms": {
+						"description": "Diff time budget ms before falling back to fast (default 30 for quality)",
+						"type": "integer"
+					},
+					"diff_strategy": {
+						"default": "fast",
+						"description": "fast|quality (default fast)",
+						"enum": ["fast", "quality"],
+						"type": "string"
+					},
+					"duration_seconds": {
+						"description": "Duration seconds (default 60, max 180)",
+						"type": "number"
+					},
+					"end_ms": {
+						"description": "Trim end in ms",
+						"type": "integer"
+					},
+					"every_ms": {
+						"description": "Sample every N ms. Exclusive with sample_fps.",
+						"type": "integer"
+					},
+					"heartbeat_sec": {
+						"description": "Heartbeat interval seconds (default 5, 0 disables)",
+						"type": "number"
+					},
+					"highlight_changes": {
+						"description": "Overlay motion boxes on frames",
+						"type": "boolean"
+					},
+					"idle_fps": {
+						"default": 2,
+						"description": "Idle FPS; must be finite (default 2, range 0.1...5)",
+						"maximum": 5,
+						"minimum": 0.1,
+						"type": "number"
+					},
+					"input": {
+						"description": "Video file path (required for source=video)",
+						"type": "string"
+					},
+					"max_frames": {
+						"description": "Soft frame cap (default 800)",
+						"type": "integer"
+					},
+					"max_mb": {
+						"description": "Soft size cap MB (optional)",
+						"type": "integer"
+					},
+					"mode": {
+						"description": "screen|window|frontmost|area (region alias)",
+						"enum": ["screen", "window", "frontmost", "area", "region"],
+						"type": "string"
+					},
+					"no_diff": {
+						"description": "Keep all sampled frames (disable diff filtering)",
+						"type": "boolean"
+					},
+					"output_dir": {
+						"description": "Optional absolute directory for outputs",
+						"type": "string"
+					},
+					"pid": {
+						"description": "Optional process ID target for window mode",
+						"type": "integer"
+					},
+					"quiet_ms": {
+						"description": "Calm period before returning to idle (default 1000)",
+						"type": "integer"
+					},
+					"region": {
+						"description": "x,y,width,height for area mode",
+						"type": "string"
+					},
+					"resolution_cap": {
+						"description": "Cap longest side px (default 1440)",
+						"type": "number"
+					},
+					"sample_fps": {
+						"description": "Sample FPS (default 2). Exclusive with every_ms.",
+						"type": "number"
+					},
+					"screen_index": {
+						"description": "Optional screen index",
+						"type": "integer"
+					},
+					"source": {
+						"default": "live",
+						"description": "live|video (default live)",
+						"enum": ["live", "video"],
+						"type": "string"
+					},
+					"start_ms": {
+						"description": "Trim start in ms",
+						"type": "integer"
+					},
+					"threshold_percent": {
+						"description": "Whole-frame change percent to keep motion frames (default 2.5; 0 keeps all)",
+						"type": "number"
+					},
+					"video_out": {
+						"description": "Optional MP4 output path",
+						"type": "string"
+					},
+					"window_index": {
+						"description": "Optional window index; requires app or pid",
+						"type": "integer"
+					},
+					"window_title": {
+						"description": "Optional window title filter",
+						"type": "string"
+					}
+				},
+				"type": "object"
+			},
+			"name": "capture"
+		},
+		{
+			"description": "Screenshot only; use see for element detection.\nCaptures macOS screen content without building an element map or running AI analysis.\nTargets include entire displays, the frontmost window, app-specific windows (`app_target`),\nor the menu bar. Capture is background-only by default. Set `capture_focus` to `foreground`\nfor visible capture feedback and exact app/PID activation before an app-targeted capture.\nOutput can be written to disk or returned inline as Base64 data (`format: \"data\"`).\nWindow shadows/frames are excluded automatically.",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"app_target": {
+						"description": "Optional. Specifies the capture target.",
+						"type": "string"
+					},
+					"capture_focus": {
+						"default": "background",
+						"description": "Optional. background (default), foreground (activate target), or legacy auto.",
+						"enum": ["background", "auto", "foreground"],
+						"type": "string"
+					},
+					"format": {
+						"description": "Optional. Output format.",
+						"enum": ["png", "jpg", "data"],
+						"type": "string"
+					},
+					"max_dimension": {
+						"description": "Optional. Downscales the captured image so its longest side does not exceed this value.\nDefaults to 1500 when format is \"data\".",
+						"type": "integer"
+					},
+					"path": {
+						"description": "Optional. Base absolute path for saving the image.",
+						"type": "string"
+					},
+					"retina": {
+						"default": false,
+						"description": "Optional. Shorthand for scale=native.",
+						"type": "boolean"
+					},
+					"scale": {
+						"default": "logical",
+						"description": "Optional. Capture scale: logical|1x or native|retina|2x.",
+						"enum": ["logical", "1x", "native", "retina", "2x"],
+						"type": "string"
+					},
+					"window_id": {
+						"description": "Optional. Exact WindowServer window ID; may be combined with an app target.",
+						"type": "integer"
+					}
+				},
+				"type": "object"
+			},
+			"name": "image"
+		},
+		{
+			"description": "Execute complex automation tasks using the configured AI provider.\nThe agent can understand natural language instructions and break them down into specific\nPeekaboo commands to accomplish complex workflows.\n\nCapabilities:\n- Natural Language Processing: Understands tasks described in plain English\n- Multi-step Automation: Breaks complex tasks into sequential steps\n- Visual Feedback: Can take screenshots to verify results\n- Context Awareness: Maintains session state across multiple actions\n- Error Recovery: Can adapt and retry when actions fail\n\nThe agent has access to all Peekaboo automation tools including:\n- Screen capture and analysis\n- UI element interaction (click, type, scroll)\n- Background application control (already-running launch readiness checks, quit, inspect)\n- Window management (move, resize, close)\n- Background text delivery and native Accessibility actions\n\nMCP-started Agent sessions are always background-only. They refuse focus/activation, shared-pointer/global\ninput, foreground capture, persistent clipboard writes, targetless dialog input, dialog file actions, shared\nsystem UI mutations, Space switch/follow, browser setup/fronting, and Shell-tool access before dispatch.\nBackground-only Agent sessions may use raw `press` only with a fresh exact non-dialog snapshot receipt. Targetless, app/PID-only, window-selector-only, and `foreground: true` raw press remain unavailable.\nBackground-only Agent typing requires an explicit fresh exact non-dialog snapshot receipt. An optional element ID must come from that snapshot. Do not combine snapshot typing with app, PID, or window selectors; implicit-latest, selector-only, and targetless typing remain unavailable.\nBackground-only Agent sessions may use exact targeted `dialog click`, `dismiss`, and `input` with an explicit app, PID, or window target. Click and dismiss use prepared one-shot dialog receipts; input resolves the exact target and uses AXValue. Targetless dialog mutations, dialog `file`, forced dismiss, and foreground dialog routes remain unavailable.\nAfter receipt-pinned raw press, observe the exact target before another mutation because delivery is semantically unverified.\nSpace listing and unfollowed window placement remain available. This UI authority boundary\nis not a process sandbox; trusted prompts can operate terminal or scripting apps through their UI. Only the\nhuman-facing CLI can explicitly authorize foreground UI for a session. Direct text paste is available only\nwith a generation-pinned app/PID/window target and a canonical background result; targetless, foreground,\ncurrent-clipboard, and binary paste remain refused.\n\nExample tasks:\n- \"Inspect the current page in an already-running Safari window\"\n- \"Take a screenshot of the current window and save it to Desktop\"\n- \"Find the login button and click it, then type my credentials\"\n- \"In an already-running TextEdit document, write 'Hello World'\"\n\nRequires a configured provider credential or local model runtime.\nPeekaboo MCP 4.9.7",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"dry_run": {
+						"default": false,
+						"description": "Validate and echo the task without calling a model or tools",
+						"type": "boolean"
+					},
+					"listSessions": {
+						"default": false,
+						"description": "List available sessions",
+						"type": "boolean"
+					},
+					"max_steps": {
+						"description": "Maximum model/tool-loop turns before failing (1-100, default 20)",
+						"type": "integer"
+					},
+					"model": {
+						"description": "OpenAI model to use (e.g., gpt-5.6, gpt-5-mini).\nCall `list_models` first to see available presets and descriptions.\nChoose 'FastChat' for quick responses, 'DeepAnalysis' for complex reasoning, etc.\nIf omitted, the tool auto-selects the first mode-compatible preset.",
+						"type": "string"
+					},
+					"noCache": {
+						"default": false,
+						"description": "Run without saving a resumable session; incompatible with resume/list options",
+						"type": "boolean"
+					},
+					"quiet": {
+						"default": false,
+						"description": "Quiet mode - only show final result",
+						"type": "boolean"
+					},
+					"resume": {
+						"default": false,
+						"description": "Resume the most recent session",
+						"type": "boolean"
+					},
+					"resumeSession": {
+						"description": "Resume a specific session by ID",
+						"type": "string"
+					},
+					"task": {
+						"description": "Task to perform in natural language (omit when only listing sessions)",
+						"type": "string"
+					},
+					"verbose": {
+						"default": false,
+						"description": "Enable verbose output with full JSON debug information",
+						"type": "boolean"
+					}
+				},
+				"type": "object"
+			},
+			"name": "agent"
+		},
+		{
+			"description": "Read or snapshot the macOS clipboard under immutable background-only authority. Available actions are\n`status`, `get` and `save`. Reads require silent native permission and never request a privacy alert.\nThe `set`, `clear`, and `restore` actions are unavailable because they persistently\nchange the user's shared clipboard state; use exact targeted transactional `paste`, or ask the human to\nstart a foreground-capable Agent session or use the standalone CLI when that user-state change is intended.\n\n- status: report this process's native read policy without reading clipboard contents.\n- get: read the clipboard; optionally prefer a UTI and/or write binary data to a filesystem path.\n  MCP stdout is reserved for JSON-RPC, so outputPath '-' is rejected.\n- save: snapshot clipboard contents to a named slot without changing the shared clipboard.",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Background-safe action; persistent clipboard mutation is unavailable",
+						"enum": ["status", "get", "save"],
+						"type": "string"
+					},
+					"outputPath": {
+						"description": "When reading, filesystem path to write binary data. The '-' stdout sentinel is not supported because MCP stdout carries JSON-RPC; omit outputPath to receive UTF-8 text in the tool response.",
+						"type": "string"
+					},
+					"prefer": {
+						"description": "Preferred UTI when reading clipboard",
+						"type": "string"
+					},
+					"slot": {
+						"description": "Save/restore slot name (default: \"0\")",
+						"type": "string"
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "clipboard"
+		},
+		{
+			"description": "Analyzes a pre-existing image file from the local filesystem using a configured AI model.\n\nThis tool is useful when an image already exists (e.g., previously captured, downloaded, or generated)\nand you need to understand its content, extract text, or answer specific questions about it.\nAccepts regular image files up to 10 MiB (10,485,760 bytes). Resize or compress larger images before retrying.\n\nCapabilities:\n- Image Understanding: Provide any question about the image (e.g., \"What objects are in this picture?\",\n  \"Describe the scene.\", \"Is there a red car?\").\n- Text Extraction (OCR): Ask the AI to extract text from the image\n  (e.g., \"What text is visible in this screenshot?\").\n- Flexible AI Configuration: Can use server-default AI providers/models or specify a particular one per call\n  via 'provider_config'.\n\nExample:\nIf you have an image '/tmp/chart.png' showing a bar chart, you could ask:\n{ \"image_path\": \"/tmp/chart.png\", \"question\": \"Which category has the highest value in this bar chart?\" }\nThe AI will analyze the image and attempt to answer your question based on its visual content.\n\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"image_path": {
+						"description": "Required. Absolute path to image file (.png, .jpg, .webp) to be analyzed.",
+						"type": "string"
+					},
+					"provider_config": {
+						"additionalProperties": false,
+						"description": "Optional provider/model. Validated against server defaults.",
+						"properties": {
+							"model": {
+								"description": "Optional. Model name. If omitted, uses server defaults.",
+								"type": "string"
+							},
+							"type": {
+								"default": "auto",
+								"description": "AI provider, default: auto. 'auto' uses server's",
+								"enum": ["auto", "ollama", "openai", "anthropic", "grok"],
+								"type": "string"
+							}
+						},
+						"type": "object"
+					},
+					"question": {
+						"description": "Required. Question for the AI about the image.",
+						"type": "string"
+					}
+				},
+				"required": ["question"],
+				"type": "object"
+			},
+			"name": "analyze"
+		},
+		{
+			"description": "Presses one or more raw keyboard chords. Use `keys` for a Peekaboo chord sequence such as\n[\"cmd+c\", \"Return\"], or use `key` plus `modifiers` for a single chord. The two input shapes are\nmutually exclusive. Background-only MCP/Agent delivery requires an explicit fresh exact non-dialog snapshot receipt.\nApp, PID, window-selector-only, targetless, competing-selector, and foreground forms are refused.\nUse case-insensitive macOS key names joined with '+' (cmd+shift+t). delete (also Delete, backspace or del) erases backward; forwarddelete/forward_delete erase forward. Use cmd/command for Command, not super.\nRaw chords cannot prove semantic intent or effect; observe the exact target after unverified delivery.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"count": {
+						"default": 1,
+						"description": "Optional repeat count for the complete chord sequence. Default: 1.",
+						"maximum": 100,
+						"minimum": 1,
+						"type": "integer"
+					},
+					"delay": {
+						"default": 100,
+						"description": "Optional delay between chord presses in milliseconds. Default: 100.",
+						"maximum": 10000,
+						"minimum": 0,
+						"type": "integer"
+					},
+					"hold": {
+						"default": 50,
+						"description": "Hold duration for synthesized chords in milliseconds (default: 50). Semantic AX/menu actions do not hold keys.",
+						"maximum": 10000,
+						"minimum": 0,
+						"type": "integer"
+					},
+					"key": {
+						"description": "Optional single primary key, used with modifiers instead of keys.",
+						"type": "string"
+					},
+					"keys": {
+						"description": "Optional chord sequence, e.g. ['cmd+c', 'Return']. Use case-insensitive macOS key names joined with '+' (cmd+shift+t). delete (also Delete, backspace or del) erases backward; forwarddelete/forward_delete erase forward. Use cmd/command for Command, not super.",
+						"items": {
+							"type": "string"
+						},
+						"minItems": 1,
+						"type": "array",
+						"uniqueItems": false
+					},
+					"modifiers": {
+						"description": "Optional modifiers for the single key form.",
+						"items": {
+							"enum": ["cmd", "command", "shift", "option", "alt", "ctrl", "control", "fn"],
+							"type": "string"
+						},
+						"type": "array",
+						"uniqueItems": false
+					},
+					"snapshot": {
+						"description": "Required fresh exact non-dialog snapshot for receipt-pinned background press.",
+						"type": "string"
+					}
+				},
+				"required": ["snapshot"],
+				"type": "object"
+			},
+			"name": "press"
+		},
+		{
+			"description": "Inspects the accessibility tree of the active UI and returns visible text, labels,\nbuttons, text fields, and control state. No screenshot is captured.\n\nUse this when you only need to read UI text or discover interactive elements and do not\nneed a visual screenshot. Inspection does not focus the target by default. For visual layout\nor when AX text is incomplete, use `see`. The CLI equivalent is `peekaboo see --tree --no-screenshot`.",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"app_target": {
+						"description": "Optional. Specifies the app/window to inspect via Accessibility.\nOmit, use an empty string, or use 'frontmost' for the current foreground application.\nUse 'AppName' (e.g., 'Safari') for a specific application.\nUse 'PID:PROCESS_ID' to target a specific process.\nUse 'AppName:WindowTitle' or 'PID:PROCESS_ID:WindowTitle' for a specific window title.\nScreen and menu bar targets require screenshots; use `see` for those.",
+						"type": "string"
+					},
+					"fresh": {
+						"default": false,
+						"description": "Optional. Require a fresh, uncached Accessibility tree; refuse if unavailable.",
+						"type": "boolean"
+					},
+					"include_elements": {
+						"default": false,
+						"description": "Optional. Also return the element table as structured data in `_meta.ui_elements`, using the same fields as\n`peekaboo see --json`, together with `_meta.snapshot_id`. Off by default because a window can expose hundreds\nof elements.",
+						"type": "boolean"
+					},
+					"max_children": {
+						"description": "Optional. Maximum AX children per node. Env fallback: PEEKABOO_AX_MAX_CHILDREN.\nIncrease this for flat Qt/Electron panels with many sibling controls.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"max_depth": {
+						"description": "Optional. Maximum AX traversal depth. Env fallback: PEEKABOO_AX_MAX_DEPTH.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"max_elements": {
+						"description": "Optional. Maximum AX elements to collect. Env fallback: PEEKABOO_AX_MAX_ELEMENTS.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"snapshot": {
+						"description": "Optional. Snapshot ID for UI automation tracking. A new snapshot is created when absent.",
+						"type": "string"
+					},
+					"web_focus": {
+						"default": false,
+						"description": "Optional. Allow an AXPress retry on sparse Chromium/Tauri web content.",
+						"type": "boolean"
+					},
+					"window_id": {
+						"description": "Optional. Exact CoreGraphics window ID. Requires an application or PID app_target; Peekaboo\nverifies the window belongs to that owner. Numeric app_target suffixes remain window indexes.",
+						"maximum": 4294967295,
+						"minimum": 1,
+						"type": "integer"
+					}
+				},
+				"type": "object"
+			},
+			"name": "inspect_ui"
+		},
+		{
+			"description": "Controls and inspects Chrome web pages through one existing exact DevTools connection under immutable\nbackground-only authority. Only source-audited routes that cannot enter Puppeteer page evaluation are\navailable. The pinned provider grants browser user activation to evaluation, so page discovery, snapshots,\nnavigation, element interaction, and arbitrary script evaluation require an explicitly foreground-authorized\nsession even when the page itself would stay behind the user's active app. Connect is likewise unavailable\nbecause Chrome may surface remote-debugging setup or approval UI. Another CLI or daemon connection is not\nreused.",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Background-safe action against an existing exact connection; connect is unavailable.",
+						"enum": ["status", "disconnect", "console", "network", "screenshot", "performance_trace", "call"],
+						"type": "string"
+					},
+					"auto_stop": {
+						"default": true,
+						"description": "Auto-stop trace after capture.",
+						"type": "boolean"
+					},
+					"channel": {
+						"description": "Chrome channel selected by explicit connect. Defaults to the running Chrome channel, then stable.\nOther actions never auto-connect in a background-only context.",
+						"enum": ["stable", "beta", "dev", "canary"],
+						"type": "string"
+					},
+					"format": {
+						"description": "Screenshot format.",
+						"enum": ["png", "jpeg", "webp"],
+						"type": "string"
+					},
+					"full_page": {
+						"default": false,
+						"description": "Capture a full-page screenshot.",
+						"type": "boolean"
+					},
+					"include_preserved": {
+						"default": false,
+						"description": "Include preserved console/network data from recent navigations.",
+						"type": "boolean"
+					},
+					"insight_name": {
+						"description": "Insight name from trace summary.",
+						"type": "string"
+					},
+					"insight_set_id": {
+						"description": "Insight set id from trace summary.",
+						"type": "string"
+					},
+					"mcp_args_json": {
+						"description": "Advanced: JSON object args for raw MCP call. Page-targeted tools require top-level page_id; nested pageId cannot select the page.",
+						"type": "string"
+					},
+					"mcp_tool": {
+						"description": "Audited raw tool whose complete path cannot grant browser user activation.",
+						"enum": [
+							"emulate",
+							"fill_form",
+							"get_network_request",
+							"lighthouse_audit",
+							"list_console_messages",
+							"performance_analyze_insight",
+							"performance_start_trace",
+							"performance_stop_trace",
+							"take_heapsnapshot",
+							"take_screenshot"
+						],
+						"type": "string"
+					},
+					"page_id": {
+						"description": "Opaque page capability from this session's latest list_pages or new_page response. Raw Chrome page\nintegers and references from another caller or expired connection are refused before dispatch.",
+						"type": "string"
+					},
+					"page_index": {
+						"description": "Zero-based page index for console/network listings.",
+						"type": "integer"
+					},
+					"page_size": {
+						"description": "Pagination size for console/network listings.",
+						"type": "integer"
+					},
+					"path": {
+						"description": "Absolute input file for upload_file; output path for snapshots, screenshots, or traces. Uploads accept current-user regular files up to 100 MiB.",
+						"type": "string"
+					},
+					"quality": {
+						"description": "Screenshot quality for jpeg/webp.",
+						"type": "integer"
+					},
+					"reload": {
+						"default": true,
+						"description": "Reload page when starting a trace.",
+						"type": "boolean"
+					},
+					"request_file_path": {
+						"description": "Path for saving a network request body.",
+						"type": "string"
+					},
+					"request_id": {
+						"description": "Positive request ID required for background network lookup. Omitting it makes the provider evaluate shared\nDevTools page state and is refused before dispatch.",
+						"minimum": 1,
+						"type": "integer"
+					},
+					"response_file_path": {
+						"description": "Path for saving a network response body.",
+						"type": "string"
+					},
+					"trace_action": {
+						"description": "Performance trace operation.",
+						"enum": ["start", "stop", "analyze"],
+						"type": "string"
+					},
+					"types": {
+						"description": "Console message types to include.",
+						"items": {
+							"type": "string"
+						},
+						"type": "array",
+						"uniqueItems": false
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "browser"
+		},
+		{
+			"description": "Select literal text or place a caret before/after it in an observed element without activating, focusing, typing, or using the clipboard. Requires a fresh exact-window snapshot and settable AXSelectedTextRange; refuses missing or ambiguous matches. Prefix/suffix are immediately adjacent context.",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"on": {
+						"description": "Observed element ID or unique query.",
+						"type": "string"
+					},
+					"prefix": {
+						"description": "Literal context immediately before the match.",
+						"type": "string"
+					},
+					"selection_type": {
+						"default": "text",
+						"description": "Select text or place a caret at either boundary.",
+						"enum": ["text", "cursor_before", "cursor_after"],
+						"type": "string"
+					},
+					"snapshot": {
+						"description": "Fresh exact-window snapshot ID; latest when omitted.",
+						"type": "string"
+					},
+					"suffix": {
+						"description": "Literal context immediately after the match.",
+						"type": "string"
+					},
+					"text": {
+						"description": "Nonempty literal text to match, without Unicode normalization.",
+						"type": "string"
+					}
+				},
+				"required": ["on", "text"],
+				"type": "object"
+			},
+			"name": "select_text"
+		},
+		{
+			"description": "Inspect and interact with system dialogs under immutable background-only authority. Available actions are\n`list`, targeted `click`, targeted `input`, and targeted non-forced `dismiss`. Every mutation requires an\nexplicit app, PID, or exact window target. File-dialog keyboard navigation, forced dismissal, targetless\ninput, and foreground fallback are unavailable; use a human-authorized foreground-capable session or CLI.\n\nExamples:\n- Click OK: { \"action\": \"click\", \"button\": \"OK\", \"app\": \"TextEdit\" }\n- Background input: { \"action\": \"input\", \"text\": \"hello\", \"field\": \"Name\", \"app\": \"TextEdit\" }\n- Dismiss: { \"action\": \"dismiss\", \"app\": \"TextEdit\" }",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Background-safe dialog action; file and global input are unavailable",
+						"enum": ["list", "click", "input", "dismiss"],
+						"type": "string"
+					},
+					"app": {
+						"description": "Target app name/bundle ID, or 'PID:<n>'.",
+						"type": "string"
+					},
+					"button": {
+						"description": "Button text to click. Use 'default' to click OKButton.",
+						"type": "string"
+					},
+					"clear": {
+						"default": false,
+						"description": "Clear existing text first.",
+						"type": "boolean"
+					},
+					"field": {
+						"description": "Field label/placeholder to target (for input action).",
+						"type": "string"
+					},
+					"field_index": {
+						"description": "Field index (0-based) to target (for input action).",
+						"type": "integer"
+					},
+					"pid": {
+						"description": "Target process ID (alternative to app).",
+						"type": "integer"
+					},
+					"text": {
+						"description": "Text to input (for input action).",
+						"type": "string"
+					},
+					"window_id": {
+						"description": "Window ID (preferred stable selector).",
+						"type": "integer"
+					},
+					"window_index": {
+						"description": "Window index (0-based); requires app/pid.",
+						"type": "integer"
+					},
+					"window_title": {
+						"description": "Window title (substring match).",
+						"type": "string"
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "dialog"
+		},
+		{
+			"description": "Inspect macOS Spaces or move an exact window without following it under immutable background-only\nauthority. Available actions are `list` and `move-window`. Space switching and `follow=true` change the\nuser's visible desktop and require a human-authorized foreground-capable Agent session or standalone CLI.\n\nExamples:\n- List spaces: { \"action\": \"list\" }\n- Move window to space 3: { \"action\": \"move-window\", \"app\": \"Safari\", \"to\": 3 }\n- Move window to current space: { \"action\": \"move-window\", \"app\": \"TextEdit\", \"to_current\": true }\nPeekaboo MCP 4.9.7",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Background-safe Space action; switching is unavailable",
+						"enum": ["list", "move-window"],
+						"type": "string"
+					},
+					"app": {
+						"description": "Application name for move-window action",
+						"type": "string"
+					},
+					"detailed": {
+						"default": false,
+						"description": "Show detailed space information (for list action)",
+						"type": "boolean"
+					},
+					"to": {
+						"description": "Space number to switch or move a window to",
+						"type": "integer"
+					},
+					"to_current": {
+						"default": false,
+						"description": "Move window to current space (for move-window action)",
+						"type": "boolean"
+					},
+					"window_id": {
+						"description": "Exact window ID for move-window action",
+						"type": "integer"
+					},
+					"window_index": {
+						"description": "Window index for multi-window apps",
+						"type": "integer"
+					},
+					"window_title": {
+						"description": "Window title to move",
+						"type": "string"
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "space"
+		},
+		{
+			"description": "Clicks on UI elements or coordinates.\nSupports element queries, specific IDs from `see` or `inspect_ui`, or raw coordinates.\nChoose exactly one of on, query, or coords, and at most one of double, triple, right, or middle.\nBackground delivery is the default. Background coordinates require a nonempty snapshot or coordinate_reference\nfrom a fresh exact-window `see`; pid alone is never a safe coordinate target. Set `foreground` to true only for\nintentional shared-pointer input, which may omit the capture reference.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"background": {
+						"default": true,
+						"description": "Deprecated inverse alias. false explicitly selects foreground shared-pointer delivery.",
+						"type": "boolean"
+					},
+					"coordinate_reference": {
+						"description": "Nonempty snapshot reference_id returned by a fresh exact-window see. Provide this or snapshot for\nevery background coordinate click; required for image_pixels and normalized coords.",
+						"minLength": 1,
+						"type": "string"
+					},
+					"coordinate_space": {
+						"description": "Optional. Coordinate basis for coords. image_pixels and normalized require coordinate_reference.",
+						"enum": ["global_display_points", "image_pixels", "normalized"],
+						"type": "string"
+					},
+					"coords": {
+						"description": "Coordinates in 'x,y' format, exclusive with on and query. Background delivery requires a nonempty\nsnapshot or coordinate_reference from a fresh exact-window see. Without a reference, set\nforeground=true for intentional shared-pointer global logical points.",
+						"minLength": 1,
+						"type": "string"
+					},
+					"double": {
+						"default": false,
+						"description": "Optional. Double-click instead of single click.",
+						"type": "boolean"
+					},
+					"foreground": {
+						"default": false,
+						"description": "Use foreground/shared-pointer delivery. Background delivery is the default.",
+						"type": "boolean"
+					},
+					"middle": {
+						"default": false,
+						"description": "Optional. Middle-click with the center mouse button.",
+						"type": "boolean"
+					},
+					"modifiers": {
+						"description": "Foreground-only modifier keys. Requires foreground=true and a fresh exact snapshot.",
+						"items": {
+							"enum": ["cmd", "shift", "option"],
+							"type": "string"
+						},
+						"type": "array",
+						"uniqueItems": false
+					},
+					"on": {
+						"description": "Opaque element ID copied exactly from current `see` or `inspect_ui` output. Exclusive with query\nand coords; may use the latest UI snapshot.",
+						"minLength": 1,
+						"type": "string"
+					},
+					"pid": {
+						"description": "Optional process consistency check. It never replaces the exact-window capture receipt.",
+						"maximum": 2147483647,
+						"minimum": 1,
+						"type": "integer"
+					},
+					"query": {
+						"description": "Element text or query to click. Exclusive with on and coords; may use the latest UI snapshot.",
+						"minLength": 1,
+						"type": "string"
+					},
+					"right": {
+						"default": false,
+						"description": "Optional. Right-click (secondary click) instead of left-click.",
+						"type": "boolean"
+					},
+					"snapshot": {
+						"description": "Snapshot ID from `see` or `inspect_ui`. Element/query clicks may omit it to use the latest snapshot.\nBackground coordinate clicks must provide a nonempty ID from a fresh exact-window see.",
+						"minLength": 1,
+						"type": "string"
+					},
+					"triple": {
+						"default": false,
+						"description": "Optional. Triple-click instead of single click.",
+						"type": "boolean"
+					},
+					"wait_for": {
+						"default": 5000,
+						"description": "Optional. Maximum milliseconds to re-observe the selected exact window until a query matches.\nDefault: 5000. Maximum: 60000. A missing snapshot-local on id is reported immediately and is not\nremapped onto a later observation. 0 checks the current snapshot once.",
+						"maximum": 60000,
+						"minimum": 0,
+						"type": "number"
+					}
+				},
+				"type": "object"
+			},
+			"name": "click"
+		},
+		{
+			"description": "Types text into UI elements, a targeted app process, or one exact background window.\nSupports human typing (--wpm) or fixed-delay (--delay) pacing. Use `press` for key presses and chords.\nDefault background-only MCP/Agent delivery requires an explicit fresh exact non-dialog snapshot receipt.\nAn optional element ID must come from that snapshot. App/PID/window-only, implicit-latest, competing\nselector, targetless, and foreground forms are refused before dispatch. Use clear=true with literal text\nwhen replacement is intended and a confirmed typing result is required; other event injection remains\nhonestly unverifiable and requires fresh observation.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6\nand anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"clear": {
+						"default": false,
+						"description": "Optional. Clear before typing. Clear plus literal text can be confirmed by private non-secure AX value readback; clear=false typing remains unverifiable.",
+						"type": "boolean"
+					},
+					"coordinate_reference": {
+						"description": "Optional capture reference from see. When supplied it must equal snapshot.",
+						"type": "string"
+					},
+					"coordinate_space": {
+						"description": "Coordinate basis for coords. Defaults to global_display_points.",
+						"enum": ["global_display_points", "image_pixels", "normalized"],
+						"type": "string"
+					},
+					"coords": {
+						"description": "Optional exact-window focus point in x,y form. It is mutually exclusive with on and requires a fresh\nscreenshot snapshot. Peekaboo performs focus-only Accessibility targeting at this point, never clicks,\npresses, or selects the hit element, and types under one exact target lane.",
+						"type": "string"
+					},
+					"delay": {
+						"default": 0,
+						"description": "Optional. Delay between keystrokes in milliseconds (linear profile). Default: 0.",
+						"type": "integer"
+					},
+					"on": {
+						"description": "Optional element ID from the required explicit snapshot.",
+						"type": "string"
+					},
+					"profile": {
+						"description": "Optional. Typing profile: linear (default) or human.",
+						"type": "string"
+					},
+					"snapshot": {
+						"description": "Required fresh exact non-dialog snapshot ID from `see` or `inspect_ui`.",
+						"type": "string"
+					},
+					"text": {
+						"description": "The text to type.",
+						"type": "string"
+					},
+					"wpm": {
+						"description": "Optional. Human typing speed (80-220 WPM). Overrides delay when set.",
+						"type": "integer"
+					}
+				},
+				"required": ["snapshot"],
+				"type": "object"
+			},
+			"name": "type"
+		},
+		{
+			"description": "Check macOS system permissions required for automation.\nVerifies Screen Recording and Accessibility as required permissions and reports\nEvent Synthesizing as an action-specific input limitation when it is unavailable.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {},
+				"type": "object"
+			},
+			"name": "permissions"
+		},
+		{
+			"description": "Perform drag and drop operations between UI elements or coordinates.\nSupports element queries, specific IDs, or raw coordinates for both start and end points.\nBackground drag requires an explicit fresh snapshot and a bounded linear path inside its exact window.\nCoordinates are global logical points. Cross-window drops and shared cursor input require foreground=true.\nPeekaboo MCP 4.9.7 using openai/gpt-5.6, anthropic/claude-opus-5",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"button": {
+						"default": "left",
+						"description": "Optional. Mouse button to hold during drag.",
+						"enum": ["left", "right"],
+						"type": "string"
+					},
+					"duration": {
+						"default": 500,
+						"description": "Optional. Duration in milliseconds (default: 500)",
+						"type": "integer"
+					},
+					"foreground": {
+						"description": "Optional. Confirm foreground use of the shared physical cursor. Default: false.",
+						"type": "boolean"
+					},
+					"from": {
+						"description": "Optional. Start element ID or query",
+						"type": "string"
+					},
+					"from_coords": {
+						"description": "Optional. Start coordinates in format 'x,y' (e.g., '100,200')",
+						"type": "string"
+					},
+					"modifiers": {
+						"description": "Optional. Comma-separated modifiers (cmd, shift, alt, ctrl)",
+						"type": "string"
+					},
+					"profile": {
+						"default": "linear",
+						"description": "Optional. Movement profile. Use 'linear' (default) or 'human'.",
+						"enum": ["linear", "human"],
+						"type": "string"
+					},
+					"snapshot": {
+						"description": "Required in background mode: an explicit fresh exact-window snapshot from `see` or `inspect_ui`. Foreground mode may use the latest snapshot.",
+						"type": "string"
+					},
+					"steps": {
+						"default": 10,
+						"description": "Optional. Number of intermediate steps (default: 10)",
+						"type": "integer"
+					},
+					"to": {
+						"description": "Optional. End element ID or query",
+						"type": "string"
+					},
+					"to_app": {
+						"description": "Optional. Target application name when dragging between apps",
+						"type": "string"
+					},
+					"to_coords": {
+						"description": "Optional. End coordinates in format 'x,y' (e.g., '300,400')",
+						"type": "string"
+					}
+				},
+				"type": "object"
+			},
+			"name": "drag"
+		},
+		{
+			"description": "Control applications under immutable background-only authority. Available actions are `list`, `quit`,\n`hide`, and `launch`; background `launch` is only an exact already-running readiness probe and never cold\nstarts an app. Focus, switch, open, relaunch, unhide, new-instance, and `foreground=true` are unavailable\nhere because they can activate shared desktop UI. A human must start a foreground-capable Agent session or\nuse the standalone CLI with explicit foreground consent for those operations.\n\nProcess-generation chaining must use `target_identity.process_start_identity_decimal`; the numeric\n`process_start_identity` field remains compatibility-only and can lose precision above 2^53.\n\nAlways include the `action` field in your JSON payload. Examples:\n- { \"action\": \"list\" }\n- Already-running readiness probe: { \"action\": \"launch\", \"name\": \"Finder\" }\n- { \"action\": \"quit\", \"name\": \"Slack\", \"force\": false }",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Background-only action; foreground lifecycle, focus, and switch actions are unavailable",
+						"enum": ["launch", "quit", "hide", "list"],
+						"type": "string"
+					},
+					"all": {
+						"default": false,
+						"description": "Quit all applications",
+						"type": "boolean"
+					},
+					"bundleId": {
+						"description": "Bundle identifier when launching",
+						"type": "string"
+					},
+					"except": {
+						"description": "Comma-separated list of apps to exclude when quitting all",
+						"type": "string"
+					},
+					"force": {
+						"default": false,
+						"description": "Force quit application",
+						"type": "boolean"
+					},
+					"name": {
+						"description": "App name/bundle ID/PID (e.g., 'Safari', 'com.apple.Safari', 'PID:663')",
+						"type": "string"
+					},
+					"waitForWindow": {
+						"default": false,
+						"description": "Wait until the launched app exposes an exact WindowServer window",
+						"type": "boolean"
+					},
+					"waitUntilReady": {
+						"default": false,
+						"description": "Wait until LaunchServices reports startup complete",
+						"type": "boolean"
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "app"
+		},
+		{
+			"description": "Inspect or click application menu items under immutable background-only authority. Available actions are\n`list` and `click`; neither activates the application. Click requires an exact app name, bundle ID, or PID,\nwhile read-only list retains fuzzy name matching. Foreground menu expansion is unavailable in this session.\n\nExamples:\n- List Chrome menus: { \"action\": \"list\", \"app\": \"Google Chrome\" }\n- Save document: { \"action\": \"click\", \"app\": \"TextEdit\", \"path\": \"File > Save\" }\nPeekaboo MCP 4.9.7",
+			"inputSchema": {
+				"additionalProperties": false,
+				"properties": {
+					"action": {
+						"description": "Use 'list' to discover menus or 'click' to interact with menu items.",
+						"enum": ["list", "click"],
+						"type": "string"
+					},
+					"app": {
+						"description": "Target application name, bundle ID, or process ID. Click and foreground list require an exact selector; background list permits fuzzy names.",
+						"type": "string"
+					},
+					"item": {
+						"description": "Simple menu item to click (for non-nested items)",
+						"type": "string"
+					},
+					"path": {
+						"description": "Menu path for nested items (e.g., 'File > Save As...' or 'Edit > Copy')",
+						"type": "string"
+					}
+				},
+				"required": ["action"],
+				"type": "object"
+			},
+			"name": "menu"
+		}
+	]
+}
