@@ -25,7 +25,8 @@ let layout: Layout;
 beforeEach(() => {
 	root = realpathSync(mkdtempSync(join(tmpdir(), "apple-cua-uninstall-")));
 	home = join(root, "home");
-	mkdirSync(join(root, "checkout"), { recursive: true });
+	mkdirSync(join(root, "checkout/scripts"), { recursive: true });
+	writeFileSync(join(root, "checkout/scripts/setup.sh"), "");
 	mkdirSync(home, { recursive: true });
 	layout = resolveLayout({ HOME: home }, join(root, "checkout"));
 });

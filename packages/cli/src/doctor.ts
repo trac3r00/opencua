@@ -901,7 +901,7 @@ export function gatherDoctorFacts(layout: Layout = resolveLayout(), env: Environ
 			present,
 			signature,
 			bundledNode,
-			inputs: present ? readHelperInputs(layout) : undefined,
+			inputs: present && layout.mode === "checkout" ? readHelperInputs(layout) : undefined,
 		},
 		selfCheck,
 		stop: new StopSwitch().status(),

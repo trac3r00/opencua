@@ -63,6 +63,7 @@ import {
 	sameSettings,
 	saveSettings,
 } from "./settings.js";
+import { type SetupOptions, runSetup } from "./setup.js";
 import {
 	executeUninstall,
 	formatPlan,
@@ -78,6 +79,7 @@ type Say = (text: string) => void;
 
 export interface LifecycleCommandOptions {
 	readonly isJsonOutput: () => boolean;
+	readonly runSetup?: (options: SetupOptions) => number;
 }
 
 const print: Say = (text) => {
@@ -882,10 +884,14 @@ async function runDoctorCommand(options: DoctorCommandOptions, json: boolean): P
 		},
 		{
 			gather: () => gatherDoctorFacts(layout),
-			rebuildNative: () => spawnSync("/bin/bash", [join(layout.nativeDir, "build.sh")], { stdio }).status === 0,
+			rebuildNative: () =>
+				layout.mode === "checkout" &&
+				spawnSync("/bin/bash", [join(layout.nativeDir, "build.sh")], { stdio }).status === 0,
 			rebuildHelper: () =>
-				spawnSync("/bin/bash", [layout.setupScript, "--yes", "--rebuild-helper", "--no-doctor"], { stdio })
-					.status === 0,
+				layout.mode === "installed"
+					? runSetup(layout, { yes: true, doctor: false }) === 0
+					: spawnSync("/bin/bash", [layout.setupScript, "--yes", "--rebuild-helper", "--no-doctor"], { stdio })
+							.status === 0,
 			reapplyRegistrations: () => reapplyRegistrations(layout, say),
 			resume: () => {
 				new StopSwitch().resume();
@@ -913,6 +919,12 @@ async function runDoctorCommand(options: DoctorCommandOptions, json: boolean): P
 
 function runUpdateCommand(): number {
 	const layout = resolveLayout();
+	if (layout.mode === "installed") {
+		print(
+			"Installed mode: update with npm i -g @apple-cua/cli@latest (or brew upgrade apple-cua), then apple-cua setup --yes.",
+		);
+		return 1;
+	}
 	return runUpdate(layout, {
 		git: gitIn(layout.checkout, process.env),
 		marker: readInstallMarker(layout.installMarkerPath),
@@ -933,6 +945,12 @@ interface UninstallCommandOptions {
 
 async function runUninstallCommand(options: UninstallCommandOptions): Promise<number> {
 	const layout = resolveLayout();
+	if (layout.mode === "installed") {
+		print(
+			"Installed mode: uninstall is not supported by this command. Remove the package with npm uninstall -g @apple-cua/cli (or brew uninstall apple-cua); keep APPLE_CUA_HOME until client registrations have been removed with apple-cua config --unregister.",
+		);
+		return 1;
+	}
 	const show = (path: string) => displayPath(path, layout.home);
 	const plan = planUninstall(gatherUninstallFacts(layout, process.env), { purge: options.purge === true });
 	print(formatPlan(plan));
@@ -993,6 +1011,14 @@ async function runUninstallCommand(options: UninstallCommandOptions): Promise<nu
 // --- commands ------------------------------------------------------------------------------------------------------
 
 export function registerLifecycleCommands(program: Command, options: LifecycleCommandOptions): void {
+	program
+		.command("setup")
+		.description("Set up this installation's standalone runtime, signed helper and saved client settings")
+		.option("-y, --yes", "accept the standalone Node download and skip questions")
+		.option("--no-doctor", "skip the closing doctor run")
+		.action((setupOptions: SetupOptions) => {
+			process.exitCode = options.runSetup?.(setupOptions) ?? runSetup(resolveLayout(), setupOptions);
+		});
 	program
 		.command("config")
 		.description(

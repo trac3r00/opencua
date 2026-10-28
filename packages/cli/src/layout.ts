@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ export type Environment = Readonly<Record<string, string | undefined>>;
 
 /** Where one installation's pieces live, all derived from the checkout this CLI runs from and the environment. */
 export interface Layout {
+	readonly mode: "checkout" | "installed";
 	/** The apple-cua checkout, canonical (symlinks resolved). */
 	readonly checkout: string;
 	readonly nativeDir: string;
@@ -78,18 +80,35 @@ export function homeDirectory(env: Environment = process.env): string {
 	return nonEmpty(env["HOME"]) ?? homedir();
 }
 
-export function resolveLayout(env: Environment = process.env, checkout: string = defaultCheckout()): Layout {
+export function resolveLayout(
+	env: Environment = process.env,
+	checkout: string = defaultCheckout(),
+	resolvePackage: (name: string) => string = (name) =>
+		name === "@apple-cua/core"
+			? fileURLToPath(import.meta.resolve(name))
+			: createRequire(import.meta.url).resolve(name),
+): Layout {
 	const home = homeDirectory(env);
 	const appleCuaHome = resolve(nonEmpty(env["APPLE_CUA_HOME"]) ?? join(home, ".apple-cua"));
 	const binDir = resolve(nonEmpty(env["APPLE_CUA_BIN_DIR"]) ?? join(home, ".local/bin"));
-	const helperApp = join(checkout, "packages/mcp/dist/apple-cua-mcp.app");
+	const installed = !existsSync(join(checkout, "scripts/setup.sh"));
+	const server = installed
+		? resolvePackage("@apple-cua/mcp/dist/server.js")
+		: join(checkout, "packages/mcp/dist/server.js");
+	const mcp = dirname(dirname(server));
+	const helperApp = installed ? join(appleCuaHome, "helper/apple-cua-mcp.app") : join(mcp, "dist/apple-cua-mcp.app");
 	return {
+		mode: installed ? "installed" : "checkout",
 		checkout,
-		nativeDir: join(checkout, "packages/core/native"),
+		nativeDir: installed
+			? join(dirname(dirname(resolvePackage("@apple-cua/core"))), "native")
+			: join(checkout, "packages/core/native"),
 		helperApp,
 		helperExecutable: join(helperApp, "Contents/MacOS/apple-cua-mcp"),
-		server: join(checkout, "packages/mcp/dist/server.js"),
-		cli: join(checkout, "packages/cli/dist/cli.js"),
+		server,
+		cli: installed
+			? join(dirname(fileURLToPath(import.meta.url)), "cli.js")
+			: join(checkout, "packages/cli/dist/cli.js"),
 		setupScript: join(checkout, "scripts/setup.sh"),
 		helperBuildScript: join(checkout, "scripts/build-tcc-helper.sh"),
 		home,
@@ -99,8 +118,8 @@ export function resolveLayout(env: Environment = process.env, checkout: string =
 		binDir,
 		launcherPath: join(binDir, "apple-cua"),
 		bundleDir: join(appleCuaHome, "bundle"),
-		skillSource: join(checkout, "skills/apple-cua"),
-		serverPackage: join(checkout, "packages/mcp/package.json"),
+		skillSource: installed ? join(mcp, "skills/apple-cua") : join(checkout, "skills/apple-cua"),
+		serverPackage: join(mcp, "package.json"),
 	};
 }
 
