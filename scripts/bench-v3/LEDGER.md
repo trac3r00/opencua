@@ -21,6 +21,11 @@ both values (or null with explicit read errors), and retain driver errors.
 Successful arithmetic does not imply successful copying. The timed interval
 includes driver calls and both final oracle reads, not fixture setup/cleanup.
 Record `oracle_amendment: "A39"` and the display-probe source hash.
+The Apple route keeps its existing direct `node packages/mcp/dist/server.js`
+launch against this worktree's built server. Record `apple_launch` with the
+command/arguments, resolved Node executable path and SHA-256, and server path
+and SHA-256 in the cohort JSON. The known worktree helper-signing failure is
+an environment qualification, not a gate on this existing direct launch.
 
 The Calculator runner no longer imports a browser runner just to summarize
 its disturbance trace; it applies the same trace predicates locally. No

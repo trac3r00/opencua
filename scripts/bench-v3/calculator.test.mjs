@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import * as runner from "./calculator-run.mjs";
 import {
 	calculatorOutcome,
@@ -10,6 +13,22 @@ import {
 	subscribedEvent,
 } from "./calculator-run.mjs";
 import { Driver } from "./drivers.mjs";
+
+test("#given a direct Node launch #when recording provenance #then hashes the actual executable and server bytes", () => {
+	const server = fileURLToPath(import.meta.url);
+	const spec = { command: process.execPath, args: [server] };
+	const provenance = runner.calculatorLaunchProvenance(spec);
+	assert.equal(provenance.mode, "direct-node");
+	assert.equal(provenance.command, spec.command);
+	assert.deepEqual(provenance.args, spec.args);
+	assert.equal(provenance.executable_path, process.execPath);
+	assert.equal(
+		provenance.executable_sha256,
+		createHash("sha256").update(readFileSync(process.execPath)).digest("hex"),
+	);
+	assert.equal(provenance.server_path, server);
+	assert.equal(provenance.server_sha256, createHash("sha256").update(readFileSync(server)).digest("hex"));
+});
 
 test("#given process launch without a ready window #when transitioning #then cannot start driver timing", async () => {
 	const windowReady = Promise.reject(new Error("window unavailable"));

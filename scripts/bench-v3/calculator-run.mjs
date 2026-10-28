@@ -31,6 +31,23 @@ export function calculatorOutcome(display, clipboard, callsSucceeded, error = nu
 	};
 }
 
+export function calculatorLaunchProvenance(spec) {
+	const executable = execFileSync(spec.command, ["-p", "process.execPath"], {
+		encoding: "utf8",
+		timeout: 10000,
+	}).trim();
+	const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+	return {
+		mode: "direct-node",
+		command: spec.command,
+		args: spec.args,
+		executable_path: executable,
+		executable_sha256: sha256(executable),
+		server_path: spec.args[0],
+		server_sha256: sha256(spec.args[0]),
+	};
+}
+
 export function calculatorOwnership(existingPids, launchedPid, eventPid = launchedPid) {
 	return {
 		refuseStart: existingPids.length > 0,
@@ -276,6 +293,7 @@ async function main() {
 					args: [`${root}/packages/mcp/dist/server.js`],
 					env: { OPENCUA_ALLOWED_BUNDLE_IDS: "com.apple.calculator", OPENCUA_DELIVERY: "background" },
 				};
+				report.apple_launch = calculatorLaunchProvenance(spec);
 			} else {
 				spec = { command: `${homedir()}/.local/bin/cua-driver`, args: ["mcp"] };
 			}
