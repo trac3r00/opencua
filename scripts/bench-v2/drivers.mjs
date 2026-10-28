@@ -41,7 +41,10 @@ export class Driver {
 		// "peekaboo" drives Peekaboo's MCP server: `see` snapshots of the exact window, then snapshot-bound input.
 		this.peekaboo = kind === "peekaboo";
 		this.toolNames = toolNames;
-		/** Peekaboo snapshot per app; consumed by each mutation, since its docs ask to observe again before the next. */
+		/**
+		 * Peekaboo snapshot per app as `{ id, window }`, bound to the window it observed and consumed by each
+		 * mutation (menu included), since its docs ask to observe the target again before the next one.
+		 */
 		this.snapshots = new Map();
 		/** Peekaboo inputs it dispatched but could not confirm (`dispatched_unverified`); the oracle decides. */
 		this.unverified_dispatches = 0;
@@ -146,7 +149,7 @@ export class Driver {
 			const snapshot = result?._meta?.snapshot_id ?? text(result).match(/\bps1_[0-9a-f]{32}\b/)?.[0];
 			if (typeof snapshot !== "string" || snapshot === "")
 				throw new Error("driver-error: peekaboo see returned no snapshot_id");
-			this.snapshots.set(app, snapshot);
+			this.snapshots.set(app, { id: snapshot, window });
 			return result;
 		}
 		if (this.apple) {
@@ -175,10 +178,13 @@ export class Driver {
 		const { app, title } = step;
 		if (this.peekaboo) {
 			const tool = PEEKABOO_TOOLS[step.op];
-			if (step.op === "menu") return this.call(tool, { action: "click", app, ...peekabooArgs });
-			if (!this.snapshots.has(app)) await this.observe(app, title);
-			const snapshot = this.snapshots.get(app);
+			const held = this.snapshots.get(app);
+			// A snapshot authorizes input only to the window it observed: another title means observing that one.
+			if (held === undefined || (title && held.window.title !== title)) await this.observe(app, title);
+			const snapshot = this.snapshots.get(app).id;
 			this.snapshots.delete(app);
+			// `menu` takes no snapshot, but it is a mutation too: observe before it and consume the observation.
+			if (step.op === "menu") return this.call(tool, { action: "click", app, ...peekabooArgs });
 			return this.call(tool, { snapshot, ...peekabooArgs });
 		}
 		const name = {
@@ -246,7 +252,21 @@ export class Driver {
 			case "scroll":
 				// Only the Peekaboo mapping defines scroll; the other drivers keep rejecting it as before.
 				if (!this.peekaboo) throw new Error(`unknown-step: ${step.op}`);
-				return this.act(step, {}, {}, { direction: step.direction ?? "down", amount: step.amount ?? 3 });
+				{
+					// Background scroll needs an element `on` from the snapshot it names: the labelled element when the
+					// step names one, else the window's first scroll area.
+					const elements = (await this.observe(app, title))?._meta?.ui_elements ?? [];
+					const target = step.value
+						? elements.find((e) => String(e.label ?? e.title ?? e.value ?? "").includes(step.value))
+						: elements.find((e) => e.ax_role === "AXScrollArea" || /scroll/i.test(String(e.role ?? "")));
+					if (!target) throw new Error(`element-missing: ${step.value ?? "scroll area"}`);
+					return this.act(
+						step,
+						{},
+						{},
+						{ on: String(target.id), direction: step.direction, amount: step.amount ?? 3 },
+					);
+				}
 			case "key":
 				return this.act(
 					step,

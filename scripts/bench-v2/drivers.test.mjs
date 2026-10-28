@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { errorClass } from "./attempt.mjs";
 import { Driver, PEEKABOO_TOOLS, peekabooWindows } from "./drivers.mjs";
+import { validateFixture } from "./fixture.mjs";
 
 test("#given a Cua multi-window refusal #when pressing a key #then it retries foreground on the exact window", async () => {
 	const calls = [];
@@ -106,7 +107,10 @@ test("#given a Peekaboo window list #when targeting by app and title #then the e
 		{ name: "window", args: { action: "list", app: "TextEdit" } },
 		{ name: "see", args: { app_target: "TextEdit", window_id: 12, include_elements: true } },
 	]);
-	assert.equal(driver.snapshots.get("TextEdit"), SNAPSHOT);
+	assert.deepEqual(driver.snapshots.get("TextEdit"), {
+		id: SNAPSHOT,
+		window: { title: "document.txt", window_id: 12, on_screen: true },
+	});
 });
 
 test("#given no title #when targeting a Peekaboo window #then the first titled on-screen window is chosen", async () => {
@@ -126,7 +130,10 @@ test("#given a title Peekaboo does not list #when observing #then the attempt fa
 
 test("#given each harness step kind #when driving Peekaboo #then args map to see-bound type, press, click, scroll and menu", async () => {
 	const calls = [];
-	const elements = [{ id: "elem_7", role: "button", label: "Bold", is_actionable: true }];
+	const elements = [
+		{ id: "elem_7", role: "button", label: "Bold", is_actionable: true },
+		{ id: "scroll_3", role: "scrollArea", ax_role: "AXScrollArea" },
+	];
 	const driver = peekabooDriver(peekabooClient(calls, { elements }));
 	const app = "TextEdit";
 	const title = "document.txt";
@@ -148,7 +155,9 @@ test("#given each harness step kind #when driving Peekaboo #then args map to see
 			["see", undefined],
 			["click", { snapshot: SNAPSHOT, on: "elem_7" }],
 			["see", undefined],
-			["scroll", { snapshot: SNAPSHOT, direction: "up", amount: 2 }],
+			["scroll", { snapshot: SNAPSHOT, on: "scroll_3", direction: "up", amount: 2 }],
+			// Menu is a mutation too: it observes first and consumes that observation.
+			["see", undefined],
 			["menu", { action: "click", app, path: "Format > Font > Bold" }],
 		],
 	);
@@ -259,4 +268,84 @@ test("#given an unconfirmed answer that dispatched nothing #when stepping #then 
 test("#given dispatched_unverified metadata from a non-Peekaboo server #when calling #then it stays a tool error", async () => {
 	const driver = new Driver("cua", { callTool: async () => unverifiedAnswer(unverifiedMeta) });
 	await assert.rejects(driver.call("press_key", {}), /tool-error/);
+});
+
+/** Two TextEdit windows and a distinct snapshot per `see`, so tests can tell which observation an input carries. */
+const twoWindowClient = (calls, { press } = {}) => {
+	let sequence = 0;
+	return {
+		async callTool(name, args) {
+			calls.push({ name, args });
+			if (name === "window")
+				return {
+					content: [{ type: "text", text: '1. "a.txt" [ID: 1, ON-SCREEN]\n2. "b.txt" [ID: 2, ON-SCREEN]' }],
+				};
+			if (name === "see")
+				return {
+					content: [],
+					_meta: {
+						snapshot_id: `ps1_${String(++sequence).padStart(32, "0")}`,
+						ui_elements: [
+							{ id: `scroll_${sequence}`, role: "scrollArea", ax_role: "AXScrollArea" },
+							{ id: `row_${sequence}`, role: "row", label: "Second row" },
+						],
+					},
+				};
+			if (name === "press" && press) return press;
+			return { content: [] };
+		},
+	};
+};
+const snapshotOf = (calls, index) =>
+	calls.filter((call) => call.name === "see")[index] && `ps1_${String(index + 1).padStart(32, "0")}`;
+
+test("#given a scroll scenario #when the harness validates it #then scroll is an accepted step with a checked direction", () => {
+	const spec = (step) => ({ id: "qa-scroll", fixture: "text", steps: [step], oracle: { kind: "file", expected: "" } });
+	assert.equal(validateFixture(spec({ op: "scroll", app: "TextEdit", direction: "down", amount: 3 })), true);
+	assert.throws(() => validateFixture(spec({ op: "scroll", app: "TextEdit", direction: "sideways" })), /invalid step/);
+	assert.throws(
+		() => validateFixture(spec({ op: "scroll", app: "TextEdit", direction: "up", amount: 0 })),
+		/invalid step/,
+	);
+});
+
+test("#given a scroll step #when Peekaboo scrolls #then it targets an element of a fresh snapshot", async () => {
+	const calls = [];
+	const driver = peekabooDriver(twoWindowClient(calls));
+	await driver.step({ op: "scroll", app: "TextEdit", title: "a.txt", direction: "down", amount: 2 });
+	await driver.step({ op: "scroll", app: "TextEdit", title: "a.txt", value: "Second row", direction: "up" });
+	const scrolls = calls.filter((call) => call.name === "scroll").map((call) => call.args);
+	// The pinned contract needs an element `on` (or exact coords) for background scroll, from the snapshot it names.
+	assert.deepEqual(scrolls, [
+		{ snapshot: snapshotOf(calls, 0), on: "scroll_1", direction: "down", amount: 2 },
+		{ snapshot: snapshotOf(calls, 1), on: "row_2", direction: "up", amount: 3 },
+	]);
+});
+
+test("#given an unverified press #when a menu step follows #then Peekaboo observes again before the menu", async () => {
+	// Given: press answers dispatched_unverified, as in textedit-rich-bold's key-then-menu transition.
+	const calls = [];
+	const driver = peekabooDriver(twoWindowClient(calls, { press: unverifiedAnswer(unverifiedMeta) }));
+	// When: a key step, a menu step, then a type step run.
+	await driver.step({ op: "key", app: "TextEdit", title: "a.txt", value: "a", apple: "cmd+a" });
+	await driver.step({ op: "menu", app: "TextEdit", title: "a.txt", path: ["Format", "Font", "Bold"] });
+	await driver.step({ op: "type", app: "TextEdit", title: "a.txt", value: "after menu" });
+	// Then: a see precedes every mutation, and the menu consumed its observation.
+	assert.deepEqual(
+		calls.map((call) => call.name),
+		["window", "see", "press", "see", "menu", "see", "type"],
+	);
+	assert.equal(calls.at(-1).args.snapshot, snapshotOf(calls, 2));
+});
+
+test("#given an observation of one window #when the next step targets another title #then that window is observed", async () => {
+	const calls = [];
+	const driver = peekabooDriver(twoWindowClient(calls));
+	await driver.step({ op: "observe", app: "TextEdit", title: "a.txt" });
+	await driver.step({ op: "type", app: "TextEdit", title: "b.txt", value: "for B" });
+	const sees = calls.filter((call) => call.name === "see").map((call) => call.args.window_id);
+	assert.deepEqual(sees, [1, 2]);
+	// The type carries window 2's snapshot, never window 1's.
+	assert.equal(calls.at(-1).name, "type");
+	assert.equal(calls.at(-1).args.snapshot, snapshotOf(calls, 1));
 });
