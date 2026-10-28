@@ -17,14 +17,14 @@
 		"typecheck:tests": "tsgo --noEmit -p tsconfig.test.json",
 		"lint": "biome check .",
 		"lint:fix": "biome check . --write",
-		"test": "scripts/bun-test.sh packages scripts/bench-v2 scripts/preflight.test.mjs scripts/test-support",
+		"test": "scripts/bun-test.sh packages scripts/bench-v2 scripts/scenarios scripts/preflight.test.mjs scripts/test-support",
 		"test:watch": "bun test --watch",
 		"test:browser:bun": "bun test --isolate packages/browser",
 		"smoke:browser:bun": "bun scripts/bun-browser-smoke.mjs",
 		"check": "biome check . && pnpm -r typecheck && pnpm typecheck:tests && pnpm test",
 		"setup": "./scripts/setup.sh",
 		"doctor": "node packages/cli/dist/cli.js doctor",
-		"test:scripts": "bun test --isolate scripts/bench-v2 scripts/preflight.test.mjs scripts/test-support",
+		"test:scripts": "bun test --isolate scripts/bench-v2 scripts/scenarios scripts/preflight.test.mjs scripts/test-support",
 		"test:bench-v3": "bun test --isolate scripts/bench-v3"
 	},
 	"devDependencies": {
