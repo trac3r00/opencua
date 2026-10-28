@@ -28,8 +28,8 @@ There are no benchmark results in this bring-up task.
    The shared GUI-only guard still applies, including to `run_script`.
 5. **Machine.** This is an Apple M1 Pro Mac, not the upstream Lume VM on
    M3 Ultra. Local macOS is 26.6.2 (25G83), versus upstream 26.5.2 (25F84).
-   No screen dimensions have been measured during the desktop gate; the
-   upstream 1920 x 1080 expectation remains unverified.
+   After DESKTOP GO, apple-cua reported two 2560 x 1440 logical displays;
+   upstream used 1920 x 1080. No display setting was changed.
 6. **Claude version.** Local Claude Code is 2.1.310, versus upstream
    2.1.289. The runner's fixed `/opt/homebrew/bin/claude` path is absent
    initially; `~/.local/bin/claude` supplies version inspection/dry-run only.
@@ -55,8 +55,8 @@ There are no benchmark results in this bring-up task.
    preflight's real-capture rows can certify capture.
 10. **Evidence, not trials.** Dry-run, pytest, malformed-pin checks and
     setup are bring-up evidence. Offline preflight and missing-server
-    failure probes are deferred until DESKTOP GO. No result rows, success
-    rates, cost estimates or performance comparisons may be inferred.
+    failure probes require DESKTOP GO and are also bring-up evidence.
+    No result rows, success rates, cost estimates or performance comparisons may be inferred.
     Cost reporting under subscription login remains for the later pilot.
 11. **Evaluator isolation.** No separate evaluator OS user is configured
     in this bring-up. Upstream reports that as a warning. The shared guard

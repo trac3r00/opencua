@@ -99,7 +99,9 @@ bash scripts/bench-cdb/setup.sh --prepare
 ```
 
 `--prepare` completes downloads/builds without requiring the third-party task
-apps or Claude's fixed path. Without that flag, setup additionally requires
+apps or Claude's fixed path. It registers the two built fixture apps with
+LaunchServices so upstream's registered-copy check can find them, without
+launching them. Without that flag, setup additionally requires
 `/Applications/LibreOffice.app`, `/Applications/Gnucash.app`,
 `/Applications/Google Chrome.app` and `/opt/homebrew/bin/claude` at the pinned
 version. Missing prerequisites produce `BLOCKED:` and exit 2. It never

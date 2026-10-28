@@ -69,6 +69,8 @@ mkdir -p "$CDB_BENCH_WORK/apple-home"
 timeout 180 uv venv --allow-existing --python 3.12.11 "$root/venv"
 timeout 180 uv pip install --python "$root/venv/bin/python" pytest==9.0.3
 timeout 300 bash "$bench/swift/build.sh" "$CDB_BENCH_WORK/build"
+lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+"$lsregister" -f "$CDB_BENCH_WORK/build/BenchLab.app" "$CDB_BENCH_WORK/build/BenchSentinel.app"
 for app in "$root"/libs/cua-driver-bench/taskpack/tasks/shared/*/apps/*; do
 	(
 		cd "$app"
