@@ -4,6 +4,48 @@ Raw artifacts live under `.bench/v3/` (gitignored). Times are UTC.
 
 ## Latest continuation evidence
 
+### A39 — prospective Calculator display-primary oracle (2026-10-28)
+
+Registered before any A39 pilot or cohort attempt. Task 5's independently
+reviewed R1 decision establishes arithmetic display `5` on both drivers while
+the clipboard remains the reset sentinel. A18 remains unchanged and unrescored.
+
+The same six-step plan, background delivery, seed 20261009, thirty randomized
+paired blocks, fresh owned AX-ready process per attempt, and exact-PID cleanup
+remain binding. Before input, reset the clipboard sentinel and independently
+require display `0`. Compile the retained `calculator-display-probe.swift`
+with `swiftc -O`; read the owned PID's display as the primary arithmetic
+oracle (`display === "5"`), including after a thrown Copy refusal. Independently
+read the clipboard as the secondary copy oracle (`clipboard_pass`), retain
+both values (or null with explicit read errors), and retain driver errors.
+Successful arithmetic does not imply successful copying. The timed interval
+includes driver calls and both final oracle reads, not fixture setup/cleanup.
+Record `oracle_amendment: "A39"` and the display-probe source hash.
+
+The Calculator runner no longer imports a browser runner just to summarize
+its disturbance trace; it applies the same trace predicates locally. No
+import shim, browser runtime substitution, or driver bypass is permitted.
+Observer binaries and clipboard archive use an owned scratch directory under
+the shared benchmark lock and are removed after the run.
+
+After explicit desktop release, collect only into the new artifact:
+
+```sh
+node scripts/bench-v3/calculator-run.mjs --seed 20261009 --runs 30 \
+  --out "$PWD/.bench/v3/calculator-fresh-process-30-A39.json"
+node scripts/bench-v3/save-analysis.mjs \
+  .bench/v3/calculator-fresh-process-30-A39-analysis.json \
+  .bench/v3/calculator-fresh-process-30-A39.json
+node scripts/bench-v3/verify-fresh-calculator.mjs \
+  .bench/v3/calculator-fresh-process-30-A39.json
+```
+
+No A39 desktop attempt has run at registration. Report R1 at the fixed
+29/30 threshold, Wilson completion intervals, R1p and the fixed-extension
+trigger without running an extension here, and S1's paired p95-ratio interval.
+Claim no speed unless R1 passes. Hash both raw and analysis artifacts and
+append an A39 section to CALCULATOR-RESULT.md; never replace historical sections.
+
 User correction: no measurement-time snapshot exists; none was made.
 The user directs continuation without historical isolation. That task is
 dropped, not completed by reconstruction. HISTORICAL-REPRODUCTION.md records

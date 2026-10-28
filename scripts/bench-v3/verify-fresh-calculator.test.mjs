@@ -51,3 +51,55 @@ test("#given invalid process or oracle evidence #when verifying #then rejects th
 		assert.throws(() => verifyFreshCalculator(report));
 	}
 });
+
+function amendedCohort() {
+	const report = cohort();
+	report.oracle_amendment = "A39";
+	for (const row of report.results) {
+		row.initial_display = "0";
+		row.display = "5";
+		row.clipboard = "calculator benchmark sentinel";
+		row.clipboard_pass = false;
+		row.pass = true;
+	}
+	return report;
+}
+
+test("#given A39 display success without copying #when verifying #then counts arithmetic completion", () => {
+	const verified = verifyFreshCalculator(amendedCohort());
+	assert.equal(verified.counts.apple.completed, 30);
+	assert.equal(verified.counts.cua.completed, 30);
+});
+
+test("#given corrupted A39 oracle fields #when verifying #then names the invalid attempt", () => {
+	for (const mutate of [
+		(row) => {
+			row.display = "4";
+		},
+		(row) => {
+			row.display = undefined;
+		},
+		(row) => {
+			row.clipboard = undefined;
+		},
+		(row) => {
+			row.clipboard_pass = true;
+		},
+		(row) => {
+			row.pass = false;
+		},
+		(row) => {
+			row.initial_display = "5";
+		},
+	]) {
+		const report = amendedCohort();
+		mutate(report.results[0]);
+		assert.throws(() => verifyFreshCalculator(report), /oracle disagreement: apple:1/);
+	}
+});
+
+test("#given explicit A39 probe failure #when verifying #then retains a failed arithmetic attempt", () => {
+	const report = amendedCohort();
+	Object.assign(report.results[0], { display: null, display_error: "probe failed", pass: false });
+	assert.equal(verifyFreshCalculator(report).counts.apple.completed, 29);
+});
