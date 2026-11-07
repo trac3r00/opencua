@@ -6,6 +6,7 @@ import type {
 	InputObservation,
 	SystemPrompt,
 } from "@opencua/core";
+import { UNTRUSTED_CONTENT_NOTE, detectUntrustedContent } from "./untrusted-content.js";
 
 export type ToolContent =
 	| { readonly type: "text"; readonly text: string }
@@ -688,6 +689,28 @@ const TRUNCATED_ELEMENTS_NOTE =
 const TREE_SKIPPED_NOTE =
 	"the accessibility tree was skipped for this capture-only observation (include_accessibility_tree=false), so no element ids were produced and no observation_token was issued; call get_app_state with the tree before any element action";
 
+/** The warning for element text that reads like an instruction, or undefined when none does; the text is never changed. */
+function untrustedContentWarning(
+	elements: readonly AXTreeElement[],
+): { readonly patterns: readonly string[]; readonly elements: readonly number[]; readonly note: string } | undefined {
+	const patterns = new Set<string>();
+	const flagged = new Set<number>();
+	for (const element of elements) {
+		const matched = detectUntrustedContent(
+			[element.label, element.value].filter((text): text is string => text !== null),
+		);
+		if (matched.length === 0) continue;
+		flagged.add(element.id);
+		for (const pattern of matched) patterns.add(pattern);
+	}
+	if (patterns.size === 0) return undefined;
+	return {
+		patterns: [...patterns].sort(),
+		elements: [...flagged].sort((left, right) => left - right),
+		note: UNTRUSTED_CONTENT_NOTE,
+	};
+}
+
 function stateToolResult(
 	state: AppState,
 	extra: Record<string, unknown>,
@@ -780,6 +803,14 @@ function stateToolResult(
 			payload["systemPromptNote"] = SYSTEM_PROMPT_NOTE;
 		}
 	}
+	// Diff-only observations carry their text in the changes, not the element list: every emitted element is read.
+	const warning = untrustedContentWarning([
+		...state.elements,
+		...(state.axChanges?.added ?? []),
+		...(state.axChanges?.removed ?? []),
+		...(state.axChanges?.changed.flatMap((entry) => [entry.before, entry.after]) ?? []),
+	]);
+	if (warning !== undefined) payload["untrusted_content_warning"] = warning;
 	// Unindented: an observation is read by a model, and indentation alone was about 45% of its size.
 	const text: ToolContent = { type: "text", text: JSON.stringify({ ...payload, ...extra }) };
 	const images: ToolContent[] = state.screenshotBase64.length === 0 ? [] : [stateImage(state)];
@@ -912,6 +943,9 @@ export function targetStateResult(
 		...(options.token === undefined ? {} : { observation_token: options.token }),
 		...(options.includeElements === true ? { elements: state.elements } : {}),
 	};
+	// Matches, near misses and alternatives quote the observed elements, so the whole observation is checked.
+	const warning = untrustedContentWarning(state.elements);
+	if (warning !== undefined) payload["untrusted_content_warning"] = warning;
 	const content: ToolContent[] = [];
 	if (options.includeScreenshot === true && state.screenshotBase64.length > 0) {
 		content.push(stateImage(state));

@@ -11,6 +11,8 @@ export interface SharedWorkerEntry {
 	readonly appPid: number;
 	/** An opencua-owned surface several workers may share, each with its own cursor. */
 	readonly shared?: boolean;
+	/** The part of a shared surface this worker is confined to, in window screenshot pixels; absent means the whole window. */
+	readonly region?: SharedRegion;
 	/** The opencua-mcp process that assigned it; its exit frees the claim. */
 	readonly ownerPid: number;
 }
@@ -25,6 +27,35 @@ export interface WorkerRegistry {
 	claim(entries: readonly SharedWorkerEntry[]): void;
 	find(workerId: string): SharedWorkerEntry | undefined;
 	release(workerId: string): void;
+}
+
+export interface SharedRegion {
+	readonly x: number;
+	readonly y: number;
+	readonly width: number;
+	readonly height: number;
+}
+
+function isRegion(value: unknown): value is SharedRegion {
+	if (typeof value !== "object" || value === null) return false;
+	const region = value as Record<string, unknown>;
+	const numbers = [region["x"], region["y"], region["width"], region["height"]];
+	return (
+		numbers.every((number) => typeof number === "number" && Number.isFinite(number)) &&
+		(region["width"] as number) > 0 &&
+		(region["height"] as number) > 0
+	);
+}
+
+/** Why two workers cannot share one surface: a whole-window worker beside a confined one, or overlapping regions. */
+function regionConflict(a: SharedWorkerEntry, b: SharedWorkerEntry): string | undefined {
+	if (a.region === undefined && b.region === undefined) return undefined;
+	if (a.region === undefined || b.region === undefined)
+		return "one owns the whole window while the other is confined to a region";
+	const overlaps =
+		Math.min(a.region.x + a.region.width, b.region.x + b.region.width) > Math.max(a.region.x, b.region.x) &&
+		Math.min(a.region.y + a.region.height, b.region.y + b.region.height) > Math.max(a.region.y, b.region.y);
+	return overlaps ? "their regions overlap" : undefined;
 }
 
 const LOCK_STALE_MS = 5_000;
@@ -47,7 +78,8 @@ function isEntry(value: unknown): value is SharedWorkerEntry {
 		typeof entry["task"] === "string" &&
 		typeof entry["app"] === "string" &&
 		Number.isSafeInteger(entry["appPid"]) &&
-		Number.isSafeInteger(entry["ownerPid"])
+		Number.isSafeInteger(entry["ownerPid"]) &&
+		(entry["region"] === undefined || isRegion(entry["region"]))
 	);
 }
 
@@ -113,6 +145,15 @@ export function fileWorkerRegistry(directory: string, ownAlive: (pid: number) =>
 								? `worker "${entry.worker_id}" is already assigned by another opencua session`
 								: `app "${entry.app}" is already owned by worker "${held.worker_id}" in another opencua session`,
 						);
+					}
+					for (const other of current) {
+						if (other.ownerPid === entry.ownerPid || other.appPid !== entry.appPid) continue;
+						const conflict = regionConflict(entry, other);
+						if (conflict !== undefined) {
+							throw new Error(
+								`worker "${entry.worker_id}" cannot share app "${entry.app}" with worker "${other.worker_id}" in another opencua session: ${conflict}`,
+							);
+						}
 					}
 				}
 				const claimed = new Set(entries.map((entry) => entry.worker_id));

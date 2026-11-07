@@ -36,6 +36,13 @@ export {
 	withCursorIdentity,
 } from "./computer/cursor-scope.js";
 export {
+	InputOutsideRegion,
+	assertFocusInInputRegion,
+	assertPointInInputRegion,
+	currentInputRegion,
+	withInputRegion,
+} from "./computer/input-region.js";
+export {
 	HandsCoordinator,
 	type HandName,
 	type HandResource,
@@ -426,4 +433,7 @@ export {
 	isOwnedSurfacePid,
 	openOwnedSurface,
 	readOwnedSurfaces,
+	type SurfaceAudioState,
+	surfaceAudioState,
 } from "./platform/owned-surfaces.js";
+export { type SurfaceListening, listenToSurface } from "./platform/surface-listen.js";

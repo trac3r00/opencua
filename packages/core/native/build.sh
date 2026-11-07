@@ -36,6 +36,7 @@ clang \
 	"${availability_errors[@]}" \
 	-framework ScreenCaptureKit \
 	-framework CoreGraphics \
+	-framework CoreAudio \
 	-framework CoreMedia \
 	-framework CoreVideo \
 	-framework Foundation \

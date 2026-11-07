@@ -60,6 +60,7 @@ describe("browser service artifacts", () => {
 		const paths = await installBrowserService({
 			extensionId: EXTENSION_ID,
 			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
 			packageRoot: join(homeDirectory, "package"),
 			platform: "darwin",
 			stateDirectory: relative(process.cwd(), stateDirectory),
@@ -107,6 +108,7 @@ describe("browser service artifacts", () => {
 			await expect(
 				installBrowserService({
 					homeDirectory,
+					systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
 					packageRoot: join(homeDirectory, "package"),
 					stateDirectory,
 					platform: "darwin",
@@ -132,6 +134,7 @@ describe("browser service artifacts", () => {
 		directories.push(homeDirectory);
 		const options = {
 			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
 			packageRoot: join(homeDirectory, "package"),
 			stateDirectory: join(homeDirectory, "state"),
 			platform: "darwin",
@@ -157,6 +160,7 @@ describe("browser service artifacts", () => {
 		directories.push(homeDirectory);
 		const options = {
 			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
 			packageRoot: join(homeDirectory, "package"),
 			stateDirectory: join(homeDirectory, "state"),
 			platform: "darwin",
@@ -171,6 +175,28 @@ describe("browser service artifacts", () => {
 
 		expect(result.installed).toBe(false);
 		expect(result.connectionReady).toBe(true);
+	});
+
+	it("#given a directory at the native manifest path #when doctor runs #then reports installation incomplete", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-doctor-directory-"));
+		directories.push(homeDirectory);
+		const options = {
+			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
+			packageRoot: join(homeDirectory, "package"),
+			stateDirectory: join(homeDirectory, "state"),
+			platform: "darwin",
+			isPortListening: async () => false,
+			launchctl: async (args: readonly string[]) => ({ code: args[0] === "print" ? 113 : 0, stderr: "" }),
+		} satisfies Parameters<typeof installBrowserService>[0];
+		const paths = await installBrowserService(options);
+		expect((await doctorBrowserService(options)).installed).toBe(true);
+		await rm(paths.nativeHostManifest);
+		await mkdir(paths.nativeHostManifest);
+
+		const result = await doctorBrowserService(options);
+
+		expect(result.installed).toBe(false);
 	});
 
 	it("#given an empty state directory #when initializing service metadata #then persists a private reusable key", async () => {
@@ -191,6 +217,7 @@ describe("browser service artifacts", () => {
 		const paths = {
 			launchAgent: "/tmp/home/Library/LaunchAgents/service.plist",
 			nativeHostManifest: "/tmp/home/Library/Application Support/Brave/host.json",
+			nativeHostManifests: ["/tmp/home/Library/Application Support/Brave/host.json"],
 			nativeHostProgram: "/tmp/package/dist/native-host.js",
 			nativeHostLauncher: "/tmp/home/state/browser-native-host",
 			stateDirectory: "/tmp/home/state",
@@ -238,6 +265,7 @@ describe("browser service artifacts", () => {
 
 		const paths = await installBrowserService({
 			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
 			packageRoot,
 			nodePath: "/opt/node/bin/node",
 			platform: "darwin",
@@ -259,6 +287,115 @@ describe("browser service artifacts", () => {
 		expect(await readConnection(stateDirectory)).toMatchObject({ port: DEFAULT_PORT });
 	});
 
+	it("#given Chrome and Edge support directories #when installing #then registers the manifest only in those browsers", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-multi-host-"));
+		directories.push(homeDirectory);
+		const support = join(homeDirectory, "Library", "Application Support");
+		await mkdir(join(support, "Google", "Chrome"), { recursive: true });
+		await mkdir(join(support, "Microsoft Edge"), { recursive: true });
+		const paths = await installBrowserService({
+			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
+			packageRoot: join(homeDirectory, "package"),
+			stateDirectory: join(homeDirectory, "state"),
+			platform: "darwin",
+			isPortListening: async () => false,
+			launchctl: async (args) => ({ code: args[0] === "print" ? 113 : 0, stderr: "" }),
+		});
+
+		for (const browser of ["Google/Chrome", "Microsoft Edge"]) {
+			const manifest = join(support, browser, "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`);
+			expect(nativeManifestSchema.parse(JSON.parse(await readFile(manifest, "utf8"))).path).toBe(
+				paths.nativeHostLauncher,
+			);
+		}
+		const otherBrowsers = [
+			"BraveSoftware/Brave-Browser",
+			"Google/Chrome Beta",
+			"Google/Chrome Canary",
+			"Chromium",
+			"Arc/User Data",
+			"Vivaldi",
+		];
+		for (const browser of otherBrowsers) {
+			const manifest = join(support, browser, "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`);
+			await expect(stat(manifest)).rejects.toMatchObject({ code: "ENOENT" });
+		}
+	});
+
+	it("#given no browser support directories #when installing #then falls back to the Brave manifest path", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-brave-fallback-"));
+		directories.push(homeDirectory);
+		const paths = await installBrowserService({
+			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
+			packageRoot: join(homeDirectory, "package"),
+			stateDirectory: join(homeDirectory, "state"),
+			platform: "darwin",
+			isPortListening: async () => false,
+			launchctl: async (args) => ({ code: args[0] === "print" ? 113 : 0, stderr: "" }),
+		});
+
+		expect(paths.nativeHostManifest).toContain(join("BraveSoftware", "Brave-Browser", "NativeMessagingHosts"));
+		const registration = nativeManifestSchema.parse(JSON.parse(await readFile(paths.nativeHostManifest, "utf8")));
+		expect(registration.path).toBe(paths.nativeHostLauncher);
+	});
+
+	it("#given the Google Chrome app bundle and no support directory #when installing #then writes the Chrome manifest", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-app-bundle-"));
+		directories.push(homeDirectory);
+		const systemApplications = join(homeDirectory, "SystemApplications");
+		await mkdir(join(systemApplications, "Google Chrome.app"), { recursive: true });
+		const support = join(homeDirectory, "Library", "Application Support");
+		const paths = await installBrowserService({
+			homeDirectory,
+			systemApplicationsDirectory: systemApplications,
+			packageRoot: join(homeDirectory, "package"),
+			stateDirectory: join(homeDirectory, "state"),
+			platform: "darwin",
+			isPortListening: async () => false,
+			launchctl: async (args) => ({ code: args[0] === "print" ? 113 : 0, stderr: "" }),
+		});
+
+		const chromeManifest = join(support, "Google", "Chrome", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`);
+		expect(nativeManifestSchema.parse(JSON.parse(await readFile(chromeManifest, "utf8"))).path).toBe(
+			paths.nativeHostLauncher,
+		);
+		expect(paths.nativeHostManifest).toBe(chromeManifest);
+		const braveManifest = join(support, "BraveSoftware", "Brave-Browser", "NativeMessagingHosts");
+		await expect(stat(braveManifest)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("#given manifests registered in several browsers #when uninstalling #then removes every registered manifest", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-multi-uninstall-"));
+		directories.push(homeDirectory);
+		const support = join(homeDirectory, "Library", "Application Support");
+		await mkdir(join(support, "Google", "Chrome"), { recursive: true });
+		await mkdir(join(support, "Chromium"), { recursive: true });
+		const options = {
+			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
+			packageRoot: join(homeDirectory, "package"),
+			stateDirectory: join(homeDirectory, "state"),
+			platform: "darwin",
+			isPortListening: async () => false,
+			launchctl: async (args: readonly string[]) => ({ code: args[0] === "print" ? 113 : 0, stderr: "" }),
+		} satisfies Parameters<typeof installBrowserService>[0];
+		const paths = await installBrowserService(options);
+		const chromeManifest = join(support, "Google", "Chrome", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`);
+		const chromiumManifest = join(support, "Chromium", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`);
+		expect((await stat(chromeManifest)).isFile()).toBe(true);
+		expect((await stat(chromiumManifest)).isFile()).toBe(true);
+		expect((await doctorBrowserService(options)).installed).toBe(true);
+
+		await uninstallBrowserService(options);
+
+		for (const manifest of paths.nativeHostManifests) {
+			await expect(stat(manifest)).rejects.toMatchObject({ code: "ENOENT" });
+		}
+		expect((await doctorBrowserService(options)).installed).toBe(false);
+	});
+
 	it("#given a port owned by an existing stdio daemon #when installing #then refuses to bootstrap a duplicate", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-service-conflict-"));
 		directories.push(homeDirectory);
@@ -271,6 +408,7 @@ describe("browser service artifacts", () => {
 		await expect(
 			installBrowserService({
 				homeDirectory,
+				systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
 				packageRoot: join(homeDirectory, "package"),
 				platform: "darwin",
 				uid: 501,
@@ -287,6 +425,7 @@ describe("browser service artifacts", () => {
 		const paths = {
 			launchAgent: "/tmp/home/agent.plist",
 			nativeHostManifest: "/tmp/home/host.json",
+			nativeHostManifests: ["/tmp/home/host.json"],
 			nativeHostProgram: "/tmp/package/dist/native-host.js",
 			nativeHostLauncher: "/tmp/home/state/browser-native-host",
 			stateDirectory: "/tmp/home/state",
@@ -321,6 +460,7 @@ describe("browser service artifacts", () => {
 			const paths = {
 				launchAgent: join(homeDirectory, "agent.plist"),
 				nativeHostManifest: join(homeDirectory, "manifest.json"),
+				nativeHostManifests: [join(homeDirectory, "manifest.json")],
 				nativeHostProgram: hostProgram,
 				nativeHostLauncher: join(homeDirectory, "launcher"),
 				stateDirectory: join(homeDirectory, "state"),

@@ -676,6 +676,15 @@ const workerAssignmentsSchema = z
 			app: appSchema,
 			agent_name: agentNameSchema.optional(),
 			parent_agent_name: agentNameSchema.optional(),
+			region: z
+				.object({
+					x: z.number().finite(),
+					y: z.number().finite(),
+					width: z.number().finite().positive(),
+					height: z.number().finite().positive(),
+				})
+				.optional()
+				.describe("Shared surface: disjoint pointer box, screenshot px like click x/y."),
 		}),
 	)
 	.min(1)

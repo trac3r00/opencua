@@ -9,6 +9,7 @@ import { resolveAppInstructions } from "../app-instructions/index.js";
 import { resolveDisplayMetadata } from "../computer/display-metadata.js";
 import type { InputObservation, PreflightOptions, PreflightResult } from "../computer/guarded-interface.js";
 import { denyHostInteraction } from "../computer/host-interaction-policy.js";
+import { assertElementInInputRegion, assertFocusInInputRegion } from "../computer/input-region.js";
 import { currentInputScope } from "../computer/input-scope.js";
 import type { ComputerInterface, ScreenshotResult, WindowTextRead } from "../computer/interface.js";
 import { assertScreenUnlocked } from "../computer/lock-guard.js";
@@ -105,7 +106,7 @@ import { selectSystemEventsTargetWindow } from "./macos-window-target-fallback.j
 import { resolveTargetWindow, visibleWindowsForPid } from "./macos-window-target.js";
 import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveOcrCrop } from "./ocr-region.js";
-import { isOwnedSurfacePid } from "./owned-surfaces.js";
+import { isOwnedSurfacePid, surfaceAudioState } from "./owned-surfaces.js";
 import { currentSystemPrompts } from "./system-prompts.js";
 
 const execFileAsync = promisify(execFile);
@@ -767,10 +768,12 @@ export class MacOSHostComputer extends HostComputer {
 		const windowDisplays = windowBounds === undefined ? [] : displaysForWindow(windowBounds, displays);
 		const windowDisplayId = windowDisplays[0]?.id;
 
+		const audio = isOwnedSurfacePid(app.pid) ? surfaceAudioState(app.pid) : undefined;
 		const state: AppState = {
 			app: app.name,
 			bundleId: app.bundleId,
 			pid: app.pid,
+			...(audio === undefined ? {} : { audio }),
 			frontmost: app.isActive,
 			axAvailable: tree?.axAvailable ?? true,
 			elements: diffOnly ? [] : elements,
@@ -1017,6 +1020,10 @@ export class MacOSHostComputer extends HostComputer {
 
 	async setValue(targetPid: number, elementIndex: number, value: string): Promise<void> {
 		this.assertInputAvailable(targetPid);
+		assertElementInInputRegion(
+			() => elementFrameByIndex(targetPid, elementIndex),
+			`set_value on element ${elementIndex}`,
+		);
 		this.showElement(targetPid, elementIndex, false);
 		setValueByIndex(targetPid, elementIndex, value);
 		this.input.showKeyboard();
@@ -1025,6 +1032,10 @@ export class MacOSHostComputer extends HostComputer {
 
 	async selectText(targetPid: number, elementIndex: number, options: SelectTextOptions): Promise<void> {
 		this.assertInputAvailable(targetPid);
+		assertElementInInputRegion(
+			() => elementFrameByIndex(targetPid, elementIndex),
+			`select_text on element ${elementIndex}`,
+		);
 		this.showElement(targetPid, elementIndex, false);
 		selectTextByIndex(targetPid, elementIndex, options);
 		this.input.showKeyboard();
@@ -1032,6 +1043,10 @@ export class MacOSHostComputer extends HostComputer {
 
 	async performAction(targetPid: number, elementIndex: number, action: string): Promise<void> {
 		this.assertInputAvailable(targetPid);
+		assertElementInInputRegion(
+			() => elementFrameByIndex(targetPid, elementIndex),
+			`${action} on element ${elementIndex}`,
+		);
 		this.showElement(targetPid, elementIndex, !action.startsWith("AXScroll"), action.startsWith("AXScroll"));
 		// Pressing or focusing an element can make its app activate itself (Safari does for a web
 		// field); background delivery hands the front back to the person's app when that happens.
@@ -1105,6 +1120,10 @@ export class MacOSHostComputer extends HostComputer {
 
 	async scrollElementIntoView(targetPid: number, elementIndex: number): Promise<Rect | undefined> {
 		this.assertInputAvailable(targetPid);
+		assertElementInInputRegion(
+			() => elementFrameByIndex(targetPid, elementIndex),
+			`scroll-to-visible on element ${elementIndex}`,
+		);
 		if (!scrollToVisibleByIndex(targetPid, elementIndex)) {
 			return undefined;
 		}
@@ -1176,6 +1195,8 @@ export class MacOSHostComputer extends HostComputer {
 		if (focused !== undefined && focused.width > 0 && focused.height > 0) {
 			this.input.showPointer({ x: focused.x + focused.width / 2, y: focused.y + focused.height / 2 }, false);
 		}
+		// Checked after the fence, right before the write: focus may have moved while it waited.
+		assertFocusInInputRegion(() => focusedElementFrame(targetPid));
 		if (!typeIntoFocusedAXElement(targetPid, text)) {
 			return false;
 		}

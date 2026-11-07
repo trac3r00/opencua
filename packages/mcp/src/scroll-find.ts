@@ -1,4 +1,11 @@
-import { axScrollActionFor, describeQuery, matchElements, suggestNearMisses } from "@opencua/core";
+import {
+	InputOutsideRegion,
+	axScrollActionFor,
+	currentInputRegion,
+	describeQuery,
+	matchElements,
+	suggestNearMisses,
+} from "@opencua/core";
 import type {
 	AXTreeElement,
 	ElementQuery,
@@ -109,6 +116,26 @@ function toScreenRect(rect: Rect, viewport: Viewport): Rect {
 
 function centreOf(rect: Rect): Point {
 	return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+}
+
+/**
+ * A confined worker may scroll only a container that lies wholly inside its region: scrolling one that reaches past it
+ * moves content in other workers' parts of the window. Unconfined searches are not checked.
+ */
+function assertScrollAreaInRegion(area: Rect, viewport: Viewport): void {
+	const region = currentInputRegion();
+	if (region === undefined) return;
+	const screen = toScreenRect(area, viewport);
+	const inside =
+		screen.x >= region.x &&
+		screen.y >= region.y &&
+		screen.x + screen.width <= region.x + region.width &&
+		screen.y + screen.height <= region.y + region.height;
+	if (!inside) {
+		throw new InputOutsideRegion(
+			`searching would scroll the area at (${Math.round(screen.x)}, ${Math.round(screen.y)}, ${Math.round(screen.width)}x${Math.round(screen.height)})`,
+		);
+	}
 }
 
 function contains(rect: Rect, point: Point): boolean {
@@ -392,6 +419,7 @@ export async function findByScrolling(
 			return undefined;
 		}
 		const clip = toScreenRect(area.frame, viewport);
+		assertScrollAreaInRegion(area.frame, viewport);
 		let live = await refresh.call(ctx.computer, ctx.pid, element.id);
 		while (live !== undefined && live.width > 0 && live.height > 0 && !contains(clip, centreOf(live))) {
 			const step = pagesToward(centreOf(live), clip);
@@ -428,7 +456,8 @@ export async function findByScrolling(
 		if (visible && !chain.framesStale) {
 			return { kind: "ready", centre: centreOf(toScreenRect(element.frame, viewport)) };
 		}
-		if (ctx.computer.scrollElementIntoView !== undefined) {
+		// Scrolling an element into view moves whichever ancestors it must, which a region cannot bound.
+		if (ctx.computer.scrollElementIntoView !== undefined && currentInputRegion() === undefined) {
 			try {
 				const frame = await ctx.computer.scrollElementIntoView(ctx.pid, element.id);
 				if (frame !== undefined) {
@@ -556,6 +585,7 @@ export async function findByScrolling(
 			);
 		}
 
+		assertScrollAreaInRegion(page.area.frame, viewport);
 		ctx.computer.showPointerAt?.(centreOf(toScreenRect(page.area.frame, viewport)), false);
 		try {
 			await ctx.computer.performAction(ctx.pid, page.area.id, axScrollActionFor(find.direction));

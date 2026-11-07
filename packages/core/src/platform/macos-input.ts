@@ -1,6 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { currentCursorIdentity } from "../computer/cursor-scope.js";
 import {
+	assertFocusInInputRegion,
+	assertPointInInputRegion,
+	clampToInputRegion,
+	currentInputRegion,
+} from "../computer/input-region.js";
+import {
 	InputInterrupted,
 	type InputScope,
 	assertInputMayContinue,
@@ -8,9 +14,18 @@ import {
 } from "../computer/input-scope.js";
 import { assertScreenUnlocked } from "../computer/lock-guard.js";
 import { type VirtualPointer, VirtualPointerSet } from "../computer/virtual-pointer.js";
-import type { DragOptions, InputDelivery, KeyModifierName, KeyOptions, Point, ScrollOptions } from "../types/index.js";
+import type {
+	DragOptions,
+	InputDelivery,
+	KeyModifierName,
+	KeyOptions,
+	Point,
+	Rect,
+	ScrollOptions,
+} from "../types/index.js";
 import { readRealCursorPosition } from "./macos-cursor.js";
 import {
+	focusedElementFrame,
 	focusedElementInWebArea,
 	focusedWindowIdForPid,
 	focusedWindowIsModal,
@@ -61,6 +76,7 @@ import { selectSystemEventsTargetWindow } from "./macos-window-target-fallback.j
 import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveTargetWindow, toTargetWindow, visibleWindowsForPid } from "./macos-window-target.js";
 import { isOwnedSurfacePid } from "./owned-surfaces.js";
+import { humanBaseMilliseconds, humanCharacterDelay, typingRhythm } from "./typing-rhythm.js";
 
 /**
  * On-screen window ids in the WindowServer's front-to-back order. A window that is minimized or
@@ -72,6 +88,13 @@ let onscreenWindowIdsSource: () => readonly number[] | undefined = () =>
 
 export function currentOnscreenWindowIds(): readonly number[] | undefined {
 	return onscreenWindowIdsSource();
+}
+
+let focusedFrameSource: (pid: number) => Rect | undefined = focusedElementFrame;
+
+/** Replaces the focused-element frame reader the region check uses; pass undefined to restore the native one. */
+export function setFocusedFrameSourceForTesting(source: ((pid: number) => Rect | undefined) | undefined): void {
+	focusedFrameSource = source ?? focusedElementFrame;
 }
 
 export function setOnscreenWindowIdsSourceForTesting(source: () => readonly number[] | undefined): void {
@@ -544,6 +567,7 @@ export class MacOSInputController {
 	/** Mouse events for `pid`, whichever app the controller is aimed at right now. */
 	private mousePostFor(pid: number): MousePost {
 		return async (kind, position, button, clickState, targetWindow, flags) => {
+			assertPointInInputRegion(position, `pointer ${kind}`);
 			postMouseEvent({ kind, position, button, clickState, targetPid: pid, targetWindow, flags });
 		};
 	}
@@ -700,6 +724,7 @@ export class MacOSInputController {
 					y: Math.max(window.bounds.y, Math.min(window.bounds.y + window.bounds.height - 1, previous.y)),
 				};
 			}
+			from = clampToInputRegion(from);
 			const duration = pointerTravelDuration(from, position);
 			const steps = dragSteps(duration);
 			if (this.delivery !== "background") {
@@ -729,7 +754,7 @@ export class MacOSInputController {
 			return post;
 		}
 		return async (kind, position, button, clickState, window, flags) => {
-			const from = this.pointerFor(call.pid).position();
+			const from = clampToInputRegion(this.pointerFor(call.pid).position());
 			if (kind === "move" && Math.hypot(position.x - from.x, position.y - from.y) > 8) {
 				const duration = pointerTravelDuration(from, position);
 				const steps = dragSteps(duration);
@@ -814,12 +839,14 @@ export class MacOSInputController {
 		this.beforeInput();
 		const targetWindow = await this.requireSessionWindow(call, "keyboard");
 		const keyboardPid = this.keyboardPid(call);
+		assertFocusInInputRegion(() => (keyboardPid === undefined ? undefined : focusedFrameSource(keyboardPid)));
 		this.showKeyboard();
 		// Pace keystrokes: posting characters back-to-back outruns the target app's
 		// event processing and drops characters ("https://example.com" -> "https://e").
 		// A small inter-character delay lets each keystroke be consumed before the next,
 		// so a single delivery per char is reliable (no drops) without doubling.
 		const pacing = typeCharacterDelayMilliseconds();
+		const rhythm = typingRhythm();
 		const segments = Array.from(text);
 		for (let i = 0; i < segments.length; i++) {
 			const segment = segments[i];
@@ -829,11 +856,19 @@ export class MacOSInputController {
 			// Read before every character, so a stop or a cancel ends a long text part-way rather than after it.
 			this.checkpoint(call);
 			this.assertDeliverable(keyboardPid);
+			// Focus can move between characters (another worker clicks elsewhere): recheck it before each one.
+			assertFocusInInputRegion(() => (keyboardPid === undefined ? undefined : focusedFrameSource(keyboardPid)));
 			postUnicodeText(segment, keyboardPid, targetWindow);
 			if (!this.isBackground || this.backgroundCues) this.overlay.keyPress?.(call.pid);
 			this.noteKeyboardInput(call.pid);
-			if (pacing > 0 && i < segments.length - 1) {
-				await delayMilliseconds(pacing);
+			const next = segments[i + 1];
+			// The wait after this character is the transition into the next one.
+			const delay =
+				rhythm === "human" && next !== undefined
+					? humanCharacterDelay(segment, next, humanBaseMilliseconds(pacing), Math.random, pacing)
+					: pacing;
+			if (delay > 0 && i < segments.length - 1) {
+				await delayMilliseconds(delay);
 			}
 		}
 	}
@@ -845,6 +880,10 @@ export class MacOSInputController {
 
 	private async postKey(call: InputCall, key: string, options?: KeyOptions): Promise<void> {
 		this.beforeInput();
+		assertFocusInInputRegion(() => {
+			const pid = this.keyboardPid(call);
+			return pid === undefined ? undefined : focusedFrameSource(pid);
+		});
 		if (await this.pasteAsTyping(call, key, options)) {
 			return;
 		}
@@ -930,8 +969,12 @@ export class MacOSInputController {
 		const amount = Math.max(0, Math.trunc(Math.abs(options.amount)));
 		const targetWindow = await this.requireSessionWindow(call, "scroll");
 		let position: Point;
+		const region = currentInputRegion();
 		if (options.position !== undefined) {
 			position = options.position;
+		} else if (region !== undefined) {
+			// A confined worker scrolls its own part of a shared window, not the window's centre.
+			position = { x: region.x + region.width / 2, y: region.y + region.height / 2 };
 		} else if (targetWindow !== undefined) {
 			position = {
 				x: targetWindow.bounds.x + targetWindow.bounds.width / 2,
@@ -943,6 +986,7 @@ export class MacOSInputController {
 		if (options.position !== undefined) {
 			await this.pointerWindow(call, position);
 		}
+		assertPointInInputRegion(position, "scroll");
 		this.showScrollPointer(position, call.pid, options.direction);
 		const unit: Record<ScrollOptions["direction"], [number, number]> = {
 			up: [0, 1],
@@ -988,6 +1032,7 @@ export class MacOSInputController {
 			) {
 				throw new Error("drag waypoint is outside the target window; observe the destination window first");
 			}
+			for (const waypoint of options.waypoints ?? []) assertPointInInputRegion(waypoint, "drag waypoint");
 			await this.pointerWindow(call, options.to);
 			if (targetWindow !== undefined && !containsPoint(targetWindow, options.to)) {
 				throw new Error("drag destination is outside the target window; observe the destination window first");
@@ -1115,6 +1160,8 @@ export class MacOSInputController {
 	private mousePost(call: InputCall): MousePost {
 		return async (kind, position, button, clickState, targetWindow, flags) => {
 			this.assertDeliverable(call.pid);
+			// Every posted point, interpolated moves included, stays inside a confined worker's region.
+			assertPointInInputRegion(position, `pointer ${kind}`);
 			postMouseEvent({ kind, position, button, clickState, targetPid: call.pid, targetWindow, flags });
 		};
 	}
@@ -1127,6 +1174,7 @@ export class MacOSInputController {
 	 * the input. An unbound call takes the app's window under the point.
 	 */
 	private async pointerWindow(call: InputCall, position: Point): Promise<SkyLightTargetWindow | undefined> {
+		assertPointInInputRegion(position, "pointer input");
 		const pid = call.pid;
 		if (pid === undefined) {
 			return undefined;

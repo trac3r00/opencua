@@ -22,7 +22,7 @@ import {
 	postMouseEventRecordToWindow,
 	restoreFrontProcessNoWindows,
 } from "./macos-ffi/skylight.js";
-import { interpolatePointEased } from "./macos-input-drag.js";
+import { interpolatePointDrag } from "./macos-input-drag.js";
 import { virtualKeyCodeFor } from "./macos-keycodes.js";
 
 /**
@@ -146,7 +146,7 @@ export function gesturePath(from: Point, to: Point, steps: number): readonly Poi
 	}
 	const path: Point[] = [];
 	for (let step = 0; step <= steps; step += 1) {
-		path.push(interpolatePointEased(from, to, step / steps));
+		path.push(interpolatePointDrag(from, to, step / steps));
 	}
 	return path;
 }

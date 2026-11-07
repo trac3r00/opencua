@@ -11,6 +11,8 @@ import {
 	isCFDictionary,
 	isCFNumber,
 	isCFString,
+	toCFInt32Number,
+	withCFArray,
 	withCFString,
 } from "./corefoundation.js";
 import { koffi } from "./koffi.js";
@@ -35,6 +37,13 @@ const SLSGetActiveSpace = skyLight.func("SLSGetActiveSpace", "uint64_t", ["uint3
 const SLSCopyManagedDisplaySpaces = skyLight.func("SLSCopyManagedDisplaySpaces", "void *", ["uint32_t"]) as KoffiFunc<
 	(connection: number) => CFTypeRef | null
 >;
+/** Mask 7 asks for every space kind (user, full-screen, system) the window is on. */
+const ALL_SPACES_MASK = 7;
+const SLSCopySpacesForWindows = skyLight.func("SLSCopySpacesForWindows", "void *", [
+	"uint32_t",
+	"int32_t",
+	"void *",
+]) as KoffiFunc<(connection: number, mask: number, windows: CFTypeRef) => CFTypeRef | null>;
 const SLSSpaceGetType = skyLight.func("SLSSpaceGetType", "uint32_t", ["uint32_t", "uint64_t"]) as KoffiFunc<
 	(connection: number, spaceId: number) => number
 >;
@@ -95,17 +104,48 @@ export function spaceTypeFor(spaceId: number): number | undefined {
 }
 
 /**
- * Native SLSCopySpacesForWindows is not invoked: the available probe crashed in-process.
- * Retained as a best-effort API until a safe runtime contract is established.
+ * The spaces each window is on. SLSCopySpacesForWindows answers one flat list of space ids for all the windows it is
+ * given (not a list per window), so each window is asked on its own, as an SInt32 CFNumber. A window the call does not
+ * place on any space (an unknown window, or one that joins every space) is left out of the map.
  */
 export function spacesForWindows(windowIds: readonly number[]): Map<number, number[]> {
-	if (windowIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+	if (windowIds.some((id) => !Number.isSafeInteger(id) || id <= 0 || id > 0xffffffff)) {
 		return new Map();
 	}
-	return parseWindowSpaceResults(windowIds, []);
+	return parseWindowSpaceResults(windowIds, windowIds.map(spacesForWindow));
 }
 
-/** Map the native per-window space lists without making the unsafe native call. */
+function spacesForWindow(windowId: number): number[] {
+	const number = toCFInt32Number(windowId | 0);
+	try {
+		return withCFArray([number], (windows) => {
+			const copied = SLSCopySpacesForWindows(SLSMainConnectionID(), ALL_SPACES_MASK, windows);
+			if (copied === null) return [];
+			try {
+				return readSpaceIds(copied);
+			} finally {
+				cfRelease(copied);
+			}
+		});
+	} finally {
+		cfRelease(number);
+	}
+}
+
+/** Space ids from the copied list; anything that is not an array of numbers yields none rather than a crash. */
+function readSpaceIds(list: CFTypeRef): number[] {
+	if (!isCFArray(list)) return [];
+	const ids: number[] = [];
+	for (let index = 0; index < cfArrayLength(list); index += 1) {
+		const value = cfArrayValueAt(list, index);
+		if (value === null || !isCFNumber(value)) continue;
+		const id = fromCFNumber(value);
+		if (Number.isSafeInteger(id) && id > 0) ids.push(id);
+	}
+	return ids;
+}
+
+/** Pair each window with its space ids; a window with no spaces is left out. */
 export function parseWindowSpaceResults(
 	windowIds: readonly number[],
 	spaceIdsByWindow: readonly (readonly number[])[],
@@ -113,7 +153,7 @@ export function parseWindowSpaceResults(
 	return new Map(
 		windowIds.flatMap((windowId, index) => {
 			const spaceIds = spaceIdsByWindow[index];
-			return spaceIds === undefined ? [] : [[windowId, [...spaceIds]]];
+			return spaceIds === undefined || spaceIds.length === 0 ? [] : [[windowId, [...spaceIds]]];
 		}),
 	);
 }

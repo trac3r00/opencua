@@ -168,6 +168,7 @@ export function closeOwnedSurface(pid: number, options: OwnedSurfaceOptions = {}
 	if (!isOwnedSurfacePid(pid, options)) return false;
 	process.kill(pid, "SIGTERM");
 	rmSync(surfaceSocketPath(pid, options), { force: true });
+	rmSync(surfaceAudioStatePath(pid, options), { force: true });
 	unregisterOwnedSurface(pid, options);
 	return true;
 }
@@ -212,6 +213,66 @@ export function nameSurfaceCursor(tag: number, name: string, options: OwnedSurfa
 	writeFileSync(temporary, `${JSON.stringify(names)}\n`, { mode: 0o600 });
 	renameSync(temporary, path);
 	namedTags.add(tag);
+}
+
+/** Whether an owned surface's page is playing sound, as WebKit reports it, and when that last changed (epoch ms). */
+export interface SurfaceAudioState {
+	readonly playing: boolean;
+	readonly changedAt: number;
+	/** The page's WebAudio output level, in dBFS, when it has played through an AudioContext; media elements are not measured. */
+	readonly level?: SurfaceAudioLevel;
+	/** The WebKit GPU process that plays the page's sound, once the page has used audio. */
+	readonly gpuPid?: number;
+}
+
+export interface SurfaceAudioLevel {
+	readonly rmsDb: number;
+	readonly peakDb: number;
+	/** Peak dB in eight log-spaced bands from 20 Hz to the Nyquist frequency. */
+	readonly bands: readonly number[];
+	/** When the level was measured (epoch ms). */
+	readonly at: number;
+}
+
+function parseAudioLevel(value: unknown): SurfaceAudioLevel | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const { rmsDb, peakDb, bands, at } = value as Record<string, unknown>;
+	const finite = (number: unknown): number is number => typeof number === "number" && Number.isFinite(number);
+	if (!finite(rmsDb) || !finite(peakDb) || !finite(at) || !Array.isArray(bands) || bands.length !== 8)
+		return undefined;
+	if (!bands.every(finite)) return undefined;
+	return { rmsDb, peakDb, bands: bands.slice(), at };
+}
+
+/** The file an owned surface writes its audio state to on every change. */
+export function surfaceAudioStatePath(pid: number, options: OwnedSurfaceOptions = {}): string {
+	return join(options.stateDir ?? resolveStateDir(), `surface-${pid}.audio.json`);
+}
+
+/** The surface's last reported audio state; undefined when it reports none (an older surface build) or the file is unreadable. */
+export function surfaceAudioState(pid: number, options: OwnedSurfaceOptions = {}): SurfaceAudioState | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(surfaceAudioStatePath(pid, options), "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || !("playing" in parsed) || !("changedAt" in parsed)) {
+		return undefined;
+	}
+	const { playing, changedAt } = parsed;
+	if (typeof playing !== "boolean" || typeof changedAt !== "number" || !Number.isFinite(changedAt)) return undefined;
+	const level = "level" in parsed ? parseAudioLevel(parsed.level) : undefined;
+	const gpuPid =
+		"gpuPid" in parsed && Number.isSafeInteger(parsed.gpuPid) && Number(parsed.gpuPid) > 0
+			? Number(parsed.gpuPid)
+			: undefined;
+	return {
+		playing,
+		changedAt,
+		...(level === undefined ? {} : { level }),
+		...(gpuPid === undefined ? {} : { gpuPid }),
+	};
 }
 
 /** The socket an owned surface listens on for its agents' pointer input. */

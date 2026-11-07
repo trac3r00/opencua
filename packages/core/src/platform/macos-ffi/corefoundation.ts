@@ -19,6 +19,7 @@ const CF_ARRAY_REF = CF_TYPE_REF;
 const CF_TYPE_REF_POINTER = koffi.pointer(CF_TYPE_REF);
 
 const CF_NUMBER_DOUBLE_TYPE = 13;
+const CF_NUMBER_SINT32_TYPE = 3;
 
 const CFGetTypeID = coreFoundation.func("CFGetTypeID", "ulong", ["void *"]) as KoffiFunc<
 	(reference: CFTypeRef) => number
@@ -185,6 +186,17 @@ export function toCFNumber(value: number): CFNumberRef {
 	const buffer = Buffer.alloc(8);
 	buffer.writeDoubleLE(value, 0);
 	const reference = getCFNumberCreate()(null, CF_NUMBER_DOUBLE_TYPE, buffer);
+	if (reference === null) {
+		throw new Error("CFNumberCreate failed");
+	}
+	return reference;
+}
+
+/** A CFNumber holding a 32-bit integer, for APIs that read their numbers as SInt32; the caller releases it. */
+export function toCFInt32Number(value: number): CFNumberRef {
+	const buffer = Buffer.alloc(4);
+	buffer.writeInt32LE(value, 0);
+	const reference = getCFNumberCreate()(null, CF_NUMBER_SINT32_TYPE, buffer);
 	if (reference === null) {
 		throw new Error("CFNumberCreate failed");
 	}

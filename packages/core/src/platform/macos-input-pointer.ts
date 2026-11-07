@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { DragOptions, Point, Rect } from "../types/index.js";
 import type { MouseButton } from "./macos-ffi/coregraphics.js";
 import type { SkyLightTargetWindow } from "./macos-ffi/skylight.js";
-import { dragSteps, interpolatePointEased, pointerTravelDuration } from "./macos-input-drag.js";
+import { dragSteps, interpolatePointDrag, pointerTravelDuration } from "./macos-input-drag.js";
 import { type GestureSleepOptions, runFocusLeasedGesture } from "./macos-targeted-gesture.js";
 import { isOwnedSurfacePid } from "./owned-surfaces.js";
 
@@ -157,7 +157,7 @@ export async function postDragSequence(
 					await sleep(Math.ceil(remaining));
 				}
 				checkpoint();
-				const position = interpolatePointEased(from, to, step / steps);
+				const position = interpolatePointDrag(from, to, step / steps);
 				await post("drag", position, button, 1, targetWindow, flags);
 				at = position;
 			}

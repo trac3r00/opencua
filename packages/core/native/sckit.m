@@ -12,6 +12,9 @@
 //
 // Memory: returned bytes are malloc'd; caller MUST call sck_free.
 
+#import <CoreAudio/AudioHardware.h>
+#import <CoreAudio/AudioHardwareTapping.h>
+#import <CoreAudio/CATapDescription.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
@@ -19,6 +22,7 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <limits.h>
 #import <math.h>
+#import <os/lock.h>
 #import <stdatomic.h>
 #import <stdint.h>
 #import <stdlib.h>
@@ -256,6 +260,7 @@ static int captureMainDisplayPng(
 
 @interface SCKWindowOperationState : NSObject {
 @public
+	uint32_t windowID;
 	atomic_int pendingCallbacks;
 	atomic_bool workerFinished;
 	atomic_bool gateReleased;
@@ -274,7 +279,30 @@ static int captureMainDisplayPng(
 @end
 
 static NSMutableDictionary<NSNumber *, SCKWindowCapturePlan *> *windowPlanCache;
-static atomic_bool windowCaptureActive = false;
+// One capture in flight per window: a second capture of the same window is refused while the first runs,
+// but captures of different windows proceed concurrently.
+static os_unfair_lock activeWindowCapturesLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableSet<NSNumber *> *activeWindowCaptures = nil;
+
+static bool acquireWindowCaptureGate(uint32_t windowID) {
+	os_unfair_lock_lock(&activeWindowCapturesLock);
+	if (activeWindowCaptures == nil) {
+		activeWindowCaptures = [NSMutableSet set];
+	}
+	NSNumber *key = @(windowID);
+	bool acquired = ![activeWindowCaptures containsObject:key];
+	if (acquired) {
+		[activeWindowCaptures addObject:key];
+	}
+	os_unfair_lock_unlock(&activeWindowCapturesLock);
+	return acquired;
+}
+
+static void releaseWindowCaptureGate(uint32_t windowID) {
+	os_unfair_lock_lock(&activeWindowCapturesLock);
+	[activeWindowCaptures removeObject:@(windowID)];
+	os_unfair_lock_unlock(&activeWindowCapturesLock);
+}
 
 static void releaseWindowCaptureGateIfFinished(SCKWindowOperationState *state) {
 	if (!atomic_load(&state->workerFinished) || atomic_load(&state->pendingCallbacks) != 0) {
@@ -282,7 +310,7 @@ static void releaseWindowCaptureGateIfFinished(SCKWindowOperationState *state) {
 	}
 	bool expected = false;
 	if (atomic_compare_exchange_strong(&state->gateReleased, &expected, true)) {
-		atomic_store(&windowCaptureActive, false);
+		releaseWindowCaptureGate(state->windowID);
 	}
 }
 
@@ -309,7 +337,7 @@ static dispatch_queue_t windowWorkerQueue(void) {
 	static dispatch_queue_t queue = nil;
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{
-		queue = dispatch_queue_create("com.macoscua.sckit.window-capture", DISPATCH_QUEUE_SERIAL);
+		queue = dispatch_queue_create("com.macoscua.sckit.window-capture", DISPATCH_QUEUE_CONCURRENT);
 	});
 	return queue;
 }
@@ -594,14 +622,14 @@ static uint8_t *captureWindow(
 	int32_t format,
 	int32_t quality,
 	int32_t *outLen) {
-	bool expected = false;
-	if (!atomic_compare_exchange_strong(&windowCaptureActive, &expected, true)) {
+	if (!acquireWindowCaptureGate(windowId)) {
 		return NULL;
 	}
 
 	NSTimeInterval startedAt = [NSDate timeIntervalSinceReferenceDate];
 	SCKWindowCaptureResult *result = [[SCKWindowCaptureResult alloc] init];
 	SCKWindowOperationState *operationState = [[SCKWindowOperationState alloc] init];
+	operationState->windowID = windowId;
 	dispatch_semaphore_t done = dispatch_semaphore_create(0);
 	dispatch_async(windowWorkerQueue(), ^{
 		@autoreleasepool {
@@ -632,6 +660,108 @@ static uint8_t *captureWindow(
 void sck_free(uint8_t *bytes) {
 	if (bytes != NULL) {
 		free(bytes);
+	}
+}
+
+// Listens to one process's audio output through a CoreAudio process tap for
+// durationMs (50..10000) and reports its level: RMS and peak of the float
+// samples, and how many samples were heard. Nothing is kept. The tap is
+// private and unmuted, so the process keeps playing to its device as before.
+// Needs the Audio Capture permission; a refusal returns SCK_ERR_CAPTURE_FAILED.
+int32_t sck_measure_process_audio(
+	int32_t pid,
+	int32_t durationMs,
+	double *outRms,
+	double *outPeak,
+	int64_t *outSamples) {
+	if (pid <= 0 || durationMs < 50 || durationMs > 10000 || outRms == NULL ||
+		outPeak == NULL || outSamples == NULL) {
+		return SCK_ERR_INVALID_ARGS;
+	}
+	*outRms = 0;
+	*outPeak = 0;
+	*outSamples = 0;
+	@autoreleasepool {
+		AudioObjectPropertyAddress translate = {
+			kAudioHardwarePropertyTranslatePIDToProcessObject,
+			kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+		AudioObjectID process = kAudioObjectUnknown;
+		UInt32 size = sizeof(process);
+		pid_t qualifier = pid;
+		if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &translate,
+				sizeof(qualifier), &qualifier, &size, &process) != noErr ||
+			process == kAudioObjectUnknown) {
+			return SCK_ERR_NO_SHAREABLE_CONTENT;
+		}
+		CATapDescription *description =
+			[[CATapDescription alloc] initStereoMixdownOfProcesses:@[ @(process) ]];
+		description.privateTap = YES;
+		description.muteBehavior = CATapUnmuted;
+		AudioObjectID tap = kAudioObjectUnknown;
+		if (AudioHardwareCreateProcessTap(description, &tap) != noErr) {
+			return SCK_ERR_CAPTURE_FAILED;
+		}
+		NSDictionary *aggregate = @{
+			@kAudioAggregateDeviceUIDKey : NSUUID.UUID.UUIDString,
+			@kAudioAggregateDeviceNameKey : @"opencua surface listener",
+			@kAudioAggregateDeviceIsPrivateKey : @YES,
+			@kAudioAggregateDeviceTapAutoStartKey : @YES,
+			@kAudioAggregateDeviceTapListKey : @[ @{@kAudioSubTapUIDKey : description.UUID.UUIDString} ],
+		};
+		AudioObjectID device = kAudioObjectUnknown;
+		if (AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)aggregate, &device) != noErr) {
+			AudioHardwareDestroyProcessTap(tap);
+			return SCK_ERR_CAPTURE_FAILED;
+		}
+		__block double squares = 0;
+		__block double peak = 0;
+		__block int64_t samples = 0;
+		os_unfair_lock *lock = malloc(sizeof(os_unfair_lock));
+		*lock = OS_UNFAIR_LOCK_INIT;
+		dispatch_queue_t queue = dispatch_queue_create("com.macoscua.sckit.tap", DISPATCH_QUEUE_SERIAL);
+		AudioDeviceIOProcID proc = NULL;
+		OSStatus created = AudioDeviceCreateIOProcIDWithBlock(&proc, device, queue,
+			^(const AudioTimeStamp *now, const AudioBufferList *input, const AudioTimeStamp *inputTime,
+				AudioBufferList *output, const AudioTimeStamp *outputTime) {
+				double localSquares = 0;
+				double localPeak = 0;
+				int64_t count = 0;
+				for (UInt32 index = 0; input != NULL && index < input->mNumberBuffers; index += 1) {
+					const float *data = input->mBuffers[index].mData;
+					size_t length = input->mBuffers[index].mDataByteSize / sizeof(float);
+					for (size_t sample = 0; data != NULL && sample < length; sample += 1) {
+						double value = data[sample];
+						if (!isfinite(value)) continue;
+						localSquares += value * value;
+						localPeak = fmax(localPeak, fabs(value));
+						count += 1;
+					}
+				}
+				os_unfair_lock_lock(lock);
+				squares += localSquares;
+				peak = fmax(peak, localPeak);
+				samples += count;
+				os_unfair_lock_unlock(lock);
+			});
+		int32_t result = SCK_OK;
+		if (created != noErr || AudioDeviceStart(device, proc) != noErr) {
+			result = SCK_ERR_CAPTURE_FAILED;
+		} else {
+			usleep((useconds_t)durationMs * 1000);
+			AudioDeviceStop(device, proc);
+		}
+		if (proc != NULL) AudioDeviceDestroyIOProcID(device, proc);
+		dispatch_sync(queue, ^{
+		});
+		AudioHardwareDestroyAggregateDevice(device);
+		AudioHardwareDestroyProcessTap(tap);
+		os_unfair_lock_lock(lock);
+		*outRms = samples > 0 ? sqrt(squares / (double)samples) : 0;
+		*outPeak = peak;
+		*outSamples = samples;
+		os_unfair_lock_unlock(lock);
+		free(lock);
+		return result;
 	}
 }
 

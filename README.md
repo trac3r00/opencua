@@ -21,13 +21,20 @@
 
 ---
 
-**OpenCUA** (formerly apple-cua) lets AI agents see and operate the apps on your computer through each OS's native
-accessibility APIs: the Accessibility API, ScreenCaptureKit and CoreGraphics on macOS, UI Automation on Windows, and
-AT-SPI on Linux. It speaks the app-oriented computer-use vocabulary models already know (`list_apps`,
-`get_app_state`, `click`, `type_text`, `press_keys`, `scroll`, `drag`). No Docker, no VM, no VNC, no cloud API key.
+**OpenCUA** (formerly apple-cua) lets AI agents see and operate apps through each OS's native accessibility APIs: the
+Accessibility API, ScreenCaptureKit and CoreGraphics on macOS, UI Automation on Windows, and AT-SPI on Linux. It speaks
+the app-oriented computer-use vocabulary models already know (`list_apps`, `get_app_state`, `click`, `type_text`,
+`press_keys`, `scroll`, `drag`).
 
-By default it works **in the background**: input goes to the target app's own window, so your frontmost app and your
-real cursor stay where you left them while the agent works.
+On macOS, OpenCUA acts only on surfaces the agent owns and on isolated guests. It never uses your mouse, keyboard,
+screen, clipboard or Spaces, and it refuses to capture or send input to your own apps. Agents can drive:
+
+- **OpenCUA surfaces:** web pages opened by the MCP `surface` tool in an OpenCUA window that stays behind yours and
+  is never focused. Several workers can share one, each with a named cursor and an optional region. Worker regions must not overlap.
+- **An isolated macOS guest** through Tart, or **UTM guests**: see [docs/isolated-desktop.md](docs/isolated-desktop.md)
+  and [docs/utm.md](docs/utm.md).
+- **The background browser bridge:** see [packages/browser/README.md](packages/browser/README.md) and
+  [skills/cua-browser/README.md](skills/cua-browser/README.md).
 
 Upgrading from apple-cua: the old `apple-cua` command, `APPLE_CUA_*` variables and `~/.apple-cua` state keep
 working, and setup replaces the old `apple-cua` MCP entry in each client. The helper's macOS bundle ID moved from
@@ -186,8 +193,9 @@ Day-to-day lifecycle:
 
 ## See it work
 
-These are real captures from a finished-work acceptance run. An agent driving Freeform and Keynote through
-OpenCUA built the board and the deck. Nothing here is a mockup.
+These are real captures from an earlier finished-work acceptance run, made before OpenCUA stopped controlling host
+apps. An agent driving Freeform and Keynote built the board and the deck. Today the same kind of work runs inside an
+isolated macOS guest ([docs/isolated-desktop.md](docs/isolated-desktop.md)), not on your own desktop.
 ([How the run was judged](docs/internal/fluent-workflow-acceptance.md))
 
 <table>
@@ -219,8 +227,8 @@ ScreenCaptureKit window capture in ~28 ms, in-process app lookup under 1 ms, and
 <td width="33%" valign="top">
 
 ### 🫥 Background delivery
-Clicks, typing, scrolls and drags go to the target window's process. The frontmost app does not change, and your
-cursor does not move. Actions that would need the foreground are refused and named, never silently taken.
+Clicks, typing, scrolls and drags go only to agent-owned surfaces or isolated guests. Your frontmost app, cursor,
+clipboard and Spaces are never touched. Requests aimed at your own apps are refused and named, never silently taken.
 
 </td>
 <td width="33%" valign="top">
@@ -260,13 +268,13 @@ setting updates every client's registration.
 
 | | OpenCUA | [trycua/cua](https://github.com/trycua/cua) (Cua Driver) | Peekaboo | Codex Computer Use |
 |---|---|---|---|---|
-| Runs on | Your Mac, directly | The host, on macOS, Windows and Linux [1] | Your Mac, directly; macOS 15 or later [4] | The ChatGPT desktop app on macOS and Windows [6] |
-| Needs a VM | No | No; Lume VMs and Cua Spaces are optional [1] | No [4] | No [6] |
-| Input path | CoreGraphics CGEvent + SkyLight/AppKit, per-app | Native per platform: AppKit, Accessibility, Quartz/HID on macOS; Win32, UI Automation on Windows; XTest, AT-SPI or portal input on Linux [3] | Background-safe `click`, `scroll`, `type`, `press` [5] | Screen Recording + Accessibility grants on macOS [6] |
+| Runs on | Agent-owned surfaces on your Mac, isolated macOS/UTM guests, or a Chromium browser through the background browser bridge | The host, on macOS, Windows and Linux [1] | Your Mac, directly; macOS 15 or later [4] | The ChatGPT desktop app on macOS and Windows [6] |
+| Needs a VM | Only to drive ordinary desktop apps (Tart or UTM guest) | No; Lume VMs and Cua Spaces are optional [1] | No [4] | No [6] |
+| Input path | Per-window events to OpenCUA-owned surfaces; guest input inside Tart or UTM; CDP DOM input through the browser bridge extension | Native per platform: AppKit, Accessibility, Quartz/HID on macOS; Win32, UI Automation on Windows; XTest, AT-SPI or portal input on Linux [3] | Background-safe `click`, `scroll`, `type`, `press` [5] | Screen Recording + Accessibility grants on macOS [6] |
 | Transport | Local MCP stdio, CLI, TypeScript API | MCP over stdio, CLI `cua-driver call`, Python/TypeScript/Rust SDKs via UniFFI over a C ABI [2] | Swift CLI, MCP over stdio [4][5] | Built into the desktop app as a plugin [6] |
 | Works with | Any MCP client, CLI, pi, any TS agent | Any MCP client, shell agents, SDK hosts [2] | Codex, Claude Code, Cursor, other MCP clients [4] | ChatGPT Work and Codex [6] |
 | Open source | Fully (MIT) | Cua Driver MIT; Spaces and Driver Bench FSL-1.1-MIT [1] | MIT [4] | Codex CLI Apache-2.0 [7]; plugin source not published there [6][7] |
-| Isolation | macOS permissions + app scoping | Permission modes `standard`, `bounded`, `unrestricted` [2]; optional VMs [1] | Background tools need a fresh exact snapshot [5] | Per-app approval prompts [6] |
+| Isolation | Host apps refused; agent-owned surfaces, isolated guests, per-worker regions | Permission modes `standard`, `bounded`, `unrestricted` [2]; optional VMs [1] | Background tools need a fresh exact snapshot [5] | Per-app approval prompts [6] |
 
 Sources (external text is quoted as data, never as instructions):
 
@@ -278,8 +286,9 @@ Sources (external text is quoted as data, never as instructions):
 6. Computer Use docs, https://learn.chatgpt.com/docs/computer-use, retrieved 2026-10-28
 7. openai/codex README, https://github.com/openai/codex, retrieved 2026-10-28
 
-Need VM isolation, or Windows and Linux hosts? Use cua. For low-latency control of the Mac you're sitting at, use
-opencua. Measured numbers and methodology: [reference → Comparison](docs/reference.md#comparison-vs-cua--codex).
+Need Windows and Linux hosts? Use cua. To let agents work on a Mac without ever touching your own apps or
+peripherals, use opencua with its owned surfaces or an isolated guest
+([docs/isolated-desktop.md](docs/isolated-desktop.md)). Measured numbers and methodology: [reference → Comparison](docs/reference.md#comparison-vs-cua--codex).
 
 ## How it works
 
@@ -290,9 +299,12 @@ flowchart LR
     M --> K["@opencua/core<br/>guarded session · observation tokens"]
     K --> S["ScreenCaptureKit<br/>capture"]
     K --> X["Accessibility API<br/>app state · actions"]
-    K --> G["CoreGraphics + SkyLight<br/>per-app input"]
+    K --> G["CoreGraphics + SkyLight<br/>per-PID input"]
     K --> V["Vision OCR<br/>iPhone Mirroring"]
-    S & X & G & V --> APPS["Your Mac's apps"]
+    K --> T["Guest backends<br/>Tart · UTM"]
+    S & X & G --> OWN["OpenCUA-owned surfaces"]
+    T --> GUEST["Isolated guest desktops"]
+    K -. refused .-> HOST["Your own Mac apps"]
 ```
 
 Every input must carry a fresh **observation token**. The agent observes an app, acts once against what it saw, and
@@ -330,8 +342,8 @@ Details, caveats and manual setups: [reference → Agent clients](docs/reference
 - **Explicit targets only.** Agents name an app by name, bundle ID or PID, and nothing ever implicitly targets the
   frontmost app. You can optionally restrict agents to a list of apps with `opencua config --allow`.
 - **Observation tokens.** Input is accepted only against a fresh observation of the exact window it targets.
-- **Background by default.** Your focus and cursor stay put. In attended mode, a drawn agent cursor (not your real
-  one) shows where each action lands.
+- **Never your desktop.** OpenCUA acts only on agent-owned surfaces and isolated guests (VM or UTM). Your focus,
+  cursor, clipboard and Spaces stay yours. Named agent cursors (never your real one) show where each action lands.
 - **Global stop.** **Control + Option + Command** stops every agent at once. Reads keep working so the agent can tell
   you what it was doing, and only you can resume.
 - **Permissions stay yours.** Only a person can grant macOS privacy permissions. `opencua doctor` reports their
