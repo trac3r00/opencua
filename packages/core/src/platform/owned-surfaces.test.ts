@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,8 @@ import {
 	readOwnedSurfaces,
 	registerOwnedSurface,
 	sendSurfacePointer,
+	surfaceAudioState,
+	surfaceAudioStatePath,
 	surfaceCursorTag,
 	surfaceCursorUserData,
 	surfaceSocketPath,
@@ -114,5 +116,64 @@ describe("#given an owned surface's pointer socket #when agent pointer events ar
 		await done;
 
 		expect(received).toBe(expected);
+	});
+});
+
+describe("#given an owned surface's audio state file #when it is read #then only a well-formed state is reported", () => {
+	it("#given a playing state written by the surface #when read #then it reports playing and the change time", () => {
+		writeFileSync(surfaceAudioStatePath(4242, { stateDir }), '{"playing":true,"changedAt":1794031639000}');
+		expect(surfaceAudioState(4242, { stateDir })).toEqual({ playing: true, changedAt: 1794031639000 });
+	});
+
+	it("#given the silent state a surface writes at startup #when read #then it reports not playing rather than nothing", () => {
+		writeFileSync(surfaceAudioStatePath(4242, { stateDir }), '{"playing":false,"changedAt":1794031639000}');
+		expect(surfaceAudioState(4242, { stateDir })).toEqual({ playing: false, changedAt: 1794031639000 });
+	});
+
+	it("#given a WebAudio level measured by the page #when read #then the level comes back with its bands", () => {
+		const level = {
+			rmsDb: -63,
+			peakDb: -60,
+			bands: [-160, -160, -160, -88, -160, -160, -160, -160],
+			at: 1794036018450,
+		};
+		writeFileSync(
+			surfaceAudioStatePath(4242, { stateDir }),
+			JSON.stringify({ playing: true, changedAt: 1794036018265, level }),
+		);
+		expect(surfaceAudioState(4242, { stateDir })).toEqual({ playing: true, changedAt: 1794036018265, level });
+	});
+
+	it("#given a malformed level #when read #then the playing state is kept and the level dropped", () => {
+		for (const level of [
+			{ rmsDb: "x", peakDb: -1, bands: [], at: 1 },
+			{ rmsDb: -1, peakDb: -1, bands: [1, 2], at: 1 },
+			{ rmsDb: -1, peakDb: -1, bands: [0, 0, 0, 0, 0, 0, 0, "x"], at: 1 },
+			null,
+		]) {
+			writeFileSync(
+				surfaceAudioStatePath(4242, { stateDir }),
+				JSON.stringify({ playing: true, changedAt: 5, level }),
+			);
+			expect(surfaceAudioState(4242, { stateDir })).toEqual({ playing: true, changedAt: 5 });
+		}
+	});
+
+	it("#given no file #when read #then there is no audio state", () => {
+		expect(surfaceAudioState(4242, { stateDir })).toBeUndefined();
+	});
+
+	it("#given malformed or mistyped files #when read #then there is no audio state", () => {
+		for (const text of [
+			"",
+			"not json",
+			"null",
+			'{"playing":"yes","changedAt":1}',
+			'{"playing":true}',
+			'{"playing":false,"changedAt":"1"}',
+		]) {
+			writeFileSync(surfaceAudioStatePath(4242, { stateDir }), text);
+			expect(surfaceAudioState(4242, { stateDir })).toBeUndefined();
+		}
 	});
 });

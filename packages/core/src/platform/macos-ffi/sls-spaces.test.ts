@@ -32,11 +32,18 @@ const ffi = vi.hoisted(() => {
 		}),
 	);
 	let managedResult: Ref | null = displays;
+	/** What SLSCopySpacesForWindows answers per window id; a window missing here answers null. */
+	const windowSpaces = new Map<number, Ref>();
 	const sky = {
 		SLSMainConnectionID: vi.fn(() => 7),
 		SLSGetActiveSpace: vi.fn(() => 10),
 		SLSCopyManagedDisplaySpaces: vi.fn(() => managedResult),
 		SLSSpaceGetType: vi.fn(() => 0),
+		SLSCopySpacesForWindows: vi.fn((_connection: number, _mask: number, windows: Ref) => {
+			const [only] = windows.values ?? [];
+			// Window ids are uint32; the binding hands them over as SInt32, so map the signed value back.
+			return typeof only?.value === "number" ? (windowSpaces.get(only.value >>> 0) ?? null) : null;
+		}),
 	};
 	const core = {
 		CFRelease: vi.fn(),
@@ -56,6 +63,7 @@ const ffi = vi.hoisted(() => {
 		sky,
 		core,
 		koffi,
+		windowSpaces,
 		get managedResult() {
 			return managedResult;
 		},
@@ -78,6 +86,9 @@ vi.mock("./corefoundation.js", () => ({
 	isCFDictionary: (reference: { kind?: string }): boolean => reference.kind === "dictionary",
 	isCFNumber: (reference: { kind?: string }): boolean => reference.kind === "number",
 	isCFString: (reference: { kind?: string }): boolean => reference.kind === "string",
+	toCFInt32Number: (value: number) => ffi.ref.number(value),
+	withCFArray: <T>(values: readonly unknown[], callback: (reference: unknown) => T): T =>
+		callback({ kind: "array", values }),
 	withCFString: <T>(value: string, callback: (reference: { value: string }) => T): T => callback({ value }),
 }));
 
@@ -86,6 +97,8 @@ const { activeSpaceId, managedDisplaySpaces, parseWindowSpaceResults, spaceTypeF
 );
 
 beforeEach(() => {
+	ffi.windowSpaces.clear();
+	ffi.sky.SLSCopySpacesForWindows.mockClear();
 	ffi.managedResult = ffi.ref.array(
 		ffi.ref.dictionary({
 			"Display Identifier": ffi.ref.string("display-a"),
@@ -140,10 +153,38 @@ describe("#given SkyLight returns no managed-space array #when queried #then an 
 	});
 });
 
-describe("#given window IDs #when requesting their spaces without a safe native binding #then no crash occurs", () => {
-	it("returns an empty mapping for valid and invalid IDs", () => {
-		expect(spacesForWindows([123])).toEqual(new Map());
+describe("#given window IDs #when requesting their spaces #then each window is asked on its own with mask 7", () => {
+	it("#given two windows on known spaces #when queried #then each maps to its own space list", () => {
+		ffi.windowSpaces.set(123, ffi.ref.array(ffi.ref.number(10)));
+		ffi.windowSpaces.set(456, ffi.ref.array(ffi.ref.number(20), ffi.ref.number(21)));
+
+		expect(spacesForWindows([123, 456])).toEqual(
+			new Map([
+				[123, [10]],
+				[456, [20, 21]],
+			]),
+		);
+		expect(ffi.sky.SLSCopySpacesForWindows).toHaveBeenCalledTimes(2);
+		expect(ffi.sky.SLSCopySpacesForWindows.mock.calls.map(([, mask]) => mask)).toEqual([7, 7]);
+	});
+
+	it("#given an unknown window, an empty list, or a non-array answer #when queried #then the window is left out", () => {
+		ffi.windowSpaces.set(5, ffi.ref.array());
+		ffi.windowSpaces.set(6, ffi.ref.number(10));
+
+		expect(spacesForWindows([4, 5, 6])).toEqual(new Map());
+	});
+
+	it("#given a window id at or above 2^31 #when queried #then it still maps to its spaces", () => {
+		ffi.windowSpaces.set(0x80000001, ffi.ref.array(ffi.ref.number(30)));
+
+		expect(spacesForWindows([0x80000001])).toEqual(new Map([[0x80000001, [30]]]));
+	});
+
+	it("#given an invalid window id #when queried #then nothing is asked natively", () => {
 		expect(spacesForWindows([0])).toEqual(new Map());
+		expect(spacesForWindows([2 ** 32])).toEqual(new Map());
+		expect(ffi.sky.SLSCopySpacesForWindows).not.toHaveBeenCalled();
 	});
 
 	it("maps injected per-window CF space lists to their window IDs", () => {

@@ -47,7 +47,9 @@
 		"native/cursor-overlay.m",
 		"native/cursor-overlay",
 		"native/history-recorder.m",
-		"native/history-recorder"
+		"native/history-recorder",
+		"native/opencua-surface.m",
+		"native/opencua-surface"
 	],
 	"dependencies": {
 		"get-windows": "9.3.0",

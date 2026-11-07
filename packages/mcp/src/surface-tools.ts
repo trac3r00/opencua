@@ -1,5 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { type GuardedComputerInterface, closeOwnedSurface, openOwnedSurface, readOwnedSurfaces } from "@opencua/core";
+import {
+	type GuardedComputerInterface,
+	closeOwnedSurface,
+	listenToSurface,
+	openOwnedSurface,
+	readOwnedSurfaces,
+} from "@opencua/core";
 import { z } from "zod/v4";
 import { textResult } from "./tool-result.js";
 
@@ -14,18 +20,23 @@ export function registerSurfaceTools(server: McpServer, computer: GuardedCompute
 		"surface",
 		{
 			description:
-				"Open (url, frame [x,y,w,h]) or close (pid) an opencua-owned web window: kept behind the person's windows, never focused, the only host window that takes input. Use its pid as app.",
+				"Open (url, frame [x,y,w,h]), close (pid) or listen (pid, duration_ms: audio level) to an opencua-owned web window, kept behind the person's windows and never focused. Use its pid as app.",
 			inputSchema: z
 				.object({
-					op: z.enum(["open", "close"]),
+					op: z.enum(["open", "close", "listen"]),
 					url: z.string().optional(),
 					frame: z.array(z.number().int()).length(4).optional(),
 					pid: z.number().int().optional(),
+					duration_ms: z.number().int().min(50).max(10_000).optional(),
 				})
 				.strict(),
 			annotations: { readOnlyHint: false, destructiveHint: false },
 		},
 		async (input) => {
+			if (input.op === "listen") {
+				if (input.pid === undefined) throw new Error("listen needs pid");
+				return textResult(JSON.stringify(await listenToSurface(input.pid, input.duration_ms ?? 1_000)));
+			}
 			if (input.op === "close") {
 				if (input.pid === undefined || !closeOwnedSurface(input.pid)) {
 					throw new Error(`pid ${input.pid ?? "(missing)"} is not an open owned surface`);

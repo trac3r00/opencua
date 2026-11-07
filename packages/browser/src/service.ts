@@ -21,6 +21,7 @@ export const DEFAULT_PORT = 47953;
 export type ServicePaths = {
 	readonly launchAgent: string;
 	readonly nativeHostManifest: string;
+	readonly nativeHostManifests: readonly string[];
 	readonly nativeHostProgram: string;
 	readonly nativeHostLauncher: string;
 	readonly stateDirectory: string;
@@ -38,6 +39,7 @@ type LaunchctlResult = {
 export type ServiceOptions = {
 	readonly extensionId?: string;
 	readonly homeDirectory?: string;
+	readonly systemApplicationsDirectory?: string;
 	readonly packageRoot?: string;
 	readonly nodePath?: string;
 	readonly platform?: NodeJS.Platform;
@@ -53,6 +55,7 @@ export type DoctorResult = {
 	readonly connectionReady: boolean;
 	readonly launchAgent: string;
 	readonly nativeHostManifest: string;
+	readonly nativeHostManifests: readonly string[];
 };
 
 export async function initializeConnectionMetadata(stateDirectory?: string): Promise<Connection> {
@@ -66,19 +69,39 @@ export async function initializeConnectionMetadata(stateDirectory?: string): Pro
 	return connection;
 }
 
+const BRAVE_BROWSER_DIRECTORY = "BraveSoftware/Brave-Browser";
+// Chromium-family browsers: support directory under ~/Library/Application Support and app bundle name.
+const SUPPORTED_BROWSERS = [
+	{ supportDirectory: BRAVE_BROWSER_DIRECTORY, applicationBundle: "Brave Browser.app" },
+	{ supportDirectory: "Google/Chrome", applicationBundle: "Google Chrome.app" },
+	{ supportDirectory: "Google/Chrome Beta", applicationBundle: "Google Chrome Beta.app" },
+	{ supportDirectory: "Google/Chrome Canary", applicationBundle: "Google Chrome Canary.app" },
+	{ supportDirectory: "Chromium", applicationBundle: "Chromium.app" },
+	{ supportDirectory: "Microsoft Edge", applicationBundle: "Microsoft Edge.app" },
+	{ supportDirectory: "Arc/User Data", applicationBundle: "Arc.app" },
+	{ supportDirectory: "Vivaldi", applicationBundle: "Vivaldi.app" },
+] as const;
+
+function nativeHostManifestPath(libraryDirectory: string, browserDirectory: string): string {
+	return join(
+		libraryDirectory,
+		"Application Support",
+		browserDirectory,
+		"NativeMessagingHosts",
+		`${NATIVE_HOST_NAME}.json`,
+	);
+}
+
 function pathsFor(homeDirectory: string, packageRoot: string, stateDirectory: string): ServicePaths {
 	const libraryDirectory = join(homeDirectory, "Library");
 	const logDirectory = join(libraryDirectory, "Logs", "Browser-Skill-OmO");
-	const nativeHostDirectory = join(
-		libraryDirectory,
-		"Application Support",
-		"BraveSoftware",
-		"Brave-Browser",
-		"NativeMessagingHosts",
+	const nativeHostManifests = SUPPORTED_BROWSERS.map((browser) =>
+		nativeHostManifestPath(libraryDirectory, browser.supportDirectory),
 	);
 	return {
 		launchAgent: join(libraryDirectory, "LaunchAgents", `${SERVICE_LABEL}.plist`),
-		nativeHostManifest: join(nativeHostDirectory, `${NATIVE_HOST_NAME}.json`),
+		nativeHostManifest: nativeHostManifestPath(libraryDirectory, BRAVE_BROWSER_DIRECTORY),
+		nativeHostManifests,
 		nativeHostProgram: join(packageRoot, "dist", "native-host.js"),
 		nativeHostLauncher: join(stateDirectory, "browser-native-host"),
 		stateDirectory,
@@ -189,6 +212,54 @@ async function portIsListening(port: number): Promise<boolean> {
 	});
 }
 
+async function directoryExists(path: string): Promise<boolean> {
+	return await stat(path).then(
+		(entry) => entry.isDirectory(),
+		(error: unknown) => {
+			if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+			throw error;
+		},
+	);
+}
+
+async function regularFileExists(path: string): Promise<boolean> {
+	return await stat(path).then(
+		(entry) => entry.isFile(),
+		(error: unknown) => {
+			if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+			throw error;
+		},
+	);
+}
+
+async function firstRegularFile(paths: readonly string[]): Promise<string | undefined> {
+	const found = await Promise.all(paths.map((path) => regularFileExists(path)));
+	return paths.find((_, index) => found[index] === true);
+}
+
+// A browser counts as installed when its support directory or its app bundle exists in an applications directory.
+// Manifests go to every installed browser; Brave is the fallback when none is detected.
+async function registeredManifestPaths(
+	homeDirectory: string,
+	applicationsDirectories: readonly string[],
+): Promise<string[]> {
+	const libraryDirectory = join(homeDirectory, "Library");
+	const installed = await Promise.all(
+		SUPPORTED_BROWSERS.map(async (browser) => {
+			if (await directoryExists(join(libraryDirectory, "Application Support", browser.supportDirectory)))
+				return true;
+			const bundles = await Promise.all(
+				applicationsDirectories.map((directory) => directoryExists(join(directory, browser.applicationBundle))),
+			);
+			return bundles.includes(true);
+		}),
+	);
+	const selected = SUPPORTED_BROWSERS.filter((_, index) => installed[index] === true).map((browser) =>
+		nativeHostManifestPath(libraryDirectory, browser.supportDirectory),
+	);
+	return selected.length > 0 ? selected : [nativeHostManifestPath(libraryDirectory, BRAVE_BROWSER_DIRECTORY)];
+}
+
 async function writePrivateFile(path: string, contents: string): Promise<void> {
 	await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 	await writeFile(path, contents, { mode: 0o600 });
@@ -212,7 +283,21 @@ function serviceContext(options: ServiceOptions) {
 	const checkPort = options.isPortListening ?? portIsListening;
 	const domain = `gui/${uid}`;
 	const serviceTarget = `${domain}/${SERVICE_LABEL}`;
-	return { paths, nodePath, domain, serviceTarget, launchctl, checkPort, stateDirectory };
+	const applicationsDirectories = [
+		options.systemApplicationsDirectory ?? "/Applications",
+		join(homeDirectory, "Applications"),
+	];
+	return {
+		homeDirectory,
+		applicationsDirectories,
+		paths,
+		nodePath,
+		domain,
+		serviceTarget,
+		launchctl,
+		checkPort,
+		stateDirectory,
+	};
 }
 
 export async function installBrowserService(options: ServiceOptions = {}): Promise<ServicePaths> {
@@ -248,6 +333,7 @@ export async function installBrowserService(options: ServiceOptions = {}): Promi
 			`Port ${connection.port} is already in use. Stop the existing browser serve process before installing the daemon.`,
 		);
 	}
+	const registeredManifests = await registeredManifestPaths(context.homeDirectory, context.applicationsDirectories);
 	const artifacts = [
 		{
 			path: context.paths.launchAgent,
@@ -259,11 +345,11 @@ export async function installBrowserService(options: ServiceOptions = {}): Promi
 			contents: renderNativeHostLauncher(context.paths, context.nodePath, extensionId),
 			mode: 0o700,
 		},
-		{
-			path: context.paths.nativeHostManifest,
+		...registeredManifests.map((path) => ({
+			path,
 			contents: renderNativeHostManifest(context.paths, extensionId),
 			mode: 0o600,
-		},
+		})),
 	];
 	const backups = await Promise.all(
 		artifacts.map(async ({ path }) => {
@@ -298,7 +384,7 @@ export async function installBrowserService(options: ServiceOptions = {}): Promi
 		}
 		throw error;
 	}
-	return context.paths;
+	return { ...context.paths, nativeHostManifest: registeredManifests[0] ?? context.paths.nativeHostManifest };
 }
 
 export async function doctorBrowserService(options: ServiceOptions = {}): Promise<DoctorResult> {
@@ -306,7 +392,7 @@ export async function doctorBrowserService(options: ServiceOptions = {}): Promis
 	if ((options.platform ?? process.platform) !== "darwin") {
 		throw new Error("The persistent browser service is supported only on macOS.");
 	}
-	const [launchAgent, nativeHostManifest, nativeHostLauncher, connectionReady] = await Promise.all([
+	const [launchAgent, registeredManifest, nativeHostLauncher, connectionReady] = await Promise.all([
 		readFile(context.paths.launchAgent, "utf8").then(
 			() => true,
 			(error: unknown) => {
@@ -314,13 +400,7 @@ export async function doctorBrowserService(options: ServiceOptions = {}): Promis
 				throw error;
 			},
 		),
-		readFile(context.paths.nativeHostManifest, "utf8").then(
-			() => true,
-			(error: unknown) => {
-				if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
-				throw error;
-			},
-		),
+		firstRegularFile(context.paths.nativeHostManifests),
 		readFile(context.paths.nativeHostLauncher).then(
 			() => true,
 			(error: unknown) => {
@@ -338,11 +418,12 @@ export async function doctorBrowserService(options: ServiceOptions = {}): Promis
 	]);
 	const status = await context.launchctl(["print", context.serviceTarget]);
 	return {
-		installed: launchAgent && nativeHostManifest && nativeHostLauncher,
+		installed: launchAgent && registeredManifest !== undefined && nativeHostLauncher,
 		running: status.code === 0,
 		connectionReady,
 		launchAgent: context.paths.launchAgent,
-		nativeHostManifest: context.paths.nativeHostManifest,
+		nativeHostManifest: registeredManifest ?? context.paths.nativeHostManifest,
+		nativeHostManifests: context.paths.nativeHostManifests,
 	};
 }
 
@@ -360,7 +441,7 @@ export async function uninstallBrowserService(options: ServiceOptions = {}): Pro
 	}
 	await Promise.all([
 		rm(context.paths.launchAgent, { force: true }),
-		rm(context.paths.nativeHostManifest, { force: true }),
+		...context.paths.nativeHostManifests.map((path) => rm(path, { force: true })),
 		rm(context.paths.nativeHostLauncher, { force: true }),
 	]);
 	return context.paths;

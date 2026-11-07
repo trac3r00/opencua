@@ -134,3 +134,47 @@ describe("#given a worker lookup that fails before anything is sent #when the er
 		expect(JSON.parse(text)).toMatchObject({ code, retry: "safe" });
 	});
 });
+
+describe("#given shared-surface regions #when processes claim workers #then regions travel with the claim and must stay disjoint", () => {
+	const shared = (overrides: Partial<SharedWorkerEntry>): SharedWorkerEntry =>
+		entry({ shared: true, region: { x: 0, y: 0, width: 100, height: 100 }, ...overrides });
+
+	it("#given a region in a claim #when it is found #then the region comes back", () => {
+		const registry = fileWorkerRegistry(directory);
+		registry.claim([shared({})]);
+		expect(registry.find("one")?.region).toEqual({ x: 0, y: 0, width: 100, height: 100 });
+	});
+
+	it("#given another live process holds a region #when an overlapping or whole-window worker claims the surface #then it is refused", () => {
+		const registry = fileWorkerRegistry(directory, () => true);
+		registry.claim([shared({ ownerPid: 1 })]);
+		expect(() =>
+			registry.claim([shared({ worker_id: "two", region: { x: 50, y: 50, width: 100, height: 100 } })]),
+		).toThrow(
+			/worker "two" cannot share app "Finder" with worker "one" in another opencua session: their regions overlap/,
+		);
+		expect(() => registry.claim([entry({ worker_id: "three", shared: true })])).toThrow(/one owns the whole window/);
+		expect(() =>
+			registry.claim([shared({ worker_id: "four", region: { x: 100, y: 0, width: 100, height: 100 } })]),
+		).not.toThrow();
+	});
+
+	it("#given a confined worker assigned by another process #when this process acts for it #then its region still confines it", async () => {
+		const registry = fileWorkerRegistry(directory, () => true);
+		registry.claim([shared({ worker_id: "remote", ownerPid: 1, region: { x: 0, y: 0, width: 10, height: 10 } })]);
+		const computer = new FakeGuardedComputer();
+		computer.delivery = "background";
+		const local = new WorkerCoordinator(new GuardedSession(computer), computer, registry, (pid) => pid === 1234);
+		try {
+			const observed = await local.observe("remote");
+			const token = observed.observation_token;
+			if (token === undefined) throw new Error("observing the adopted worker should issue a token");
+			await expect(local.run("remote", token, [{ type: "click", x: 300, y: 100 }], undefined)).rejects.toThrow(
+				/outside its region/,
+			);
+			expect(computer.effects).toEqual([]);
+		} finally {
+			await local.close();
+		}
+	});
+});

@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { isOwnedSurfacePid, resolveAppPid, withCursorIdentity } from "@opencua/core";
-import type { CursorOwner, GuardedComputerInterface } from "@opencua/core";
+import {
+	isOwnedSurfacePid,
+	parseElementIndex,
+	resolveAppPid,
+	withCursorIdentity,
+	withInputRegion,
+} from "@opencua/core";
+import type { CursorOwner, GuardedComputerInterface, InputObservation, Point } from "@opencua/core";
 import type {
 	GuardedSession,
 	MutationOptions,
 	ObservationOptions,
 	RunControl,
+	RunStepDriver,
 	VerifyRequest,
 } from "./guarded-session.js";
 import { notificationsEnabled, postNotification } from "./notify.js";
@@ -20,6 +27,16 @@ export type WorkerAssignmentInput = {
 	readonly app: string;
 	readonly agent_name?: string | undefined;
 	readonly parent_agent_name?: string | undefined;
+	/** Part of a shared window this worker's pointer is confined to, in screenshot-local window pixels. */
+	readonly region?: WorkerRegion | undefined;
+};
+
+/** Same space as a step's click x/y and drag points: pixels of the observed window screenshot, origin top-left. */
+export type WorkerRegion = {
+	readonly x: number;
+	readonly y: number;
+	readonly width: number;
+	readonly height: number;
 };
 
 export type WorkerAssignment = WorkerAssignmentInput & {
@@ -97,6 +114,115 @@ function payload(result: ToolResult): Record<string, unknown> {
 	return Object.fromEntries(Object.entries(value));
 }
 
+/**
+ * A target outside the worker's region stopped the run before that step's input was sent. A step resolved mid-run can
+ * be refused after earlier steps of the same run went out; `actionDispatched` says so.
+ */
+export class WorkerRegionRefusal extends Error {
+	readonly reason = "outside-worker-region";
+
+	constructor(
+		workerId: string,
+		step: number,
+		region: WorkerRegion,
+		detail: string,
+		readonly actionDispatched = false,
+	) {
+		super(
+			`worker "${workerId}" step ${step} ${detail}, outside its region ${describeRegion(region)}; ${
+				actionDispatched
+					? "it and the steps after it were not sent, but earlier steps of this run were: observe again"
+					: "nothing was sent"
+			}`,
+		);
+		this.name = "WorkerRegionRefusal";
+	}
+}
+
+function describeRegion({ x, y, width, height }: WorkerRegion): string {
+	return `{x: ${x}, y: ${y}, width: ${width}, height: ${height}}`;
+}
+
+function assertRegion(workerId: string, region: WorkerRegion): void {
+	const finite = [region.x, region.y, region.width, region.height].every((value) => Number.isFinite(value));
+	if (!finite || region.width <= 0 || region.height <= 0) {
+		throw new Error(`worker "${workerId}" region must have finite x, y, width, height with width and height > 0`);
+	}
+}
+
+/** A region in window screenshot pixels as global screen points, through the observed viewport. */
+function regionOnScreen(region: WorkerRegion, observation: InputObservation | undefined): WorkerRegion | undefined {
+	const viewport = observation?.screenshotViewport;
+	if (viewport === undefined || !(viewport.width > 0 && viewport.height > 0)) return undefined;
+	const { bounds } = viewport;
+	const scaleX = bounds.width / viewport.width;
+	const scaleY = bounds.height / viewport.height;
+	return {
+		x: bounds.x + region.x * scaleX,
+		y: bounds.y + region.y * scaleY,
+		width: region.width * scaleX,
+		height: region.height * scaleY,
+	};
+}
+
+/** Positive-area intersection; regions that only share an edge do not overlap. */
+function regionsOverlap(a: WorkerRegion, b: WorkerRegion): boolean {
+	return (
+		Math.min(a.x + a.width, b.x + b.width) > Math.max(a.x, b.x) &&
+		Math.min(a.y + a.height, b.y + b.height) > Math.max(a.y, b.y)
+	);
+}
+
+/** Half-open like the observed viewport: the right and bottom edges belong to the next region. */
+function regionContains(region: WorkerRegion, point: Point): boolean {
+	return (
+		point.x >= region.x &&
+		point.x < region.x + region.width &&
+		point.y >= region.y &&
+		point.y < region.y + region.height
+	);
+}
+
+type PointerTarget =
+	| { readonly point: Point; readonly what: string }
+	| { readonly element: number; readonly what: string };
+
+/**
+ * Where a step's pointer would land, in screenshot-local window pixels. `undefined` means the step names its
+ * element by description, which resolves only while the run executes. Keyboard and accessibility-only steps aim
+ * at nothing.
+ */
+function pointerTargets(step: RunStep): readonly PointerTarget[] | undefined {
+	switch (step.type) {
+		case "click":
+			if (step.target !== undefined) return undefined;
+			return step.element_index === undefined
+				? [{ point: { x: step.x ?? Number.NaN, y: step.y ?? Number.NaN }, what: "clicks" }]
+				: [{ element: parseElementIndex(step.element_index), what: "clicks element" }];
+		case "drag":
+			return [
+				{ point: { x: step.from_x, y: step.from_y }, what: "starts its drag" },
+				...(step.waypoints ?? []).map((point, index) => ({ point, what: `drags through waypoint ${index}` })),
+				{ point: { x: step.to_x, y: step.to_y }, what: "ends its drag" },
+			];
+		case "scroll":
+			if (step.target !== undefined) return undefined;
+			return step.element_index === undefined
+				? []
+				: [{ element: parseElementIndex(step.element_index), what: "scrolls element" }];
+		// Accessibility edits move no pointer, but they still change the element: it must sit in the worker's region.
+		case "set_value":
+		case "perform_secondary_action":
+		case "select_text":
+			if (step.target !== undefined) return undefined;
+			return step.element_index === undefined
+				? []
+				: [{ element: parseElementIndex(step.element_index), what: `runs ${step.type} on element` }];
+		default:
+			return [];
+	}
+}
+
 /** A user Take Over or Stop refused the call before any input was sent. */
 export class WorkerControlRefusal extends Error {
 	readonly reason: "worker-paused" | "worker-stopped";
@@ -140,9 +266,48 @@ export class WorkerCoordinator {
 			})),
 		);
 		this.assertOpen();
+		const regions: { readonly worker_id: string; readonly pid: number; readonly region: WorkerRegion }[] = [
+			...this.workers.values(),
+		].flatMap(({ assignment, pid }) =>
+			assignment.region === undefined ? [] : [{ worker_id: assignment.worker_id, pid, region: assignment.region }],
+		);
+		// A whole-window worker would reach into every region, so one surface has either confined workers or unconfined ones.
+		const wholeWindow: { readonly worker_id: string; readonly pid: number }[] = [...this.workers.values()].flatMap(
+			({ assignment, pid }) => (assignment.region === undefined ? [{ worker_id: assignment.worker_id, pid }] : []),
+		);
 		for (const { assignment, pid } of resolved) {
 			if (workerIds.has(assignment.worker_id) || this.workers.has(assignment.worker_id)) {
 				throw new Error(`worker "${assignment.worker_id}" is already assigned`);
+			}
+			const region = assignment.region;
+			if (region !== undefined) {
+				assertRegion(assignment.worker_id, region);
+				if (!this.sharedApp(pid)) {
+					throw new Error(
+						`worker "${assignment.worker_id}" gives a region, but app "${assignment.app}" is not a shared opencua-owned surface; omit region to own the whole window`,
+					);
+				}
+				const clash = regions.find((other) => other.pid === pid && regionsOverlap(other.region, region));
+				if (clash !== undefined) {
+					throw new Error(
+						`worker "${assignment.worker_id}" region ${describeRegion(region)} overlaps worker "${clash.worker_id}" region ${describeRegion(clash.region)} in the same window`,
+					);
+				}
+				const unconfined = wholeWindow.find((other) => other.pid === pid);
+				if (unconfined !== undefined) {
+					throw new Error(
+						`worker "${assignment.worker_id}" gives a region, but worker "${unconfined.worker_id}" already owns the whole window; give every worker on this surface a region`,
+					);
+				}
+				regions.push({ worker_id: assignment.worker_id, pid, region });
+			} else if (this.sharedApp(pid)) {
+				const confined = regions.find((other) => other.pid === pid);
+				if (confined !== undefined) {
+					throw new Error(
+						`worker "${assignment.worker_id}" gives no region, but worker "${confined.worker_id}" is confined to ${describeRegion(confined.region)} in this window; give every worker on this surface a region`,
+					);
+				}
+				wholeWindow.push({ worker_id: assignment.worker_id, pid });
 			}
 			if (
 				!this.sharedApp(pid) &&
@@ -163,6 +328,7 @@ export class WorkerCoordinator {
 				...(assignment.parent_agent_name === undefined ? {} : { parent_agent_name: assignment.parent_agent_name }),
 				appPid: pid,
 				...(this.sharedApp(pid) ? { shared: true } : {}),
+				...(assignment.region === undefined ? {} : { region: assignment.region }),
 				ownerPid: process.pid,
 			})),
 		);
@@ -222,13 +388,14 @@ export class WorkerCoordinator {
 					observation: observed.result,
 				};
 				worker.busy = false;
-				const { worker_id, task, app, cursor_id, cursor_owner } = worker.assignment;
+				const { worker_id, task, app, cursor_id, cursor_owner, region } = worker.assignment;
 				return {
 					worker_id,
 					task,
 					app,
 					cursor_id,
 					cursor_owner,
+					...(region === undefined ? {} : { region }),
 					...(observed.observation_token === undefined ? {} : { observation_token: observed.observation_token }),
 					observation: observed.result,
 				};
@@ -284,6 +451,7 @@ export class WorkerCoordinator {
 					app: assignment.app,
 					cursor_id: assignment.cursor_id,
 					cursor_owner: assignment.cursor_owner,
+					...(assignment.region === undefined ? {} : { region: assignment.region }),
 					...(assignment.observation_token === undefined
 						? {}
 						: { observation_token: assignment.observation_token }),
@@ -368,20 +536,41 @@ export class WorkerCoordinator {
 			executionOptions.signal === undefined
 				? activeRun.signal
 				: AbortSignal.any([executionOptions.signal, activeRun.signal]);
+		const region = worker.assignment.region;
 		try {
+			const driver = createRunStepDriver(this.computer);
 			const dispatch = () =>
 				withCursorIdentity(
 					worker.assignment.cursor_id,
-					() =>
-						this.session.runSteps(
-							token,
-							String(worker.pid),
-							steps,
-							expect,
-							createRunStepDriver(this.computer),
-							resultOptions,
-							{ ...executionOptions, signal },
-						),
+					async () => {
+						const runAll = () =>
+							this.session.runSteps(
+								token,
+								String(worker.pid),
+								steps,
+								expect,
+								region === undefined ? driver : this.confinedDriver(driver, worker, region, steps),
+								resultOptions,
+								{ ...executionOptions, signal },
+							);
+						if (region === undefined) return await runAll();
+						// Every target known before the run is checked before any of its input goes out.
+						const observation = this.computer.getInputObservation(worker.pid);
+						for (const [index, step] of steps.entries()) {
+							await this.assertInRegion(worker, region, index, pointerTargets(step) ?? [], observation);
+						}
+						const screenRegion = regionOnScreen(region, observation);
+						if (screenRegion === undefined) {
+							throw new WorkerRegionRefusal(
+								worker.assignment.worker_id,
+								0,
+								region,
+								"has no observed window to place its region on",
+							);
+						}
+						// The input layer refuses any event or keystroke outside the region right before posting it.
+						return await withInputRegion(screenRegion, runAll);
+					},
 					worker.assignment.cursor_owner,
 				);
 			const pending = this.computer.delivery === "background" ? dispatch() : this.attendedTail.then(dispatch);
@@ -425,6 +614,10 @@ export class WorkerCoordinator {
 				result,
 			};
 		} catch (error: unknown) {
+			if (error instanceof WorkerRegionRefusal && !error.actionDispatched) {
+				// Nothing was sent and the session never consumed the token, so the worker may fix the step and retry.
+				worker.assignment = { ...worker.assignment, observation_token: token };
+			}
 			const errorSummary = (error instanceof Error ? error.message : String(error)).slice(0, 200);
 			worker.lastRun = {
 				startedAt,
@@ -452,6 +645,89 @@ export class WorkerCoordinator {
 		await this.session.close();
 	}
 
+	/**
+	 * The driver for a confined worker: a step whose target is named by description resolves mid-run, so its
+	 * resolved point is checked right before that step's input goes out.
+	 */
+	private confinedDriver(
+		driver: RunStepDriver,
+		worker: WorkerState,
+		region: WorkerRegion,
+		steps: readonly RunStep[],
+	): RunStepDriver {
+		// A resolved step is a new object; remember which submitted step it came from so a refusal names its index.
+		const origin = new Map<RunStep, number>(steps.map((step, index) => [step, index]));
+		const remember = (step: RunStep, runnable: RunStep): RunStep => {
+			origin.set(runnable, origin.get(step) ?? -1);
+			return runnable;
+		};
+		let dispatched = false;
+		return {
+			...driver,
+			resolve: (step, elementIndex) => remember(step, driver.resolve(step, elementIndex)),
+			resolveAtPoint: (step, observation, point) => remember(step, driver.resolveAtPoint(step, observation, point)),
+			dispatch: async (step, targetPid, observation, actions, options) => {
+				const index = origin.get(step) ?? -1;
+				await this.assertInRegion(worker, region, index, pointerTargets(step) ?? [], observation, dispatched);
+				const result = await driver.dispatch(step, targetPid, observation, actions, options);
+				// reveal and wait_for only read the screen: their dispatch sends no input.
+				if (step.type !== "reveal" && step.type !== "wait_for") dispatched = true;
+				return result;
+			},
+		};
+	}
+
+	private async assertInRegion(
+		worker: WorkerState,
+		region: WorkerRegion,
+		step: number,
+		targets: readonly PointerTarget[],
+		observation: InputObservation | undefined,
+		dispatchedBefore = false,
+	): Promise<void> {
+		for (const target of targets) {
+			const point =
+				"point" in target ? target.point : await this.elementPoint(worker.pid, target.element, observation);
+			const label = "point" in target ? target.what : `${target.what} ${target.element}`;
+			if (point === undefined) {
+				throw new WorkerRegionRefusal(
+					worker.assignment.worker_id,
+					step,
+					region,
+					`${label}, which has no on-screen frame to prove it lies`,
+					dispatchedBefore,
+				);
+			}
+			if (!regionContains(region, point)) {
+				throw new WorkerRegionRefusal(
+					worker.assignment.worker_id,
+					step,
+					region,
+					`${label} at (${point.x}, ${point.y})`,
+					dispatchedBefore,
+				);
+			}
+		}
+	}
+
+	/** An element's centre in screenshot-local window pixels: its on-screen frame mapped through the observed viewport. */
+	private async elementPoint(
+		pid: number,
+		element: number,
+		observation: InputObservation | undefined,
+	): Promise<Point | undefined> {
+		const frame = await this.computer.elementFrame?.(pid, element);
+		const viewport = observation?.screenshotViewport;
+		if (frame === undefined || viewport === undefined || !(frame.width > 0 && frame.height > 0)) {
+			return undefined;
+		}
+		const { bounds } = viewport;
+		return {
+			x: ((frame.x + frame.width / 2 - bounds.x) / bounds.width) * viewport.width,
+			y: ((frame.y + frame.height / 2 - bounds.y) / bounds.height) * viewport.height,
+		};
+	}
+
 	/** A worker this process assigned, or one another opencua process assigned that this one now acts for. */
 	private lookup(workerId: string): WorkerState | undefined {
 		const local = this.workers.get(workerId);
@@ -464,6 +740,7 @@ export class WorkerCoordinator {
 				app: shared.app,
 				...(shared.agent_name === undefined ? {} : { agent_name: shared.agent_name }),
 				...(shared.parent_agent_name === undefined ? {} : { parent_agent_name: shared.parent_agent_name }),
+				...(shared.region === undefined ? {} : { region: shared.region }),
 				cursor_id: randomUUID(),
 				cursor_owner: {
 					agentName: shared.agent_name ?? shared.worker_id,
