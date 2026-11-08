@@ -1,0 +1,173 @@
+diff --git a/libs/cua-driver-bench/automated-eval/macos_bench/arms.py b/libs/cua-driver-bench/automated-eval/macos_bench/arms.py
+index 96d1f8211..adba05d49 100644
+--- a/libs/cua-driver-bench/automated-eval/macos_bench/arms.py
++++ b/libs/cua-driver-bench/automated-eval/macos_bench/arms.py
+@@ -30,6 +30,7 @@ from typing import Literal
+ ARMS = ("cua-driver-mcp", "codex-native-cu")  # the Codex-CLI pilot arms (run_pilot.py)
+ # Claude Code arms (run_bench.py): same model, same harness, only the MCP tools differ.
+ CLAUDE_ARMS = (
++    "cc-apple-cua",
+     "cc-cua-driver",
+     "cc-codex-cu",
+     "cc-codex-cu-1007-browser",  # Amendment 10
+diff --git a/libs/cua-driver-bench/automated-eval/macos_bench/claude_arms.py b/libs/cua-driver-bench/automated-eval/macos_bench/claude_arms.py
+index bdceb47b5..24f0021fa 100644
+--- a/libs/cua-driver-bench/automated-eval/macos_bench/claude_arms.py
++++ b/libs/cua-driver-bench/automated-eval/macos_bench/claude_arms.py
+@@ -105,6 +105,16 @@ RUN_SCRIPT_ADDENDUM = (
+ # saw 14 script timeouts, so the AX addendum asks for the maximum on every call. The driver binary is unchanged.
+ RUN_SCRIPT_ADDENDUM += 'Pass "timeout_ms": 120000 on every run_script call.\n'
+
++OPENCUA_ADDENDUM = (
++    "\n\nName the task app explicitly. Observe with get_app_state (profile fast for semantic targets, "
++    "visual when pixels matter); use its observation_token and returned element ids, never guessed ids. "
++    "Prefer set_value or click_target for a described control, run_steps with expect for a known sequence, "
++    "and run_script for GUI-only branching. Inspect screenshots before coordinate actions. Keep input "
++    "scoped to the observed app and window; refresh stale context. Verify the exact result with expect "
++    "or verify_state before DONE. Stop with BLOCKED on missing capture or permission; never answer a "
++    "system permission dialog. Do not operate the User activity window or widen the app allowlist.\n"
++)
++
+
+ @dataclass(frozen=True)
+ class CuaBuild:
+@@ -308,6 +318,7 @@ CODEX_ARMS = {
+ CWD_ROOT = Path("/tmp/cdb-bench-cwd/work")  # outside every git checkout, same path for both arms
+
+ ARM_DESCRIPTIONS = {
++    "cc-apple-cua": "Claude Code + apple-cua guarded MCP, signed helper, background delivery, full tools",
+     "cc-cua-driver": "Claude Code + Cua Driver 0.34.0 MCP + Cua Driver skill (0.34.0 release)",
+     "cc-cua-driver-main": "Claude Code + Cua Driver built from main (pinned commit) MCP + the skill of that commit, "
+     "run_script off (CUA_DRIVER_DISABLE_RUN_SCRIPT=1 from Amendment 13)",
+@@ -336,6 +347,8 @@ def system_prompt_for(arm: str, *, browser: bool = False) -> str:
+             "Do not use the network.",
+             "Do not use the internet; the task's localhost site is allowed.",
+         )
++    if arm == "cc-apple-cua":
++        return prompt + OPENCUA_ADDENDUM
+     build = CUA_BUILDS.get(arm)
+     if build is None:
+         return prompt
+@@ -396,6 +409,28 @@ def mcp_config_for(
+ ) -> tuple[Path, str]:
+     """Write the arm's ``--mcp-config`` file under ``run_dir`` and return (path, server name)."""
+     run_dir.mkdir(parents=True, exist_ok=True)
++    if arm == "cc-apple-cua":
++        settings = json.loads((WORK / "apple-cua.json").read_text("utf-8"))
++        env = claude_env()
++        env["HOME"] = str(WORK / "apple-home")
++        env.update(
++            OPENCUA_DELIVERY="background",
++            OPENCUA_TOOLSET="full",
++            OPENCUA_ALLOWED_BUNDLE_IDS=",".join(settings["allowed_bundle_ids"]),
++        )
++        config = {
++            "mcpServers": {
++                "apple-cua": {
++                    "type": "stdio",
++                    "command": settings["helper_launcher"],
++                    "args": [settings["server"]],
++                    "env": env,
++                }
++            }
++        }
++        path = run_dir / f"mcp-{arm}.json"
++        path.write_text(json.dumps(config, indent=2) + "\n", "utf-8")
++        return path, "apple-cua"
+     if arm in CUA_BUILDS:
+         build = CUA_BUILDS[arm]
+         config = {
+@@ -452,6 +487,11 @@ def prepare_cwd(arm: str, cwd: Path = CWD_ROOT) -> Path:
+     if cwd.exists():
+         shutil.rmtree(cwd)
+     cwd.mkdir(parents=True)
++    if arm == "cc-apple-cua":
++        settings = json.loads((WORK / "apple-cua.json").read_text("utf-8"))
++        target = cwd / ".claude" / "skills" / "apple-cua"
++        target.parent.mkdir(parents=True)
++        shutil.copytree(settings["skill"], target)
+     if arm in CUA_BUILDS:
+         target = cwd / ".claude" / "skills" / "cua-driver"
+         target.parent.mkdir(parents=True)
+diff --git a/libs/cua-driver-bench/automated-eval/macos_bench/run_bench.py b/libs/cua-driver-bench/automated-eval/macos_bench/run_bench.py
+index 7a2ceb3f4..96859ad5c 100644
+--- a/libs/cua-driver-bench/automated-eval/macos_bench/run_bench.py
++++ b/libs/cua-driver-bench/automated-eval/macos_bench/run_bench.py
+@@ -595,6 +595,13 @@ def real_capture_check(ctx: "Ctx", arm: str) -> tuple[str, str, str]:
+                 else {}
+             )
+             result = call(tool, arguments)
++        elif source == "cc-apple-cua":
++            if not {"get_app_state", "run_steps", "verify_state"} <= tools.keys():
++                raise RuntimeError("missing apple-cua guarded tools")
++            result = call(
++                "get_app_state",
++                {"app": "com.apple.calculator", "profile": "visual"},
++            )
+         elif source in ca.CU_HELPER_ARMS:
+             if set(tools) != set(ca.load_pins()["claude_cu_helper"]["tools"]):
+                 raise RuntimeError("unexpected helper tools/list")
+diff --git a/libs/cua-driver-bench/automated-eval/macos_bench/tests/test_apple_cua_arm.py b/libs/cua-driver-bench/automated-eval/macos_bench/tests/test_apple_cua_arm.py
+new file mode 100644
+index 000000000..65798557c
+--- /dev/null
++++ b/libs/cua-driver-bench/automated-eval/macos_bench/tests/test_apple_cua_arm.py
+@@ -0,0 +1,58 @@
++"""Offline contract tests for the added apple-cua arm; no GUI or model calls."""
++
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++from unittest import mock
++
++import pytest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++import arms
++import claude_arms as ca
++
++
++def test_given_registered_arm_when_configured_then_only_pinned_server(tmp_path: Path) -> None:
++    settings = {
++        "helper_launcher": "/pinned/helper",
++        "server": "/pinned/server.js",
++        "allowed_bundle_ids": ["ai.cua.benchlab", "com.apple.calculator"],
++    }
++    (tmp_path / "apple-cua.json").write_text(json.dumps(settings))
++    with mock.patch.object(ca, "WORK", tmp_path), mock.patch.dict(
++        "os.environ", {"OPENCUA_IPHONE": "1", "UNRELATED_SECRET": "not-forwarded"}
++    ):
++        path, server = ca.mcp_config_for("cc-apple-cua", tmp_path / "run")
++    entry = json.loads(path.read_text())["mcpServers"][server]
++    assert "cc-apple-cua" in arms.ALL_ARMS
++    assert server == "apple-cua"
++    assert entry["command"] == settings["helper_launcher"]
++    assert entry["args"] == [settings["server"]]
++    assert entry["env"]["HOME"] == str(tmp_path / "apple-home")
++    assert entry["env"]["OPENCUA_DELIVERY"] == "background"
++    assert entry["env"]["OPENCUA_TOOLSET"] == "full"
++    assert entry["env"]["OPENCUA_ALLOWED_BUNDLE_IDS"] == "ai.cua.benchlab,com.apple.calculator"
++    assert "OPENCUA_IPHONE" not in entry["env"]
++    assert "UNRELATED_SECRET" not in entry["env"]
++    argv = ca.claude_argv(
++        mcp_config=path, server=server, model="offline", max_turns=45, max_budget_usd=6
++    )
++    assert argv[argv.index("--allowedTools") + 1] == "mcp__apple-cua"
++
++
++def test_given_missing_configuration_when_configured_then_fail_closed(tmp_path: Path) -> None:
++    with mock.patch.object(ca, "WORK", tmp_path), pytest.raises(FileNotFoundError):
++        ca.mcp_config_for("cc-apple-cua", tmp_path / "run")
++
++
++def test_given_comparison_skill_when_preparing_then_matching_apple_skill(tmp_path: Path) -> None:
++    skill = tmp_path / "source"
++    skill.mkdir()
++    (skill / "SKILL.md").write_text("fixture")
++    (tmp_path / "apple-cua.json").write_text(json.dumps({"skill": str(skill)}))
++    with mock.patch.object(ca, "WORK", tmp_path):
++        cwd = ca.prepare_cwd("cc-apple-cua", tmp_path / "cwd")
++    assert (cwd / ".claude/skills/opencua/SKILL.md").is_file()
++    assert not (cwd / ".claude/skills/cua-driver").exists()

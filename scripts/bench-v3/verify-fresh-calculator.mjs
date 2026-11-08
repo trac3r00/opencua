@@ -13,6 +13,8 @@ export function verifyFreshCalculator(report) {
 		throw new Error("incomplete fresh-process Calculator cohort");
 	const identities = new Set();
 	const pids = new Set();
+	if (report.oracle_amendment !== undefined && report.oracle_amendment !== "A39")
+		throw new Error("unknown Calculator oracle amendment");
 	const counts = { apple: { attempts: 0, completed: 0 }, cua: { attempts: 0, completed: 0 } };
 	for (const row of report.results) {
 		const identity = `${row.route}:${row.iteration}`;
@@ -49,7 +51,19 @@ export function verifyFreshCalculator(report) {
 			trace.activations.length !== 0
 		)
 			throw new Error(`unverified disturbance: ${identity}`);
-		if (row.pass && row.clipboard !== "5") throw new Error(`oracle disagreement: ${identity}`);
+		if (report.oracle_amendment === "A39") {
+			if (
+				row.initial_display !== "0" ||
+				!(typeof row.display === "string" || (row.display === null && typeof row.display_error === "string")) ||
+				!(
+					typeof row.clipboard === "string" ||
+					(row.clipboard === null && typeof row.clipboard_error === "string")
+				) ||
+				row.pass !== (row.display === "5") ||
+				row.clipboard_pass !== (row.clipboard === "5")
+			)
+				throw new Error(`oracle disagreement: ${identity}`);
+		} else if (row.pass && row.clipboard !== "5") throw new Error(`oracle disagreement: ${identity}`);
 		counts[row.route].attempts++;
 		counts[row.route].completed += Number(row.pass);
 	}

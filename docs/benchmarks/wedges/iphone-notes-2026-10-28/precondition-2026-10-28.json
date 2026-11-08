@@ -1,0 +1,21 @@
+{
+	"schema": "wedge-iphone-notes/1",
+	"date": "2026-10-28T05:03:17.036Z",
+	"scope": "single-system scenario: apple-cua over MCP on a real iPhone via iPhone Mirroring; not a head-to-head",
+	"precondition": {
+		"command": "/Users/cminseo/.hermes/node/bin/node /Users/cminseo/Developer/apple-cua-wt/apple-cua-technical-gaps-w2-t14/packages/cli/dist/cli.js --json ios status",
+		"ready": false,
+		"state": "not-running",
+		"message": "iPhone Mirroring isn't running — open the iPhone Mirroring app and connect your phone, then retry. Reconnecting is physical, so I can't do it for you.",
+		"exitCode": 1,
+		"stdout": "{\"state\":\"not-running\",\"message\":\"iPhone Mirroring isn't running — open the iPhone Mirroring app and connect your phone, then retry. Reconnecting is physical, so I can't do it for you.\"}",
+		"stderr": ""
+	},
+	"repetitions": [],
+	"summary": {
+		"passed": 0,
+		"total": 5,
+		"steps_attempted": 0
+	},
+	"readiness_failure": "ios status is not-running: iPhone Mirroring isn't running — open the iPhone Mirroring app and connect your phone, then retry. Reconnecting is physical, so I can't do it for you."
+}

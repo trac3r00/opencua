@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { isScreenLocked } from "../../packages/core/dist/platform/macos-ffi/lock-screen.js";
 import { McpClient } from "../bench-v2/client.mjs";
-import { recordBrowserTrace } from "./browser-agent-run.mjs";
 import { startDisturbance } from "./disturbance.mjs";
 import { Driver } from "./drivers.mjs";
 import { mulberry32, shuffle } from "./stats.mjs";
@@ -22,9 +21,31 @@ export const calculatorPlan = [
 	{ op: "key", app: "Calculator", value: "c", apple: "cmd+c", cua: "c", modifiers: ["cmd"] },
 ];
 
-export function calculatorOutcome(clipboard, callsSucceeded, error = null) {
-	const pass = clipboard === "5";
-	return { pass, false_success: callsSucceeded && !pass, error: error ?? (pass ? null : "clipboard mismatch") };
+export function calculatorOutcome(display, clipboard, callsSucceeded, error = null) {
+	const pass = display === "5";
+	return {
+		pass,
+		clipboard_pass: clipboard === "5",
+		false_success: callsSucceeded && !pass,
+		error: error ?? (pass ? null : "display mismatch"),
+	};
+}
+
+export function calculatorLaunchProvenance(spec) {
+	const executable = execFileSync(spec.command, ["-p", "process.execPath"], {
+		encoding: "utf8",
+		timeout: 10000,
+	}).trim();
+	const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+	return {
+		mode: "direct-node",
+		command: spec.command,
+		args: spec.args,
+		executable_path: executable,
+		executable_sha256: sha256(executable),
+		server_path: spec.args[0],
+		server_sha256: sha256(spec.args[0]),
+	};
 }
 
 export function calculatorOwnership(existingPids, launchedPid, eventPid = launchedPid) {
@@ -58,6 +79,8 @@ export async function runCalculatorAttempt(row, driver, services) {
 	let start = null;
 	let keepRunning = true;
 	row.e2e_seconds = null;
+	row.display = null;
+	row.clipboard = null;
 	try {
 		try {
 			await services.launch();
@@ -66,18 +89,35 @@ export async function runCalculatorAttempt(row, driver, services) {
 			throw error;
 		}
 		services.setSentinel();
+		row.initial_display = services.readDisplay();
+		if (row.initial_display !== "0") throw new Error("Calculator starting display is not zero");
 		trace = await services.startTrace();
 		start = services.now();
 		try {
 			for (const step of calculatorPlan) await driver.step(step);
-			row.clipboard = services.readClipboard();
+		} catch (error) {
+			row.error = String(error);
 		} finally {
-			row.e2e_seconds = (services.now() - start) / 1000;
+			try {
+				for (const [field, read] of [
+					["display", services.readDisplay],
+					["clipboard", services.readClipboard],
+				]) {
+					try {
+						row[field] = read();
+					} catch (error) {
+						row[`${field}_error`] = String(error);
+						row.error ??= String(error);
+					}
+				}
+			} finally {
+				row.e2e_seconds = (services.now() - start) / 1000;
+			}
 		}
-		Object.assign(row, calculatorOutcome(row.clipboard, driver.allCallsSucceeded));
+		Object.assign(row, calculatorOutcome(row.display, row.clipboard, driver.allCallsSucceeded, row.error));
 	} catch (error) {
 		row.error = String(error);
-		Object.assign(row, calculatorOutcome(null, driver.allCallsSucceeded, row.error));
+		Object.assign(row, calculatorOutcome(row.display, row.clipboard, driver.allCallsSucceeded, row.error));
 	} finally {
 		row.calls = driver.calls;
 		row.tokens = driver.estimated_tokens;
@@ -130,21 +170,25 @@ async function main() {
 	mkdirSync(dir, { recursive: true });
 	const lockPath = `${dir}/.run.lock`;
 	const lock = openSync(lockPath, "wx");
-	const archive = `${dir}/calculator-clipboard-${process.pid}.plist`;
+	const scratch = mkdtempSync(`${dir}/calculator-A39-`);
+	const archive = `${scratch}/clipboard.plist`;
 	const clipboard = `${root}/scripts/bench-v2/clipboard.swift`;
 	const eventSource = `${root}/scripts/bench-v3/calculator-event.swift`;
-	const eventBinary = `${dir}/calculator-event-v3`;
-	const traceBinary = `${dir}/calculator-trace-v3`;
-	const windowBinary = `${dir}/calculator-window-v3`;
+	const eventBinary = `${scratch}/calculator-event`;
+	const traceBinary = `${scratch}/calculator-trace`;
+	const windowBinary = `${scratch}/calculator-window`;
+	const displayBinary = `${scratch}/calculator-display`;
 	const clients = new Map();
 	const children = new Set();
 	const schedule = calculatorSchedule(seed, runs, flags.includes("--exploratory"));
 	const report = { schema: "bench-v3", seed, runs, scope: "background calculator-add", results: [] };
 	report.exploratory = flags.includes("--exploratory");
+	report.oracle_amendment = "A39";
 	report.fixture_lifecycle = "fresh owned process per attempt; AX window ready before timing";
 	report.source_sha256 = Object.fromEntries(
 		[
 			"scripts/bench-v3/calculator-run.mjs",
+			"scripts/bench-v3/calculator-display-probe.swift",
 			"scripts/bench-v3/drivers.mjs",
 			"scripts/bench-v3/disturbance.swift",
 			"scripts/bench-v3/calculator-event.swift",
@@ -175,6 +219,8 @@ async function main() {
 			encoding: "utf8",
 			timeout: 10000,
 		}).replace(/\r?\n$/, "");
+	const readDisplay = () =>
+		execFileSync(displayBinary, [String(launchedPid)], { encoding: "utf8", timeout: 10000 }).replace(/\r?\n$/, "");
 	const checkExisting = () => {
 		const apps = spawnSync("pgrep", ["-x", "Calculator"], { encoding: "utf8", timeout: 10000 });
 		if (apps.error || apps.status > 1) throw apps.error ?? new Error("could not check Calculator process ownership");
@@ -234,6 +280,9 @@ async function main() {
 		execFileSync("swiftc", [eventSource, "-o", eventBinary], { timeout: 60000 });
 		execFileSync("swiftc", [`${root}/scripts/bench-v3/window-event.swift`, "-o", windowBinary], { timeout: 60000 });
 		execFileSync("swiftc", [`${root}/scripts/bench-v3/disturbance.swift`, "-o", traceBinary], { timeout: 60000 });
+		execFileSync("swiftc", ["-O", `${root}/scripts/bench-v3/calculator-display-probe.swift`, "-o", displayBinary], {
+			timeout: 60000,
+		});
 		execFileSync("swift", [clipboard, "save", archive], { timeout: 60000 });
 		saved = true;
 		for (const route of ["apple", "cua"]) {
@@ -244,6 +293,7 @@ async function main() {
 					args: [`${root}/packages/mcp/dist/server.js`],
 					env: { OPENCUA_ALLOWED_BUNDLE_IDS: "com.apple.calculator", OPENCUA_DELIVERY: "background" },
 				};
+				report.apple_launch = calculatorLaunchProvenance(spec);
 			} else {
 				spec = { command: `${homedir()}/.local/bin/cua-driver`, args: ["mcp"] };
 			}
@@ -273,10 +323,17 @@ async function main() {
 								return trace;
 							},
 							readClipboard,
+							readDisplay,
 							now: () => performance.now(),
 							finishTrace: async (result, activeTrace) => {
 								try {
-									return await recordBrowserTrace(result, activeTrace);
+									result.disturbance_trace = await activeTrace.stop();
+									result.focus_disturbance = result.disturbance_trace.activations.length > 0;
+									result.pointer_disturbance = result.disturbance_trace.max_cursor_px > 2;
+									return true;
+								} catch (error) {
+									result.disturbance_error = String(error);
+									return false;
 								} finally {
 									trace = null;
 								}
@@ -314,6 +371,7 @@ async function main() {
 		} finally {
 			closeSync(lock);
 			rmSync(lockPath);
+			rmSync(scratch, { recursive: true, force: true });
 			for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.removeListener(signal, stop);
 			report.finished_at = new Date().toISOString();
 			mkdirSync(fileURLToPath(new URL(".", `file://${output}`)), { recursive: true });

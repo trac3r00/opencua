@@ -1,0 +1,11 @@
+{
+	"peekaboo": {
+		"package": "@steipete/peekaboo",
+		"version": "4.9.7",
+		"version_output": "Peekaboo 4.9.7 (HEAD/5639e7050, built: 2026-10-23T21:48:04+00:00)",
+		"node_engine": ">=22.0.0",
+		"mcp_command": ["npx", "-y", "@steipete/peekaboo@4.9.7", "mcp"],
+		"tools_fixture": "fixtures/peekaboo-tools.json",
+		"captured_at": "2026-10-28"
+	}
+}

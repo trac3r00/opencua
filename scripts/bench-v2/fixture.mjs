@@ -84,8 +84,11 @@ export function validateFixture(spec) {
 		throw new Error(`missing steps/oracle: ${spec.id}`);
 	for (const step of spec.steps) {
 		if (
-			!["observe", "key", "type", "click-label", "menu", "move-window", "assert-text"].includes(step.op) ||
-			!["TextEdit", "Finder", "Safari", "System Settings", "Calculator"].includes(step.app)
+			!["observe", "key", "type", "click-label", "menu", "scroll", "move-window", "assert-text"].includes(step.op) ||
+			!["TextEdit", "Finder", "Safari", "System Settings", "Calculator"].includes(step.app) ||
+			(step.op === "scroll" &&
+				(!["up", "down", "left", "right"].includes(step.direction) ||
+					(step.amount !== undefined && !(Number.isInteger(step.amount) && step.amount > 0))))
 		)
 			throw new Error(`invalid step: ${spec.id}`);
 		if (step.value?.includes("/tmp/") && !step.value.includes(ROOT)) throw new Error(`unsafe path: ${spec.id}`);

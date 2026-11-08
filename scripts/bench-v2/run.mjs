@@ -45,6 +45,8 @@ const readDefault = (domain, key) => {
 	}
 };
 const command = (name, args) => execFileSync(name, args, { encoding: "utf8", timeout: 10000 }).trim();
+// Pinned third-party drivers: package, version and the exact MCP launch command (see README).
+const pins = JSON.parse(readFileSync(new URL("./pins.json", import.meta.url), "utf8"));
 async function main() {
 	const available = await Promise.all(
 		readdirSync(new URL("./scenarios/", import.meta.url))
@@ -75,9 +77,13 @@ async function main() {
 			"Screen locked (IOConsoleUsers CGSSessionScreenIsLocked) or macOS unavailable: refusing live runs. Unlock this Mac before scheduling a run.",
 		);
 	const drivers = option("drivers", "apple,cua").split(",");
-	const scripted = ["apple", "apple-legacy", "cua"];
+	const scripted = ["apple", "apple-legacy", "cua", "peekaboo"];
 	if (drivers.some((d) => !scripted.includes(d) && !(d in PROFILES)) || new Set(drivers).size !== drivers.length)
-		throw new Error(`--drivers must be a subset of ${[...scripted, ...Object.keys(PROFILES)].join(",")}`);
+		throw new Error(
+			`--drivers must be a comma-separated subset of ${[...scripted, ...Object.keys(PROFILES)].join(",")} (peekaboo runs ${pins.peekaboo.mcp_command.join(" ")}; Node 22+)`,
+		);
+	if (drivers.includes("peekaboo") && Number(process.versions.node.split(".")[0]) < 22)
+		throw new Error(`--drivers peekaboo needs Node 22+ (${pins.peekaboo.package} engines); found ${process.version}`);
 	// Agent profiles share one model and thinking level so only the computer-use hand differs.
 	const agentOptions = {
 		model: option("agent-model", "anthropic-subscription/claude-opus-5-5"),
@@ -113,6 +119,7 @@ async function main() {
 			driver_versions: {
 				apple: JSON.parse(readFileSync(path.join(root, "packages/mcp/package.json"), "utf8")).version,
 				cua: command(`${os.homedir()}/.local/bin/cua-driver`, ["--version"]),
+				...(drivers.includes("peekaboo") ? { peekaboo: pins.peekaboo.version_output } : {}),
 			},
 			apple_servers: serverFor,
 			node: process.version,
@@ -127,6 +134,8 @@ async function main() {
 	const archive = path.join(ROOT, `clipboard-${randomUUID()}.plist`);
 	const clipboardScript = path.join(root, "scripts/bench-v2/clipboard.swift");
 	const clients = new Map();
+	/** Tool names a server listed at start, for drivers that check every call against them. */
+	const toolNames = new Map();
 	let clipboardSaved = false;
 	// TextEdit preferences scoped to this run, each restored to its exact prior value afterwards.
 	// NSCloseAlwaysConfirmsChanges: textedit-alert-dismiss needs Cmd+W on an edited document to ask
@@ -159,24 +168,31 @@ async function main() {
 		}
 		for (const kind of drivers) {
 			if (kind in PROFILES) continue;
+			const [peekabooCommand, ...peekabooArgs] = pins.peekaboo.mcp_command;
 			const client =
-				kind in serverFor
-					? new McpClient({
-							command: "node",
-							args: [serverFor[kind]],
-							env: {
-								OPENCUA_ALLOWED_BUNDLE_IDS:
-									"com.apple.finder,com.apple.TextEdit,com.apple.Safari,com.apple.systempreferences,com.apple.calculator",
-								OPENCUA_DELIVERY: "background",
-							},
-						})
-					: new McpClient({
-							command: `${os.homedir()}/.local/bin/cua-driver`,
-							args: ["mcp"],
-							env: { PATH: `${os.homedir()}/.local/bin:${process.env.PATH ?? ""}` },
-						});
+				kind === "peekaboo"
+					? new McpClient({ command: peekabooCommand, args: peekabooArgs })
+					: kind in serverFor
+						? new McpClient({
+								command: "node",
+								args: [serverFor[kind]],
+								env: {
+									OPENCUA_ALLOWED_BUNDLE_IDS:
+										"com.apple.finder,com.apple.TextEdit,com.apple.Safari,com.apple.systempreferences,com.apple.calculator",
+									OPENCUA_DELIVERY: "background",
+								},
+							})
+						: new McpClient({
+								command: `${os.homedir()}/.local/bin/cua-driver`,
+								args: ["mcp"],
+								env: { PATH: `${os.homedir()}/.local/bin:${process.env.PATH ?? ""}` },
+							});
 			clients.set(kind, client);
 			await client.start();
+			// Read Peekaboo's schema at run time: a mapped tool the pinned server does not list fails that
+			// attempt as a driver error instead of being sent.
+			if (kind === "peekaboo")
+				toolNames.set(kind, new Set((await client.request("tools/list", {})).tools.map((tool) => tool.name)));
 		}
 		// A stopped run must still restore the clipboard and TextEdit preferences, so a signal ends the
 		// run after the current attempt and lets the cleanup below run instead of exiting mid-state.
@@ -191,7 +207,9 @@ async function main() {
 				for (const kind of drivers) {
 					if (stopSignal) throw new Error(`run stopped by ${stopSignal}`);
 					const driver =
-						kind in PROFILES ? new OmoAgentDriver(kind, agentOptions) : new Driver(kind, clients.get(kind));
+						kind in PROFILES
+							? new OmoAgentDriver(kind, agentOptions)
+							: new Driver(kind, clients.get(kind), toolNames.get(kind));
 					const { row } = await attemptRunner.run(spec, driver, iteration);
 					if (row.cleanup.forced.length)
 						process.stderr.write(`CLEANUP FORCED ${kind} ${spec.id}: ${row.cleanup.forced.join("; ")}\n`);

@@ -10,14 +10,44 @@ const parsed = (result) => {
 	return block === undefined ? {} : JSON.parse(block.text);
 };
 
+/** Harness step -> Peekaboo MCP tool (pinned in pins.json; names checked against fixtures/peekaboo-tools.json). */
+export const PEEKABOO_TOOLS = {
+	windows: "window",
+	observe: "see",
+	"click-label": "click",
+	type: "type",
+	key: "press",
+	scroll: "scroll",
+	menu: "menu",
+};
+
+/** Peekaboo's `window` list prints one `N. "title" [ID: 123, ON-SCREEN, ...]` line per window. */
+export const peekabooWindows = (answer) =>
+	[...answer.matchAll(/^\d+\. "(.*)" \[ID: (\d+), (ON|OFF)-SCREEN/gm)].map((match) => ({
+		title: match[1],
+		window_id: Number(match[2]),
+		on_screen: match[3] === "ON",
+	}));
+
 export class Driver {
-	constructor(kind, client) {
+	/** `toolNames`, when given, is the server's tools/list; a call outside it fails before any round trip. */
+	constructor(kind, client, toolNames) {
 		this.kind = kind;
 		// "apple" drives opencua the way its instructions recommend (compact table observations, no
 		// screenshot, described-element clicks); "apple-legacy" keeps the pre-2026-09-23 call pattern
 		// (screenshot + menu bar + JSON tree, observe before every click) as the before baseline.
 		this.apple = kind === "apple" || kind === "apple-legacy";
 		this.efficient = kind === "apple";
+		// "peekaboo" drives Peekaboo's MCP server: `see` snapshots of the exact window, then snapshot-bound input.
+		this.peekaboo = kind === "peekaboo";
+		this.toolNames = toolNames;
+		/**
+		 * Peekaboo snapshot per app as `{ id, window }`, bound to the window it observed and consumed by each
+		 * mutation (menu included), since its docs ask to observe the target again before the next one.
+		 */
+		this.snapshots = new Map();
+		/** Peekaboo inputs it dispatched but could not confirm (`dispatched_unverified`); the oracle decides. */
+		this.unverified_dispatches = 0;
 		this.client = client;
 		this.calls = 0;
 		this.call_ms = [];
@@ -38,6 +68,8 @@ export class Driver {
 		this.windows = new Map();
 	}
 	async call(name, args, allowAmbiguity = false) {
+		if (this.toolNames !== undefined && !this.toolNames.has(name))
+			throw new Error(`driver-error: ${this.kind} server lists no tool named ${JSON.stringify(name)}`);
 		const start = performance.now();
 		this.calls++;
 		let result;
@@ -63,12 +95,24 @@ export class Driver {
 				answer: answer.slice(0, Number(process.env.BENCH_TRACE_CHARS ?? 600)),
 			});
 		this.claimed ||=
-			!["get_app_state", "get_window_state", "list_windows"].includes(name) &&
+			!["get_app_state", "get_window_state", "list_windows", "see", "window"].includes(name) &&
 			/\b(verified|success|completed)\b/i.test(answer) &&
 			!/not verified|unverifiable/i.test(answer) &&
 			!result?.isError;
 		this.human_ask ||= /ask the user|needs_user|elicitation/i.test(answer);
 		this.gave_up ||= /\b(refus(ed|al)|timed? out|timeout)\b/i.test(answer);
+		// Peekaboo reports a dispatched input whose effect it cannot confirm as an error with
+		// state=dispatched_unverified and escalation=observe_before_retry: the input was sent, so per its docs the
+		// caller observes again (every Peekaboo mutation here does) instead of retrying or treating it as failed.
+		const unverified =
+			this.peekaboo &&
+			result?._meta?.state === "dispatched_unverified" &&
+			result._meta.mutation_dispatched === true &&
+			result._meta.escalation === "observe_before_retry";
+		if (result?.isError && unverified) {
+			this.unverified_dispatches += 1;
+			return result;
+		}
 		if (result?.isError && !(allowAmbiguity && answer.includes("same_pid_keyboard_ambiguity")))
 			throw new Error(`tool-error: ${answer.slice(0, 300)}`);
 		return result;
@@ -81,7 +125,33 @@ export class Driver {
 		this.windows.set(app, window);
 		return window;
 	}
+	async peekabooWindow(app, title) {
+		const result = await this.call(PEEKABOO_TOOLS.windows, { action: "list", app });
+		const candidates = peekabooWindows(text(result)).filter((w) => w.on_screen);
+		// Untitled on-screen rows are menu-bar and desktop surfaces; without a title, take the first document window.
+		const window = title
+			? candidates.find((w) => w.title === title)
+			: (candidates.find((w) => w.title !== "") ?? candidates[0]);
+		if (!window) throw new Error(`target-missing: ${app} ${title ?? ""}`);
+		this.windows.set(app, window);
+		return window;
+	}
 	async observe(app, title) {
+		if (this.peekaboo) {
+			const cached = this.windows.get(app);
+			const window =
+				cached !== undefined && (!title || cached.title === title) ? cached : await this.peekabooWindow(app, title);
+			const result = await this.call(PEEKABOO_TOOLS.observe, {
+				app_target: app,
+				window_id: window.window_id,
+				include_elements: true,
+			});
+			const snapshot = result?._meta?.snapshot_id ?? text(result).match(/\bps1_[0-9a-f]{32}\b/)?.[0];
+			if (typeof snapshot !== "string" || snapshot === "")
+				throw new Error("driver-error: peekaboo see returned no snapshot_id");
+			this.snapshots.set(app, { id: snapshot, window });
+			return result;
+		}
 		if (this.apple) {
 			const args = this.efficient
 				? { app, include_screenshot: false, element_format: "table" }
@@ -104,8 +174,19 @@ export class Driver {
 		const window = await this.window(app, title);
 		return this.call("get_window_state", { pid: window.pid, window_id: window.window_id, include_screenshot: true });
 	}
-	async act(step, appleArgs, cuaArgs) {
+	async act(step, appleArgs, cuaArgs, peekabooArgs) {
 		const { app, title } = step;
+		if (this.peekaboo) {
+			const tool = PEEKABOO_TOOLS[step.op];
+			const held = this.snapshots.get(app);
+			// A snapshot authorizes input only to the window it observed: another title means observing that one.
+			if (held === undefined || (title && held.window.title !== title)) await this.observe(app, title);
+			const snapshot = this.snapshots.get(app).id;
+			this.snapshots.delete(app);
+			// `menu` takes no snapshot, but it is a mutation too: observe before it and consume the observation.
+			if (step.op === "menu") return this.call(tool, { action: "click", app, ...peekabooArgs });
+			return this.call(tool, { snapshot, ...peekabooArgs });
+		}
 		const name = {
 			type: ["type_text", "type_text"],
 			key: ["press_keys", "press_key"],
@@ -149,6 +230,7 @@ export class Driver {
 			} catch (error) {
 				if (String(error).includes("server-exit")) throw error;
 				this.tokens.delete(step.app);
+				this.snapshots.delete(step.app);
 			}
 		}
 		this.keyboard_fallbacks += 1;
@@ -164,14 +246,33 @@ export class Driver {
 			case "observe":
 				return this.observe(app, title);
 			case "type":
-				return this.act(step, { text: step.value }, { text: step.value });
+				return this.act(step, { text: step.value }, { text: step.value }, { text: step.value });
 			case "menu":
-				return this.act(step, { path: step.path }, { path: step.path });
+				return this.act(step, { path: step.path }, { path: step.path }, { path: step.path.join(" > ") });
+			case "scroll":
+				// Only the Peekaboo mapping defines scroll; the other drivers keep rejecting it as before.
+				if (!this.peekaboo) throw new Error(`unknown-step: ${step.op}`);
+				{
+					// Background scroll needs an element `on` from the snapshot it names: the labelled element when the
+					// step names one, else the window's first scroll area.
+					const elements = (await this.observe(app, title))?._meta?.ui_elements ?? [];
+					const target = step.value
+						? elements.find((e) => String(e.label ?? e.title ?? e.value ?? "").includes(step.value))
+						: elements.find((e) => e.ax_role === "AXScrollArea" || /scroll/i.test(String(e.role ?? "")));
+					if (!target) throw new Error(`element-missing: ${step.value ?? "scroll area"}`);
+					return this.act(
+						step,
+						{},
+						{},
+						{ on: String(target.id), direction: step.direction, amount: step.amount ?? 3 },
+					);
+				}
 			case "key":
 				return this.act(
 					step,
 					{ keys: [step.apple ?? step.value] },
 					{ key: step.cua ?? step.value, ...(step.modifiers ? { modifiers: step.modifiers } : {}) },
+					{ keys: [step.apple ?? step.value] },
 				);
 			case "click-label": {
 				if (this.efficient) {
@@ -194,9 +295,11 @@ export class Driver {
 					return result;
 				}
 				const observation = await this.observe(app, title);
-				const elements = this.apple
-					? (parsed(observation).elements ?? [])
-					: (observation.structuredContent?.elements ?? []);
+				const elements = this.peekaboo
+					? (observation?._meta?.ui_elements ?? [])
+					: this.apple
+						? (parsed(observation).elements ?? [])
+						: (observation.structuredContent?.elements ?? []);
 				const candidate = elements.find((e) =>
 					String(e.label ?? e.title ?? e.name ?? e.value ?? "").includes(step.value),
 				);
@@ -205,6 +308,7 @@ export class Driver {
 					step,
 					{ element_index: String(candidate.id ?? candidate.index) },
 					{ element_token: candidate.element_token },
+					{ on: String(candidate.id) },
 				);
 			}
 			default:

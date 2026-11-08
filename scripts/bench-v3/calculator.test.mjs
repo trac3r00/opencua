@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import * as runner from "./calculator-run.mjs";
 import {
 	calculatorOutcome,
@@ -10,6 +13,22 @@ import {
 	subscribedEvent,
 } from "./calculator-run.mjs";
 import { Driver } from "./drivers.mjs";
+
+test("#given a direct Node launch #when recording provenance #then hashes the actual executable and server bytes", () => {
+	const server = fileURLToPath(import.meta.url);
+	const spec = { command: process.execPath, args: [server] };
+	const provenance = runner.calculatorLaunchProvenance(spec);
+	assert.equal(provenance.mode, "direct-node");
+	assert.equal(provenance.command, spec.command);
+	assert.deepEqual(provenance.args, spec.args);
+	assert.equal(provenance.executable_path, process.execPath);
+	assert.equal(
+		provenance.executable_sha256,
+		createHash("sha256").update(readFileSync(process.execPath)).digest("hex"),
+	);
+	assert.equal(provenance.server_path, server);
+	assert.equal(provenance.server_sha256, createHash("sha256").update(readFileSync(server)).digest("hex"));
+});
 
 test("#given process launch without a ready window #when transitioning #then cannot start driver timing", async () => {
 	const windowReady = Promise.reject(new Error("window unavailable"));
@@ -29,6 +48,7 @@ function attemptFixture() {
 	let clock = 0;
 	let pid = 40;
 	let active = null;
+	let displayReads = 0;
 	const events = [];
 	const driver = {
 		allCallsSucceeded: true,
@@ -54,6 +74,10 @@ function attemptFixture() {
 		readClipboard() {
 			clock += 20;
 			return "5";
+		},
+		readDisplay() {
+			clock += 10;
+			return displayReads++ % 2 === 0 ? "0" : "5";
 		},
 		now: () => clock,
 		async finishTrace() {
@@ -96,7 +120,7 @@ test("#given paired attempts #when running #then fresh processes enclose only dr
 	for (let index = 0; index < 2; index++) {
 		const row = {};
 		assert.equal(await runner.runCalculatorAttempt(row, driver, services), true);
-		assert.equal(row.e2e_seconds, 0.08);
+		assert.equal(row.e2e_seconds, 0.09);
 		assert.equal(row.pass, true);
 		assert.deepEqual(row.cleanup, { verified: true });
 	}
@@ -129,17 +153,23 @@ test("#given driver or oracle failure #when recording an attempt #then elapsed f
 	for (const failure of ["driver", "oracle"]) {
 		const { driver, services, events } = attemptFixture();
 		if (failure === "driver") {
+			services.readDisplay = () => {
+				// No arithmetic was delivered; the independent read remains zero.
+				return "0";
+			};
 			driver.step = async () => {
 				throw new Error("driver failed");
 			};
 		} else {
-			services.readClipboard = () => {
+			let reads = 0;
+			services.readDisplay = () => {
+				if (reads++ === 0) return "0";
 				throw new Error("oracle failed");
 			};
 		}
 		const row = {};
 		await runner.runCalculatorAttempt(row, driver, services);
-		assert.equal(row.e2e_seconds, failure === "driver" ? 0 : 0.06);
+		assert.equal(row.e2e_seconds, failure === "driver" ? 0.02 : 0.08);
 		assert.equal(row.pass, false);
 		assert.match(row.error, new RegExp(`${failure} failed`));
 		assert.equal(events.at(-1), "gone 41");
@@ -259,10 +289,62 @@ test("#given a fixed seed #when scheduling #then creates reproducible paired ran
 	assert.equal(calculatorSchedule(1, 1, true).length, 1);
 });
 
-test("#given the independent clipboard oracle #when scoring #then detects outcomes and false success", () => {
-	assert.equal(calculatorOutcome("5", true).pass, true);
-	assert.deepEqual(calculatorOutcome("4", true), { pass: false, false_success: true, error: "clipboard mismatch" });
-	assert.equal(calculatorOutcome("4", false).false_success, false);
+test("#given independent display and clipboard #when scoring #then display determines arithmetic success", () => {
+	assert.deepEqual(calculatorOutcome("5", "sentinel", false, "copy refused"), {
+		pass: true,
+		clipboard_pass: false,
+		false_success: false,
+		error: "copy refused",
+	});
+	assert.deepEqual(calculatorOutcome("4", "5", true), {
+		pass: false,
+		clipboard_pass: true,
+		false_success: true,
+		error: "display mismatch",
+	});
+	assert.equal(calculatorOutcome("4", "sentinel", false).false_success, false);
+});
+
+test("#given Copy refusal after arithmetic #when recording #then both independent oracle values survive", async () => {
+	const { driver, services } = attemptFixture();
+	driver.step = async (step) => {
+		if (step.value === "c") {
+			driver.allCallsSucceeded = false;
+			throw new Error("copy refused");
+		}
+	};
+	services.readClipboard = () => "calculator benchmark sentinel";
+	const row = {};
+	await runner.runCalculatorAttempt(row, driver, services);
+	assert.equal(row.display, "5");
+	assert.equal(row.clipboard, "calculator benchmark sentinel");
+	assert.equal(row.pass, true);
+	assert.equal(row.clipboard_pass, false);
+	assert.match(row.error, /copy refused/);
+});
+
+test("#given a stale starting display #when recording #then refuses input and still cleans up", async () => {
+	const { driver, services, events } = attemptFixture();
+	services.readDisplay = () => "5";
+	const row = {};
+	await runner.runCalculatorAttempt(row, driver, services);
+	assert.equal(row.pass, false);
+	assert.equal(row.e2e_seconds, null);
+	assert.match(row.error, /starting display/);
+	assert.deepEqual(events, ["launch 41", "gone 41"]);
+});
+
+test("#given a failed secondary read #when recording #then display success and clipboard error remain distinct", async () => {
+	const { driver, services } = attemptFixture();
+	services.readClipboard = () => {
+		throw new Error("clipboard unavailable");
+	};
+	const row = {};
+	await runner.runCalculatorAttempt(row, driver, services);
+	assert.equal(row.pass, true);
+	assert.equal(row.clipboard, null);
+	assert.equal(row.clipboard_pass, false);
+	assert.match(row.clipboard_error, /clipboard unavailable/);
 });
 
 test("#given Calculator process ownership #when checking startup and cleanup #then refuses reuse and only quits the owned pid", () => {
