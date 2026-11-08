@@ -242,6 +242,9 @@ on the touched packages, as in `2026-11-01-opencua.md` Q8.
 
 ## 6. Open decisions for the maintainer
 
+Decided 2026-11-08: the maintainer accepted every recommendation below. Phase 0 (`window-lease.ts`:
+parse, liveness, context, audit writer) is implemented; no input path consults it yet.
+
 1. Grant authority. Options: CLI with Touch ID / password via a small LocalAuthentication helper
    next to `native/opencua-surface`; menu-bar approval; plain file edit. Recommendation: CLI with the
    presence proof, menu bar later. A plain file edit is one `bash` call away from any shell-capable
