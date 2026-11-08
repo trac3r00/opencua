@@ -40,6 +40,7 @@ export type WorkerRegion = {
 };
 
 export type WorkerAssignment = WorkerAssignmentInput & {
+	readonly session_id: string;
 	readonly cursor_id: string;
 	readonly cursor_owner: CursorOwner;
 	readonly observation_token?: string;
@@ -66,9 +67,24 @@ export type WorkerRunSummary = {
 	readonly text?: string;
 };
 
-export type WorkerObservationOptions = Omit<ObservationOptions, "includeAccessibilityTree">;
+export type WorkerObservationOptions = Omit<ObservationOptions, "includeAccessibilityTree" | "diffOnly"> & {
+	readonly diffOnly?: boolean;
+};
+
+/** Coordinators sharing one server name their workers per session; omitted means this one. */
+export const DEFAULT_WORKER_SESSION = "default";
+
+/**
+ * The default session keeps the bare worker id, so registry entries from other processes still match. A named session
+ * joins with NUL, which neither part can contain (session ids are validated; worker ids name cursors, which refuse
+ * control characters), so two different pairs never share a key.
+ */
+function workerKey(sessionId: string, workerId: string): string {
+	return sessionId === DEFAULT_WORKER_SESSION ? workerId : `${sessionId}\u0000${workerId}`;
+}
 
 export type WorkerObservation = {
+	readonly session_id: string;
 	readonly worker_id: string;
 	readonly task: string;
 	readonly app: string;
@@ -79,6 +95,7 @@ export type WorkerObservation = {
 };
 
 export type WorkerRunResult = {
+	readonly session_id: string;
 	readonly worker_id: string;
 	readonly task: string;
 	readonly app: string;
@@ -96,6 +113,7 @@ type WorkerState = {
 		observation: ToolResult | undefined;
 	};
 	readonly pid: number;
+	readonly session: string;
 	busy: boolean;
 	control: WorkerControl;
 	activeRun: AbortController | undefined;
@@ -255,7 +273,11 @@ export class WorkerCoordinator {
 		// The shared session owns token validation and per-app mutation queues.
 	}
 
-	async assign(assignments: readonly WorkerAssignmentInput[]): Promise<readonly WorkerAssignment[]> {
+	async assign(
+		assignments: readonly WorkerAssignmentInput[],
+		sessionId = DEFAULT_WORKER_SESSION,
+		options: WorkerObservationOptions = {},
+	): Promise<readonly WorkerAssignment[]> {
 		this.assertOpen();
 		const workerIds = new Set<string>();
 		const pids = new Set<number>();
@@ -276,8 +298,8 @@ export class WorkerCoordinator {
 			({ assignment, pid }) => (assignment.region === undefined ? [{ worker_id: assignment.worker_id, pid }] : []),
 		);
 		for (const { assignment, pid } of resolved) {
-			if (workerIds.has(assignment.worker_id) || this.workers.has(assignment.worker_id)) {
-				throw new Error(`worker "${assignment.worker_id}" is already assigned`);
+			if (workerIds.has(assignment.worker_id) || this.workers.has(workerKey(sessionId, assignment.worker_id))) {
+				throw new Error(`worker "${assignment.worker_id}" is already assigned in session "${sessionId}"`);
 			}
 			const region = assignment.region;
 			if (region !== undefined) {
@@ -321,7 +343,7 @@ export class WorkerCoordinator {
 
 		this.registry?.claim(
 			resolved.map(({ assignment, pid }) => ({
-				worker_id: assignment.worker_id,
+				worker_id: workerKey(sessionId, assignment.worker_id),
 				task: assignment.task,
 				app: assignment.app,
 				...(assignment.agent_name === undefined ? {} : { agent_name: assignment.agent_name }),
@@ -348,12 +370,13 @@ export class WorkerCoordinator {
 					observation: undefined,
 				},
 				pid,
+				session: sessionId,
 				busy: true,
 				control: "running",
 				activeRun: undefined,
 				lastRun: undefined,
 			};
-			this.workers.set(assignment.worker_id, worker);
+			this.workers.set(workerKey(sessionId, assignment.worker_id), worker);
 			return worker;
 		});
 		try {
@@ -364,6 +387,7 @@ export class WorkerCoordinator {
 						// A bounded table, not every worker's full tree: a worker that needs more observes again.
 						maxElements: 250,
 						elementFormat: "table",
+						...options,
 					}),
 				})),
 			);
@@ -390,6 +414,7 @@ export class WorkerCoordinator {
 				worker.busy = false;
 				const { worker_id, task, app, cursor_id, cursor_owner, region } = worker.assignment;
 				return {
+					session_id: sessionId,
 					worker_id,
 					task,
 					app,
@@ -402,16 +427,20 @@ export class WorkerCoordinator {
 			});
 		} catch (error: unknown) {
 			for (const worker of provisional) {
-				this.workers.delete(worker.assignment.worker_id);
-				this.registry?.release(worker.assignment.worker_id);
+				this.workers.delete(workerKey(sessionId, worker.assignment.worker_id));
+				this.registry?.release(workerKey(sessionId, worker.assignment.worker_id));
 			}
 			throw error;
 		}
 	}
 
-	async observe(workerId: string, options: WorkerObservationOptions = {}): Promise<WorkerObservation> {
+	async observe(
+		workerId: string,
+		options: WorkerObservationOptions = {},
+		sessionId = DEFAULT_WORKER_SESSION,
+	): Promise<WorkerObservation> {
 		this.assertOpen();
-		const worker = this.lookup(workerId);
+		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
 			throw new Error(`worker "${workerId}" is not assigned`);
 		}
@@ -439,13 +468,14 @@ export class WorkerCoordinator {
 		}
 	}
 
-	status(): readonly WorkerStatus[] {
-		return [...this.workers.values()].flatMap(({ assignment, busy, control, lastRun }) => {
-			if (assignment.observation === undefined) {
+	status(sessionId = DEFAULT_WORKER_SESSION): readonly WorkerStatus[] {
+		return [...this.workers.values()].flatMap(({ assignment, busy, control, lastRun, session }) => {
+			if (assignment.observation === undefined || session !== sessionId) {
 				return [];
 			}
 			return [
 				{
+					session_id: session,
 					worker_id: assignment.worker_id,
 					task: assignment.task,
 					app: assignment.app,
@@ -463,23 +493,43 @@ export class WorkerCoordinator {
 		});
 	}
 
-	release(workerId: string): void {
+	release(workerId: string, sessionId = DEFAULT_WORKER_SESSION): void {
 		this.assertOpen();
-		const worker = this.lookup(workerId);
+		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
 			throw new Error(`worker "${workerId}" is not assigned`);
 		}
 		if (worker.busy) {
 			throw new Error(`worker "${workerId}" is busy`);
 		}
-		this.workers.delete(workerId);
-		this.adopted.delete(workerId);
-		this.registry?.release(workerId);
+		this.forget(worker);
+	}
+
+	/** Release every worker of one session; refused while any of them runs. */
+	releaseSession(sessionId = DEFAULT_WORKER_SESSION): void {
+		this.assertOpen();
+		const workers = [...this.workers.values()].filter((worker) => worker.session === sessionId);
+		const busy = workers.find((worker) => worker.busy);
+		if (busy !== undefined) {
+			throw new Error(`session "${sessionId}" has a busy worker "${busy.assignment.worker_id}"`);
+		}
+		for (const worker of workers) this.forget(worker);
+	}
+
+	/** Drops a worker and retires its token, so a released worker's context cannot act again. */
+	private forget(worker: WorkerState): void {
+		const key = workerKey(worker.session, worker.assignment.worker_id);
+		if (worker.assignment.observation_token !== undefined) {
+			this.session.revokeToken(worker.assignment.observation_token);
+		}
+		this.workers.delete(key);
+		this.adopted.delete(key);
+		this.registry?.release(key);
 	}
 
 	/** Take Over: cancel the worker's in-flight run between guarded steps and refuse new runs until resume. */
-	pause(workerId: string): WorkerControl {
-		const worker = this.controlled(workerId);
+	pause(workerId: string, sessionId = DEFAULT_WORKER_SESSION): WorkerControl {
+		const worker = this.controlled(workerId, sessionId);
 		if (worker.control === "stopped") {
 			throw new WorkerControlRefusal(workerId, worker.control);
 		}
@@ -489,15 +539,15 @@ export class WorkerCoordinator {
 	}
 
 	/** Stop: cancel the in-flight run and refuse every further run or observation until release. */
-	stop(workerId: string): WorkerControl {
-		const worker = this.controlled(workerId);
+	stop(workerId: string, sessionId = DEFAULT_WORKER_SESSION): WorkerControl {
+		const worker = this.controlled(workerId, sessionId);
 		worker.control = "stopped";
 		worker.activeRun?.abort();
 		return worker.control;
 	}
 
-	resume(workerId: string): WorkerControl {
-		const worker = this.controlled(workerId);
+	resume(workerId: string, sessionId = DEFAULT_WORKER_SESSION): WorkerControl {
+		const worker = this.controlled(workerId, sessionId);
 		if (worker.control === "stopped") {
 			throw new WorkerControlRefusal(workerId, "stopped");
 		}
@@ -512,9 +562,10 @@ export class WorkerCoordinator {
 		expect: VerifyRequest | undefined,
 		resultOptions: MutationOptions = {},
 		executionOptions: RunControl = {},
+		sessionId = DEFAULT_WORKER_SESSION,
 	): Promise<WorkerRunResult> {
 		this.assertOpen();
-		const worker = this.lookup(workerId);
+		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
 			throw new Error(`worker "${workerId}" is not assigned`);
 		}
@@ -606,6 +657,7 @@ export class WorkerCoordinator {
 			};
 			const { worker_id, task, app, cursor_id, cursor_owner } = worker.assignment;
 			return {
+				session_id: worker.session,
 				worker_id,
 				task,
 				app,
@@ -730,13 +782,25 @@ export class WorkerCoordinator {
 	}
 
 	/** A worker this process assigned, or one another opencua process assigned that this one now acts for. */
-	private lookup(workerId: string): WorkerState | undefined {
-		const local = this.workers.get(workerId);
-		const shared = local === undefined ? this.registry?.find(workerId) : undefined;
+	private lookup(workerId: string, sessionId = DEFAULT_WORKER_SESSION): WorkerState | undefined {
+		const key = workerKey(sessionId, workerId);
+		const cached = this.workers.get(key);
+		// An adopted worker lives only while its registry entry does: a release in the assigning process ends it here
+		// too, together with any token this process issued for it.
+		if (cached !== undefined && this.adopted.has(key) && this.registry?.find(key) === undefined) {
+			if (cached.assignment.observation_token !== undefined) {
+				this.session.revokeToken(cached.assignment.observation_token);
+			}
+			this.workers.delete(key);
+			this.adopted.delete(key);
+			return undefined;
+		}
+		const local = this.workers.get(key);
+		const shared = local === undefined ? this.registry?.find(key) : undefined;
 		if (shared === undefined) return local;
 		const worker: WorkerState = {
 			assignment: {
-				worker_id: shared.worker_id,
+				worker_id: workerId,
 				task: shared.task,
 				app: shared.app,
 				...(shared.agent_name === undefined ? {} : { agent_name: shared.agent_name }),
@@ -744,7 +808,7 @@ export class WorkerCoordinator {
 				...(shared.region === undefined ? {} : { region: shared.region }),
 				cursor_id: randomUUID(),
 				cursor_owner: {
-					agentName: shared.agent_name ?? shared.worker_id,
+					agentName: shared.agent_name ?? workerId,
 					sessionId: this.sessionId,
 					...(shared.parent_agent_name === undefined ? {} : { parentAgentName: shared.parent_agent_name }),
 				},
@@ -752,19 +816,20 @@ export class WorkerCoordinator {
 				observation: undefined,
 			},
 			pid: shared.appPid,
+			session: sessionId,
 			busy: false,
 			control: "running",
 			activeRun: undefined,
 			lastRun: undefined,
 		};
-		this.workers.set(workerId, worker);
-		this.adopted.add(workerId);
+		this.workers.set(key, worker);
+		this.adopted.add(key);
 		return worker;
 	}
 
-	private controlled(workerId: string): WorkerState {
+	private controlled(workerId: string, sessionId = DEFAULT_WORKER_SESSION): WorkerState {
 		this.assertOpen();
-		const worker = this.lookup(workerId);
+		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
 			throw new Error(`worker "${workerId}" is not assigned`);
 		}
@@ -791,7 +856,7 @@ export class WorkerCoordinator {
 				this.session.observe({
 					...options,
 					app: String(worker.pid),
-					diffOnly: false,
+					diffOnly: options.diffOnly ?? false,
 					includeAccessibilityTree: true,
 					includeScreenshot: options.includeScreenshot ?? false,
 				}),
@@ -804,6 +869,7 @@ export class WorkerCoordinator {
 		const token = payload(result)["observation_token"];
 		const { worker_id, task, app, cursor_id, cursor_owner } = worker.assignment;
 		return {
+			session_id: worker.session,
 			worker_id,
 			task,
 			app,

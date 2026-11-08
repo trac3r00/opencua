@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { currentCursorIdentity, currentInputScope } from "@opencua/core";
 import { createHarness, jsonPayload, observe } from "./protocol-client-harness.js";
+import { Deferred } from "./protocol-test-harness.js";
 
 let closeHarness: (() => Promise<void>) | undefined;
 
@@ -50,6 +52,56 @@ describe("observe_apps #given two approved apps #when both are observed in one c
 });
 
 describe("run_parallel #given batches for two apps #when they run in one call #then both apps are driven", () => {
+	it("keeps distinct virtual cursors while independent input lanes overlap", async () => {
+		const harness = await createHarness();
+		harness.computer.delivery = "background";
+		const entered = new Deferred<void>();
+		const finish = new Deferred<void>();
+		const cursors = new Map<number | undefined, string | undefined>();
+		let running: Promise<unknown> | undefined;
+		try {
+			const finderToken = await observe(harness, "Finder");
+			const otherToken = await observe(harness, "Other");
+			harness.computer.inputGate = async () => {
+				cursors.set(currentInputScope()?.target?.pid, currentCursorIdentity());
+				if (cursors.size === 2) entered.resolve();
+				await finish.promise;
+			};
+			running = harness.client.callTool({
+				name: "run_parallel",
+				arguments: {
+					batches: [
+						{ app: "Finder", observation_token: finderToken, steps: [{ type: "type_text", text: "one" }] },
+						{ app: "Other", observation_token: otherToken, steps: [{ type: "type_text", text: "two" }] },
+					],
+				},
+			});
+			const deadline = AbortSignal.timeout(2_000);
+			await Promise.race([
+				entered.promise,
+				new Promise<never>((_resolve, reject) => {
+					deadline.addEventListener("abort", () => reject(new Error("parallel lanes did not overlap")), {
+						once: true,
+					});
+				}),
+			]);
+			expect(cursors.get(1234)).toEqual(expect.any(String));
+			expect(cursors.get(5678)).toEqual(expect.any(String));
+			expect(cursors.get(1234)).not.toBe(cursors.get(5678));
+		} finally {
+			finish.resolve();
+			try {
+				const result = await running;
+				if (result !== undefined)
+					expect(jsonPayload(result)).toMatchObject({
+						batches: [{ ok: true }, { ok: true }],
+					});
+			} finally {
+				await harness.close();
+			}
+		}
+	});
+
 	it("#given PID aliases #when batches overlap #then refuses before dispatch and preserves the token", async () => {
 		const harness = await createHarness();
 		closeHarness = harness.close;

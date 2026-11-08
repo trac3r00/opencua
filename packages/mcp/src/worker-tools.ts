@@ -49,7 +49,7 @@ function attributedResult(
 	const images: ToolContent[] = [];
 	const attributed = attributedEntry(attribution, result, images);
 	return {
-		content: [{ type: "text", text: JSON.stringify(attributed, null, 2) }, ...images],
+		content: [{ type: "text", text: JSON.stringify(attributed) }, ...images],
 		...(result.isError === true ? { isError: true } : {}),
 	};
 }
@@ -70,7 +70,7 @@ function assignedResult(assignments: readonly WorkerAssignment[], spawn: SpawnGu
 }
 
 function objectResult(value: unknown): ToolResult {
-	return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+	return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
 /** A user Take Over or Stop, or a pointer target outside the worker's region, answers as a refusal that provably sent nothing. */
@@ -105,37 +105,62 @@ export function registerWorkerTools(
 		"manage_workers",
 		{
 			description:
-				"Assign disjoint app tasks, observe a worker for a fresh token, inspect assignments, release an idle worker, or control one worker: pause (user Take Over; cancels its run, refuses runs until resume), stop (cancels and refuses until release), resume. agent_name and parent_agent_name name the cursor owner (default worker_id); cursor ids are opaque server keys.",
+				"Assign disjoint app tasks per session_id (default: default; worker names may repeat across sessions, app PIDs cannot), observe a worker for a fresh token, inspect assignments, release an idle worker or a whole session (release_session), or control one worker: pause (user Take Over; cancels its run, refuses runs until resume), stop (cancels and refuses until release), resume. agent_name and parent_agent_name name the cursor owner (default worker_id); cursor ids are opaque server keys.",
 			inputSchema: manageWorkersSchema,
 			annotations: { readOnlyHint: false, destructiveHint: true },
 		},
 		async (input) =>
 			refusingControl(async () => {
 				const request = workerManagementRequestSchema.parse(input);
+				const session = request.session_id;
+				const observation = (fields: {
+					readonly include_screenshot?: boolean | undefined;
+					readonly diff_only?: boolean | undefined;
+					readonly max_elements?: number | undefined;
+					readonly element_format?: "json" | "table" | undefined;
+				}) => ({
+					...(fields.include_screenshot === undefined ? {} : { includeScreenshot: fields.include_screenshot }),
+					...(fields.max_elements === undefined ? {} : { maxElements: fields.max_elements }),
+					...(fields.diff_only === undefined ? {} : { diffOnly: fields.diff_only }),
+					...(fields.element_format === undefined ? {} : { elementFormat: fields.element_format }),
+				});
 				switch (request.op) {
 					case "assign":
-						return assignedResult(await coordinator.assign(request.assignments), spawn?.());
+						return assignedResult(
+							await coordinator.assign(request.assignments, session, observation(request)),
+							spawn?.(),
+						);
 					case "status":
-						return objectResult(coordinator.status());
+						return objectResult(coordinator.status(session));
 					case "observe": {
-						const observation = await coordinator.observe(request.worker_id, {
-							...(request.include_screenshot === undefined
-								? {}
-								: { includeScreenshot: request.include_screenshot }),
-							...(request.max_elements === undefined ? {} : { maxElements: request.max_elements }),
-						});
-						const { result, ...attribution } = observation;
+						const observed = await coordinator.observe(request.worker_id, observation(request), session);
+						const { result, ...attribution } = observed;
 						return attributedResult(attribution, result);
 					}
 					case "release":
-						coordinator.release(request.worker_id);
-						return objectResult({ released: request.worker_id });
+						coordinator.release(request.worker_id, session);
+						return objectResult({ session_id: session ?? "default", released: request.worker_id });
+					case "release_session":
+						coordinator.releaseSession(session);
+						return objectResult({ released_session: session ?? "default" });
 					case "pause":
-						return objectResult({ worker_id: request.worker_id, control: coordinator.pause(request.worker_id) });
+						return objectResult({
+							session_id: session ?? "default",
+							worker_id: request.worker_id,
+							control: coordinator.pause(request.worker_id, session),
+						});
 					case "stop":
-						return objectResult({ worker_id: request.worker_id, control: coordinator.stop(request.worker_id) });
+						return objectResult({
+							session_id: session ?? "default",
+							worker_id: request.worker_id,
+							control: coordinator.stop(request.worker_id, session),
+						});
 					case "resume":
-						return objectResult({ worker_id: request.worker_id, control: coordinator.resume(request.worker_id) });
+						return objectResult({
+							session_id: session ?? "default",
+							worker_id: request.worker_id,
+							control: coordinator.resume(request.worker_id, session),
+						});
 				}
 			}),
 	);
@@ -143,7 +168,7 @@ export function registerWorkerTools(
 		"run_worker",
 		{
 			description:
-				"Run verified run_steps for an assigned worker using its one-use token and isolated cursor identity. Images remain image content blocks with indexes in the attributed result; refusals set isError.",
+				"Run ordered worker steps with session_id (default: default) and a one-use observation_token. Different apps run concurrently with isolated virtual cursors under background delivery. Text-only by default; expect verifies outcomes. Refusals set isError.",
 			inputSchema: runWorkerSchema,
 			annotations: { readOnlyHint: false, destructiveHint: true },
 		},
@@ -156,6 +181,7 @@ export function registerWorkerTools(
 					expectFromInput(input.expect),
 					{ fullState: input.full_state === true, includeScreenshot: input.include_screenshot === true },
 					{ signal: extra.signal, ...(input.pace === undefined ? {} : { pace: input.pace }) },
+					input.session_id,
 				);
 				const { result: innerResult, ...attribution } = result;
 				return attributedResult(attribution, innerResult);

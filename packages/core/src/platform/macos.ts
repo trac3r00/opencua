@@ -1057,6 +1057,9 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async performAction(targetPid: number, elementIndex: number, action: string): Promise<void> {
+		if (this.delivery === "background" && action === "AXRaise") {
+			throw new Error("AXRaise requires foreground delivery; refusing to raise a window over the user's work");
+		}
 		this.assertInputAvailable(targetPid);
 		assertElementInInputRegion(
 			() => elementFrameByIndex(targetPid, elementIndex),

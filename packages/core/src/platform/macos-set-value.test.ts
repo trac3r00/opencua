@@ -86,3 +86,18 @@ describe("#given MacOSHostComputer.setValue on the human desktop #when called #t
 		expect(input.setTarget).not.toHaveBeenCalled();
 	});
 });
+
+describe("#given background delivery #when AXRaise is requested #then no window is raised", () => {
+	it("refuses before accessibility dispatch or keyboard feedback", async () => {
+		const computer = new MacOSHostComputer();
+		try {
+			await expect(computer.performAction(1234, 7, "AXRaise")).rejects.toThrow(
+				/AXRaise requires foreground delivery/,
+			);
+			expect(accessibilityMock.performActionByIndex).not.toHaveBeenCalled();
+			expect(firstInputController().showKeyboard).not.toHaveBeenCalled();
+		} finally {
+			await computer.close();
+		}
+	});
+});

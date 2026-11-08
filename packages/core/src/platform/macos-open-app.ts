@@ -45,10 +45,10 @@ const BUNDLE_ID_SHAPE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
 
 /**
  * A bundle id goes to open -b, an app name to open -a. In the background, -g launches the app
- * without bringing it forward, so opening it does not take focus from the person at the Mac.
+ * without bringing it forward and -j keeps its initial windows hidden.
  */
 export function openArguments(target: string, background = true): readonly string[] {
-	return [...(background ? ["-g"] : []), ...(BUNDLE_ID_SHAPE.test(target) ? ["-b", target] : ["-a", target])];
+	return [...(background ? ["-g", "-j"] : []), ...(BUNDLE_ID_SHAPE.test(target) ? ["-b", target] : ["-a", target])];
 }
 
 export function spawnOpenLauncher(
@@ -100,18 +100,22 @@ export async function openApplication(
 		const frontNow = (await listApps()).find((app) => app.isFrontmost === true)?.pid;
 		return frontNow === openedPid ? launcher.restoreFrontmost(frontBefore) : undefined;
 	};
-	await launcher.launch(running?.bundleId ?? name);
 	if (running !== undefined) {
-		const restored = await restoreIfStolen(running.pid);
+		// Reopening a running app can create or unminimize windows even with open -g.
+		// Only an explicitly foreground launcher may request that side effect.
+		if (launcher.background !== true) {
+			await launcher.launch(running.bundleId);
+		}
+		// Nothing was launched in the background, so a front app seen now is the person's own choice, not a theft.
 		return {
 			name: running.name,
 			bundleId: running.bundleId,
 			pid: running.pid,
 			launched: false,
 			activated: launcher.background !== true,
-			...(restored === undefined ? {} : { frontmostRestored: restored }),
 		};
 	}
+	await launcher.launch(name);
 	const deadline = Date.now() + timeoutMs;
 	while (true) {
 		const appeared = findMatchingApp(await listApps(), name);

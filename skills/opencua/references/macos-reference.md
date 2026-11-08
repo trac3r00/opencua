@@ -277,14 +277,14 @@ when the needed target cannot be established.
    `--background`; `OPENCUA_DELIVERY=attended` opts out): input goes to the app's own window,
    the frontmost app and the person's cursor are left alone, `open_app` launches without bringing
    the app forward, and an action that would need the foreground is refused rather than taking
-   over the machine. Background work draws no cursor, highlight, or click ripple. Attended
+   over the machine. A running app is left untouched and a new one launches hidden. Background work draws no cursor, highlight, or click ripple. Attended
    delivery can show an adaptive agent cursor without moving the real pointer for semantic
    actions (`OPENCUA_CURSOR=off` hides that feedback).
 
 - Do not bypass a denied/stale/paused MCP action using the raw CLI, AppleScript, shell input
   synthesis, another computer tool or another MCP connection. Those would evade the guard.
-- Keep one coordinating agent and one shared MCP server session. Delegate parallel agents
-  only through disjoint worker assignments in that session, not separate MCP servers.
+- Share one MCP server and give independent coordinating agents distinct `session_id` values.
+  Delegate parallel agents through disjoint worker assignments in each named session.
   Each app holds one live observation token; background workers can drive independent apps
   concurrently, while attended worker input is serialized. These queues do not serialize
   unrelated processes or human input.
@@ -295,18 +295,20 @@ when the needed target cannot be established.
 
 With the full toolset, one main agent may use `manage_workers` to assign
 non-overlapping app tasks, then spawn those workers through its own host runtime.
-Each worker receives its `worker_id` and assignment `observation_token`, acts
+Each worker receives its `session_id` (omitted means `default`), `worker_id` and assignment `observation_token`, acts
 only through `run_worker`, and returns an outcome for the main agent to verify.
 The assign answer's `spawn` (also `get_capabilities` `host.workers`) names the
 connected harness and its spawn mechanism; launch every worker in one round. See
 [host examples](references/subagents.md#host-examples).
 Worker observations omit screenshots unless `include_screenshot: true`.
 The MCP server does not contain an LLM scheduler or spawn agents. Background
-delivery remains invisible. Attended cursor identities are isolated visual
-indicators, not independent operating-system mice; release workers only after
-their runs finish.
+delivery remains invisible. Virtual cursor identities and positions are isolated, not independent
+operating-system mice. Sessions may reuse worker names but cannot own the same app process.
+Release workers only after their runs finish, or release all idle workers with `op: "release_session"`.
+Assignment observations default to text-only tables; for refreshes request `element_format: "table"`.
+Request `include_screenshot: true` for visual decisions and use `diff_only: true` for compact refreshes.
 
-Use `manage_workers` with `op: "observe"` and the assigned `worker_id` to refresh
+Use `manage_workers` with `op: "observe"` and the assigned `session_id` and `worker_id` to refresh
 that worker's context after a stale token or changed window. Do not use an
 unscoped observation to replace its token. A restarted app needs release and
 reassignment because ownership is pinned to the original process.

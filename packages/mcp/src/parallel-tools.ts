@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { type GuardedComputerInterface, resolveAppPid } from "@opencua/core";
+import { type GuardedComputerInterface, resolveAppPid, withCursorIdentity } from "@opencua/core";
 import type { GuardedSession } from "./guarded-session.js";
 import { createRunStepDriver, expectFromInput } from "./step-actions.js";
 import type { ToolContent, ToolResult } from "./tool-result.js";
@@ -11,12 +12,21 @@ interface AppOutcome {
 	readonly error?: string;
 }
 
-async function assertDistinctTargets(computer: GuardedComputerInterface, apps: readonly string[]): Promise<void> {
+async function assertDistinctTargets(
+	computer: GuardedComputerInterface,
+	apps: readonly string[],
+): Promise<ReadonlyMap<string, number>> {
 	const targets = await Promise.allSettled(apps.map((app) => resolveAppPid(computer, app)));
 	const pids = targets.flatMap((target) => (target.status === "fulfilled" ? [target.value] : []));
 	if (new Set(pids).size !== pids.length) {
 		throw new Error("each entry must target a different app process; app aliases cannot share a parallel call");
 	}
+	const resolved = new Map<string, number>();
+	for (const [index, target] of targets.entries()) {
+		const app = apps[index];
+		if (app !== undefined && target.status === "fulfilled") resolved.set(app, target.value);
+	}
+	return resolved;
 }
 
 async function settle(app: string, run: () => Promise<ToolResult>): Promise<AppOutcome> {
@@ -64,7 +74,7 @@ function combine(key: "apps" | "batches", outcomes: readonly AppOutcome[]): Tool
 		};
 	});
 	return {
-		content: [{ type: "text", text: JSON.stringify({ [key]: entries }, null, 2) }, ...images],
+		content: [{ type: "text", text: JSON.stringify({ [key]: entries }) }, ...images],
 		...(entries.every((entry) => !entry.ok) ? { isError: true } : {}),
 	};
 }
@@ -74,6 +84,26 @@ export function registerParallelTools(
 	session: GuardedSession,
 	computer: GuardedComputerInterface,
 ): void {
+	// One cursor identity per app process, kept for the most recent processes only.
+	const cursors = new Map<number, string>();
+	const cursorFor = (pid: number | undefined): string => {
+		if (pid === undefined) return randomUUID();
+		let cursor = cursors.get(pid);
+		if (cursor === undefined) {
+			cursor = randomUUID();
+			cursors.set(pid, cursor);
+			if (cursors.size > 64) {
+				const oldest = cursors.keys().next().value;
+				if (oldest !== undefined) cursors.delete(oldest);
+			}
+		}
+		return cursor;
+	};
+	// The session acts on the exact process the cursor was chosen for, not on a name resolved a second time.
+	const resolvedApp = (targets: ReadonlyMap<string, number>, app: string): string => {
+		const pid = targets.get(app);
+		return pid === undefined ? app : String(pid);
+	};
 	server.registerTool(
 		"observe_apps",
 		{
@@ -83,19 +113,21 @@ export function registerParallelTools(
 			annotations: { readOnlyHint: true, destructiveHint: false },
 		},
 		async (input) => {
-			await assertDistinctTargets(computer, input.apps);
+			const targets = await assertDistinctTargets(computer, input.apps);
 			return combine(
 				"apps",
 				await Promise.all(
 					input.apps.map((app) =>
 						settle(app, () =>
-							session.observe({
-								app,
-								diffOnly: input.diff_only === true,
-								includeScreenshot: input.include_screenshot === true,
-								...(input.max_elements === undefined ? {} : { maxElements: input.max_elements }),
-								elementFormat: input.element_format ?? "table",
-							}),
+							withCursorIdentity(cursorFor(targets.get(app)), () =>
+								session.observe({
+									app: resolvedApp(targets, app),
+									diffOnly: input.diff_only === true,
+									includeScreenshot: input.include_screenshot === true,
+									...(input.max_elements === undefined ? {} : { maxElements: input.max_elements }),
+									elementFormat: input.element_format ?? "table",
+								}),
+							),
 						),
 					),
 				),
@@ -116,7 +148,7 @@ export function registerParallelTools(
 				...batch,
 				steps: parseRunSteps(batch.steps, "run_parallel", `batches[${index}].steps`),
 			}));
-			await assertDistinctTargets(
+			const targets = await assertDistinctTargets(
 				computer,
 				batches.map((batch) => batch.app),
 			);
@@ -124,14 +156,16 @@ export function registerParallelTools(
 			const options = { fullState: input.full_state === true, includeScreenshot: input.include_screenshot === true };
 			const runBatch = (batch: (typeof batches)[number]): Promise<AppOutcome> =>
 				settle(batch.app, () =>
-					session.runSteps(
-						batch.observation_token,
-						batch.app,
-						batch.steps,
-						expectFromInput(batch.expect),
-						driver,
-						options,
-						{ signal: extra.signal, ...(input.pace === undefined ? {} : { pace: input.pace }) },
+					withCursorIdentity(cursorFor(targets.get(batch.app)), () =>
+						session.runSteps(
+							batch.observation_token,
+							resolvedApp(targets, batch.app),
+							batch.steps,
+							expectFromInput(batch.expect),
+							driver,
+							options,
+							{ signal: extra.signal, ...(input.pace === undefined ? {} : { pace: input.pace }) },
+						),
 					),
 				);
 			if (computer.delivery === "background") {

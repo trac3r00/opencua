@@ -1871,6 +1871,17 @@ export class GuardedSession {
 		this.tokenByPid.clear();
 	}
 
+	/** Retire a released worker's context without disturbing another app's live token. */
+	revokeToken(token: string): void {
+		const live = this.tokens.get(token);
+		if (live === undefined) return;
+		this.tokens.delete(token);
+		if (this.tokenByPid.get(live.key) === token) {
+			this.tokenByPid.delete(live.key);
+			this.reusableReads.delete(live.key);
+		}
+	}
+
 	async close(): Promise<void> {
 		this.invalidate();
 		this.hotFrames.dispose();
