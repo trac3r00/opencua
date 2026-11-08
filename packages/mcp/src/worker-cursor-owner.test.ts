@@ -16,7 +16,12 @@ const source = ts.createSourceFile(
 const declarations = source.statements.filter(
 	(statement) =>
 		(ts.isClassDeclaration(statement) && statement.name?.text === "WorkerCoordinator") ||
-		(ts.isFunctionDeclaration(statement) && statement.name?.text === "payload"),
+		(ts.isFunctionDeclaration(statement) &&
+			(statement.name?.text === "payload" || statement.name?.text === "workerKey")) ||
+		(ts.isVariableStatement(statement) &&
+			statement.declarationList.declarations.some(
+				(declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === "DEFAULT_WORKER_SESSION",
+			)),
 );
 const compiled = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
 	compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },

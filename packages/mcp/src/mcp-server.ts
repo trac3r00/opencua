@@ -225,7 +225,7 @@ export function createMcpServer(
 		"open_app",
 		{
 			description:
-				"On the shared host this is refused (isolated-session-required), because opening or activating an app acts on the human desktop. Opens an app and waits until observable. Background delivery does not foreground it; attended delivery may activate it. Returns pid and bundle id. Authorizes no observation or input; follow with get_app_state or find_elements. Fails if never observable.",
+				"On the shared host this is refused (isolated-session-required), because opening or activating an app acts on the human desktop. Opens an app and waits until observable. Background delivery launches it hidden and leaves a running app untouched; attended delivery may activate it. Returns pid and bundle id. Authorizes no observation or input; follow with get_app_state or find_elements. Fails if never observable.",
 			inputSchema: openAppSchema,
 			annotations: MUTATION_ANNOTATIONS,
 		},

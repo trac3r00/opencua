@@ -15,6 +15,10 @@ This package is the engine the other surfaces wrap. It provides:
   and `openApplication` (launch or reopen an app, then wait until it is observable; the default
   launcher refuses with `HostInteractionDenied`, because the shared host takes no desktop actions).
 
+Default keyboard targeting never raises a window or selects it through the Window menu. If another
+document owns the app's keyboard focus, input is refused rather than bringing the target over the user's work.
+Background delivery remains process/window-addressed and emits no cursor overlay.
+
 ```bash
 pnpm --filter @opencua/core build
 ```

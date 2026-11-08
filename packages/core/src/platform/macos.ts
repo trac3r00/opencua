@@ -1062,6 +1062,9 @@ export class MacOSHostComputer extends HostComputer {
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`${action} on element ${elementIndex}`,
 		);
+		if (this.delivery === "background" && action === "AXRaise") {
+			throw new Error("AXRaise requires foreground delivery; refusing to raise a window over the user's work");
+		}
 		this.showElement(targetPid, elementIndex, !action.startsWith("AXScroll"), action.startsWith("AXScroll"));
 		// Pressing or focusing an element can make its app activate itself (Safari does for a web
 		// field); background delivery hands the front back to the person's app when that happens.

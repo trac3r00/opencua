@@ -82,39 +82,32 @@ describe("#given keys or a window command for b.txt while the app's focused wind
 		);
 	});
 
-	it("#when another document has focus #then b.txt is raised inside its app first, the app naming the focused window", async () => {
+	it("#when another document has focus #then keys are refused without raising b.txt", async () => {
 		accessibilityMock.focusedWindowIdForPid.mockReturnValue(A_TXT.id);
 		const controller = await controllerOnB();
 
-		await controller.pressKey("a");
-
-		expect(accessibilityMock.raiseWindowInApp).toHaveBeenCalledWith(1234, B_TXT.id);
-		expect(coreGraphicsMock.postKeyboardEvent).toHaveBeenCalledWith(
-			expect.objectContaining({ targetPid: 1234, targetWindow: B_TXT }),
-		);
-		controller.close();
+		try {
+			await expect(controller.pressKey("a")).rejects.toThrow("refusing to raise");
+			expect(accessibilityMock.raiseWindowInApp).not.toHaveBeenCalled();
+			expect(coreGraphicsMock.postKeyboardEvent).not.toHaveBeenCalled();
+		} finally {
+			controller.close();
+		}
 	});
 
-	it("#when a window command is aimed at b.txt #then b.txt is raised the same way before it runs", async () => {
+	it("#when a window command is aimed at b.txt #then it is refused without raising or invoking the command", async () => {
 		accessibilityMock.focusedWindowIdForPid.mockReturnValue(A_TXT.id);
 		const controller = await controllerOnB();
-		const order: string[] = [];
-		accessibilityMock.raiseWindowInApp.mockImplementation((_pid, windowId) => {
-			order.push(`raise:${windowId}`);
-			return true;
-		});
-
-		await controller.withWindowCommand(
-			1234,
-			B_TXT,
-			() => false,
-			async () => {
-				order.push("command");
-			},
-		);
-
-		expect(order).toEqual(["raise:72", "command"]);
-		controller.close();
+		const command = vi.fn(async () => undefined);
+		try {
+			await expect(controller.withWindowCommand(1234, B_TXT, () => false, command)).rejects.toThrow(
+				"refusing to raise",
+			);
+			expect(accessibilityMock.raiseWindowInApp).not.toHaveBeenCalled();
+			expect(command).not.toHaveBeenCalled();
+		} finally {
+			controller.close();
+		}
 	});
 
 	it("#when the focused window is an untitled helper of b.txt's own interaction #then nothing is raised over it", async () => {
@@ -199,14 +192,14 @@ describe("#given keys or a window command for b.txt while the app's focused wind
 		},
 	);
 
-	it("#when raising a bound document reports success but focus remains elsewhere #then no keys are sent", async () => {
+	it("#when another document owns focus under a bound observation #then neither raising nor key delivery occurs", async () => {
 		accessibilityMock.focusedWindowIdForPid.mockReturnValue(A_TXT.id);
 		const controller = await controllerOnB();
 		try {
 			await expect(
 				runInInputScope({ target: { pid: 1234, windowId: B_TXT.id } }, () => controller.pressKey("a")),
-			).rejects.toThrow("observed keyboard target");
-			expect(accessibilityMock.raiseWindowInApp).toHaveBeenCalledWith(1234, B_TXT.id);
+			).rejects.toThrow("refusing to raise");
+			expect(accessibilityMock.raiseWindowInApp).not.toHaveBeenCalled();
 			expect(coreGraphicsMock.postKeyboardEvent).not.toHaveBeenCalled();
 		} finally {
 			controller.close();

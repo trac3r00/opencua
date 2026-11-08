@@ -30,7 +30,6 @@ import {
 	focusedWindowIdForPid,
 	focusedWindowIsModal,
 	focusedWindowShowsFilePanel,
-	raiseWindowInApp,
 	windowIdsAtScreenPoint,
 	windowMinimizedForPid,
 	windowTitlesForPid,
@@ -103,15 +102,12 @@ export function setOnscreenWindowIdsSourceForTesting(source: () => readonly numb
 
 /**
  * Keyboard events posted to a process go to its key window, not to the window they name, so with
- * two documents open the observed window has to be made the app's focused window first. Raising
- * inside the app does not activate it, which keeps background delivery background.
+ * two documents open the observed window must already be the app's focused window. AXRaise and
+ * Window menu selection can bring a window over the person's work, even without app activation.
  */
 let keyboardWindowFocuser: (pid: number, windowId: number) => Promise<void> = async (pid, windowId) => {
 	const focusedId = focusedWindowIdForPid(pid);
 	if (focusedId === windowId || focusedWindowIsModal(pid)) {
-		return;
-	}
-	if (!currentOnscreenWindowIds()?.includes(windowId)) {
 		return;
 	}
 	if (focusedId !== undefined) {
@@ -121,32 +117,10 @@ let keyboardWindowFocuser: (pid: number, windowId: number) => Promise<void> = as
 		// process without Screen Recording, so accessibility names the window when the listing does not.
 		const listedTitle = (await openWindowsForTargeting()).find((window) => window.id === focusedId)?.title;
 		const focusedTitle = listedTitle || windowTitlesForPid(pid).get(focusedId);
-		if (!focusedTitle || raiseWindowInApp(pid, windowId)) {
+		if (!focusedTitle) {
 			return;
 		}
-	}
-	// Off the physical console accessibility exposes no windows, but the menu bar still works and the
-	// Window menu's entry for a document makes that window key. Only when another titled window of the
-	// app is in front of the target: untitled helper windows (Finder's inline rename editor) belong to
-	// the target's own interaction, and re-selecting the target would end it.
-	const order = currentOnscreenWindowIds() ?? [];
-	const depth = (id: number) => order.indexOf(id);
-	const windows = (await openWindowsForTargeting()).filter(
-		(window) => window.owner?.processId === pid && depth(window.id) >= 0,
-	);
-	const title = windows.find((window) => window.id === windowId)?.title;
-	const coveredByDocument = windows.some(
-		(window) => window.id !== windowId && Boolean(window.title) && depth(window.id) < depth(windowId),
-	);
-	if (!title || !coveredByDocument) {
-		return;
-	}
-	try {
-		// Loaded on use: the menu module binds accessibility calls this module otherwise never needs.
-		const { invokeMenu } = await import("./macos-menu.js");
-		await invokeMenu(pid, ["Window", title]);
-	} catch {
-		// No Window menu entry for it (or two windows share the title): keys go to the key window, as before.
+		throw new Error("keyboard target is not the app's focused window; refusing to raise it over the user's work");
 	}
 };
 
@@ -311,6 +285,7 @@ export class MacOSInputController {
 	private exitHookRegistered = false;
 	private readonly overlay: PointerOverlay;
 	private readonly processPointers: VirtualPointerSet;
+	private readonly pointerSeed: Point;
 	private readonly pointersByIdentity = new Map<string, VirtualPointerSet>();
 	private readonly isLocked: () => boolean;
 	private readonly displaySleep: DisplaySleepAssertion;
@@ -336,7 +311,8 @@ export class MacOSInputController {
 		this.overlay = overlay;
 		this.isLocked = isLocked;
 		this.displaySleep = displaySleep;
-		this.processPointers = new VirtualPointerSet(readRealCursorPosition());
+		this.pointerSeed = readRealCursorPosition();
+		this.processPointers = new VirtualPointerSet(this.pointerSeed);
 		this.setTarget(targetPid);
 	}
 
@@ -347,7 +323,7 @@ export class MacOSInputController {
 		}
 		let pointers = this.pointersByIdentity.get(identity);
 		if (pointers === undefined) {
-			pointers = new VirtualPointerSet(this.processPointers.forPid(0).position());
+			pointers = new VirtualPointerSet(this.pointerSeed);
 			this.pointersByIdentity.set(identity, pointers);
 		}
 		return pointers;

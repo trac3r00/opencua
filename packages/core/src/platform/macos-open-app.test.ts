@@ -85,7 +85,17 @@ describe("#given an app that is already running #when opened #then it is activat
 
 describe("#given the default launcher #when launching an app #then it stays in the background", () => {
 	it("builds background open arguments by default", () => {
-		expect(openArguments("Finder")).toEqual(["-g", "-a", "Finder"]);
+		expect(openArguments("Finder")).toEqual(["-g", "-j", "-a", "Finder"]);
+	});
+
+	it("#given a background launcher #when opening a running app #then leaves its windows alone", async () => {
+		const lister = new FakeLister();
+		lister.apps = [app("Finder", "com.apple.finder", 1234)];
+		const { launcher, targets } = recordingLauncher();
+
+		await openApplication(lister, "Finder", { launcher: { ...launcher, background: true } });
+
+		expect(targets).toEqual([]);
 	});
 });
 
@@ -140,10 +150,10 @@ describe("#given a launcher that refuses #when opening #then the refusal surface
 
 describe("#given a bundle id and an app name #when the open arguments are built #then a bundle id goes to -b and a name to -a", () => {
 	it("picks the flag that matches the target shape", () => {
-		expect(openArguments("com.apple.Safari")).toEqual(["-g", "-b", "com.apple.Safari"]);
-		expect(openArguments("Finder")).toEqual(["-g", "-a", "Finder"]);
-		expect(openArguments("Visual Studio Code")).toEqual(["-g", "-a", "Visual Studio Code"]);
-		expect(openArguments("Finder", true)).toEqual(["-g", "-a", "Finder"]);
+		expect(openArguments("com.apple.Safari")).toEqual(["-g", "-j", "-b", "com.apple.Safari"]);
+		expect(openArguments("Finder")).toEqual(["-g", "-j", "-a", "Finder"]);
+		expect(openArguments("Visual Studio Code")).toEqual(["-g", "-j", "-a", "Visual Studio Code"]);
+		expect(openArguments("Finder", true)).toEqual(["-g", "-j", "-a", "Finder"]);
 		expect(openArguments("Finder", false)).toEqual(["-a", "Finder"]);
 		expect(openArguments("com.apple.Safari", false)).toEqual(["-b", "com.apple.Safari"]);
 	});

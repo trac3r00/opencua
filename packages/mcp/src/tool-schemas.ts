@@ -690,34 +690,48 @@ const workerAssignmentsSchema = z
 	.min(1)
 	.max(6);
 
-export const manageWorkersSchema = z.object({
-	op: z.enum(["assign", "status", "observe", "release", "pause", "stop", "resume"]),
-	assignments: workerAssignmentsSchema.optional(),
-	worker_id: z.string().min(1).optional(),
+const workerSessionFields = {
+	session_id: z.string().min(1).max(128).optional(),
+};
+const workerObservationFields = {
 	include_screenshot: includeScreenshotSchema,
 	max_elements: z.number().int().positive().optional(),
+	diff_only: z.boolean().optional(),
+	element_format: z.enum(["json", "table"]).optional(),
+};
+
+export const manageWorkersSchema = z.object({
+	...workerSessionFields,
+	op: z.enum(["assign", "status", "observe", "release", "release_session", "pause", "stop", "resume"]),
+	assignments: workerAssignmentsSchema.optional(),
+	worker_id: z.string().min(1).optional(),
+	...workerObservationFields,
 });
 
 /** The published schema stays flat; each operation is checked before coordinator state changes. */
 export const workerManagementRequestSchema = z.discriminatedUnion("op", [
 	z.object({
+		...workerSessionFields,
 		op: z.literal("assign"),
 		assignments: workerAssignmentsSchema,
+		...workerObservationFields,
 	}),
-	z.object({ op: z.literal("status") }),
+	z.object({ ...workerSessionFields, op: z.literal("status") }),
 	z.object({
+		...workerSessionFields,
 		op: z.literal("observe"),
 		worker_id: z.string().min(1),
-		include_screenshot: includeScreenshotSchema,
-		max_elements: z.number().int().positive().optional(),
+		...workerObservationFields,
 	}),
-	z.object({ op: z.literal("release"), worker_id: z.string().min(1) }),
-	z.object({ op: z.literal("pause"), worker_id: z.string().min(1) }),
-	z.object({ op: z.literal("stop"), worker_id: z.string().min(1) }),
-	z.object({ op: z.literal("resume"), worker_id: z.string().min(1) }),
+	z.object({ ...workerSessionFields, op: z.literal("release"), worker_id: z.string().min(1) }),
+	z.object({ ...workerSessionFields, op: z.literal("release_session") }),
+	z.object({ ...workerSessionFields, op: z.literal("pause"), worker_id: z.string().min(1) }),
+	z.object({ ...workerSessionFields, op: z.literal("stop"), worker_id: z.string().min(1) }),
+	z.object({ ...workerSessionFields, op: z.literal("resume"), worker_id: z.string().min(1) }),
 ]);
 
 export const runWorkerSchema = z.object({
+	...workerSessionFields,
 	worker_id: z.string().min(1),
 	observation_token: observationTokenSchema,
 	steps: workerStepsSchema,

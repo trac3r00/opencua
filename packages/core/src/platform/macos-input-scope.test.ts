@@ -122,6 +122,19 @@ afterEach(() => {
 });
 
 describe("#given a pointer bound to an observed window #when moving or dragging #then its path stays spatially scoped", () => {
+	it("#given unscoped feedback #when a new identity starts #then it never inherits that pointer position", () => {
+		const controller = backgroundController();
+		try {
+			const initial = controller.getCursorPosition();
+			controller.showPointer({ x: 987, y: 654 }, false);
+
+			expect(withCursorIdentity("new-session", () => controller.getCursorPosition())).toEqual(initial);
+			expect(controller.getCursorPosition()).toEqual({ x: 987, y: 654 });
+		} finally {
+			controller.close();
+		}
+	});
+
 	it.each(["background", "attended"] as const)(
 		"#when explicit feedback names a PID under another scope in %s #then position belongs to that PID and identity",
 		async (delivery) => {

@@ -274,6 +274,14 @@ setting updates every client's registration.
 </tr>
 </table>
 
+### Concurrent worker sessions
+
+The full MCP toolset accepts `session_id` on `manage_workers` and `run_worker`, so independent
+coordinators sharing one server can reuse worker names while keeping tokens, status, and virtual cursors separate.
+Sessions own disjoint app processes; their step chains run concurrently, with ordered steps inside
+each app. Worker observations use text-only tables by default, with optional screenshots and diff-only
+refreshes. See [worker session usage](packages/mcp/README.md#concurrent-worker-sessions).
+
 ### How OpenCUA compares
 
 | | OpenCUA | [trycua/cua](https://github.com/trycua/cua) (Cua Driver) | Peekaboo | Codex Computer Use |

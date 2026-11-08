@@ -29,7 +29,7 @@ export function allowedBundleIdsFromProcessEnvironment(): readonly string[] | un
 	return allowedBundleIdsFromEnvironment(process.env["OPENCUA_ALLOWED_BUNDLE_IDS"]);
 }
 
-/** Delivery mode from the host environment. */
+/** MCP input must not take over the desktop, including when a legacy attended setting remains. */
 export function deliveryFromProcessEnvironment(): InputDelivery {
 	return deliveryFromEnvironment(process.env["OPENCUA_DELIVERY"]);
 }
