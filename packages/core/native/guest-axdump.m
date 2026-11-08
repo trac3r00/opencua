@@ -31,8 +31,9 @@ static NSArray *Frame(AXUIElementRef element) {
 int main(void) {
   @autoreleasepool {
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
-    AXUIElementRef app = AXUIElementCreateApplication(front.processIdentifier);
-    AXUIElementRef window = (AXUIElementRef)Attr(app, kAXFocusedWindowAttribute);
+    // The frontmost app can vanish between the two calls; that reads as no window.
+    AXUIElementRef app = front == nil ? NULL : AXUIElementCreateApplication(front.processIdentifier);
+    AXUIElementRef window = app == NULL ? NULL : (AXUIElementRef)Attr(app, kAXFocusedWindowAttribute);
     NSMutableArray *elements = [NSMutableArray array];
     NSMutableArray *queue = [NSMutableArray array];
     if (window != NULL) [queue addObject:@[ (__bridge id)window, @0 ]];
@@ -64,7 +65,7 @@ int main(void) {
     NSData *json = [NSJSONSerialization dataWithJSONObject:out options:0 error:NULL];
     fwrite(json.bytes, 1, json.length, stdout);
     if (window != NULL) CFRelease(window);
-    CFRelease(app);
+    if (app != NULL) CFRelease(app);
   }
   return 0;
 }

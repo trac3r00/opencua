@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import type { TartGuestTransport } from "./tart-guest-transport.js";
 
 export interface GuestAccessibilityElement {
@@ -21,7 +22,7 @@ const GUEST_HELPER = "/tmp/opencua-guest-axdump";
 const installed = new WeakSet<GuestCommands>();
 
 export function guestAccessibilityHelperPath(): string {
-	return new URL("../../native/guest-axdump", import.meta.url).pathname;
+	return fileURLToPath(new URL("../../native/guest-axdump", import.meta.url));
 }
 
 /**

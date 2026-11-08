@@ -170,6 +170,7 @@ static void Log(NSString *line) { fprintf(stderr, "%s\n", line.UTF8String); }
 - (instancetype)initWithFd:(int)fd;
 - (void)write:(NSData *)data;
 - (void)flushAndClose:(BOOL)shouldClose;
+- (void)discardAndClose;
 @end
 
 @implementation Writer {
@@ -268,6 +269,14 @@ static void Log(NSString *line) { fprintf(stderr, "%s\n", line.UTF8String); }
     close(fd);
   });
   dispatch_source_cancel(source);
+}
+
+// Closes without writing what is still pending: a stuck reader must not hold
+// up a shutdown that is about to terminate it anyway.
+- (void)discardAndClose {
+  _pending.length = 0;
+  _broken = YES;
+  [self flushAndClose:YES];
 }
 @end
 
@@ -526,7 +535,7 @@ static void Notify(NSString *title, NSString *body) {
   if (_inputSource != nil) {
     dispatch_source_cancel(_inputSource);
   }
-  [_childIn flushAndClose:YES];
+  [_childIn discardAndClose];
   if (_child > 0) {
     // The session ends with its server: wait for it so no server outlives the
     // connection, and force it after two seconds.

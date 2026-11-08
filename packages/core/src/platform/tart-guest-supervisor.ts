@@ -75,7 +75,7 @@ export class TartGuestSupervisor {
 		// Joining is opt-in: by default a running guest may belong to a runtime this server cannot vouch for.
 		if (running && !attach)
 			throw new Error("The owned VM already has a control socket; refuse to attach to another runtime.");
-		const runtime = running ? attachedRuntime() : (dependencies.start ?? startRuntime)(target);
+		const runtime = running ? attachedRuntime(target) : (dependencies.start ?? startRuntime)(target);
 		const supervisor = new TartGuestSupervisor({ ...owner }, target, runtime, running);
 		const abort = new AbortController();
 		const timeout = setTimeout(() => abort.abort(new Error("Owned VM input startup timed out.")), 180_000);
@@ -378,12 +378,31 @@ async function pressChord(input: GuestInput, keysyms: readonly number[]): Promis
 	if (errors.length > 1) throw new AggregateError(errors, "Guest key chord failed.");
 }
 
-/** A guest runtime owned by another session: no output to drain, no exit to observe, nothing to stop. */
-function attachedRuntime(): GuestRuntimeProcess {
+/** How often a joined guest's control socket is checked; its owner's exit removes it. */
+const ATTACHED_LIVENESS_MS = 2_000;
+
+/**
+ * A guest runtime owned by another session: no output to drain and nothing to stop, but its exit is observed through
+ * the control socket the owning runtime removes, so a joined guest that dies stops reading as running.
+ */
+function attachedRuntime(target: TartGuestTarget): GuestRuntimeProcess {
+	let timer: ReturnType<typeof setInterval> | undefined;
+	const exited = new Promise<number | null>((resolve) => {
+		timer = setInterval(() => {
+			void socketExists(target).then((present) => {
+				if (present) return;
+				clearInterval(timer);
+				resolve(null);
+			});
+		}, ATTACHED_LIVENESS_MS);
+		timer.unref();
+	});
 	return {
 		output: (async function* () {})(),
-		exited: new Promise<number | null>(() => undefined),
-		stop(): void {},
+		exited,
+		stop(): void {
+			clearInterval(timer);
+		},
 	};
 }
 

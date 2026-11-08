@@ -379,7 +379,6 @@ export function createIsolatedMcpServer(options: IsolatedServerOptions): McpServ
 									attempted = true;
 									// The whole request runs inside serial(), so another actor's input never lands between steps.
 									for (const [index, action] of steps.entries()) {
-										actions += 1;
 										switch (action.type) {
 											case "move":
 												await active.supervisor.move(action.x, action.y);
@@ -405,6 +404,8 @@ export function createIsolatedMcpServer(options: IsolatedServerOptions): McpServ
 											default:
 												throw new Error("Unsupported guest action.", { cause: action satisfies never });
 										}
+										// Counted once sent, so a step refused before any input is not reported as another actor's action.
+										actions += 1;
 									}
 									batchSteps = steps.length;
 									// Keys and typing can save a document; flush it now, because the guest may later be powered off
@@ -429,10 +430,16 @@ export function createIsolatedMcpServer(options: IsolatedServerOptions): McpServ
 									request.accessibility === true
 										? await active.accessibility({ width: image.width, height: image.height }).then(
 												(accessibility) => ({ accessibility }),
-												(error: unknown) => ({
-													accessibility_error:
-														error instanceof Error ? error.message : "Guest accessibility read failed.",
-												}),
+												(error: unknown) => {
+													// A stop during the read is the user's stop, not a guest-read failure.
+													if (interruption() !== undefined) throw error;
+													return {
+														accessibility_error:
+															error instanceof Error
+																? error.message
+																: "Guest accessibility read failed.",
+													};
+												},
 											)
 										: {};
 								return {
@@ -461,6 +468,9 @@ export function createIsolatedMcpServer(options: IsolatedServerOptions): McpServ
 						actor,
 					);
 				} catch (error) {
+					const stoppedNow = interruption();
+					if (stoppedNow !== undefined)
+						return { ...text({ error: "user-stopped", message: stoppedNow }), isError: true };
 					const message = error instanceof Error ? error.message : "";
 					if (!message.startsWith("unknown-key-name") && !message.startsWith("duplicate-key-in-chord"))
 						observations.delete(actorId);

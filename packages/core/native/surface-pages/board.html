@@ -42,6 +42,7 @@ for (const color of COLORS) {
 	swatch.style.background = color;
 	swatch.dataset.color = color;
 	swatch.setAttribute("role", "button");
+	swatch.tabIndex = 0;
 	swatch.setAttribute("aria-label", `color ${color}`);
 	bar.append(swatch);
 }
@@ -50,6 +51,7 @@ for (const size of SIZES) {
 	button.className = "size";
 	button.dataset.size = String(size);
 	button.setAttribute("role", "button");
+	button.tabIndex = 0;
 	button.setAttribute("aria-label", `brush ${size}`);
 	const dot = document.createElement("span");
 	dot.style.width = dot.style.height = `${Math.min(size, 16)}px`;
@@ -65,7 +67,15 @@ function resize() {
 	const ratio = window.devicePixelRatio || 1;
 	const width = window.innerWidth;
 	const height = Math.max(0, window.innerHeight - 41);
-	const saved = paper.width > 0 && paper.height > 0 ? context.getImageData(0, 0, paper.width, paper.height) : null;
+	// The drawing is kept at its CSS size, so a move to a display with another pixel ratio resamples it in place.
+	const previous = { width: parseFloat(paper.style.width) || 0, height: parseFloat(paper.style.height) || 0 };
+	let saved = null;
+	if (paper.width > 0 && paper.height > 0) {
+		saved = document.createElement("canvas");
+		saved.width = paper.width;
+		saved.height = paper.height;
+		saved.getContext("2d").drawImage(paper, 0, 0);
+	}
 	paper.width = Math.round(width * ratio);
 	paper.height = Math.round(height * ratio);
 	paper.style.width = `${width}px`;
@@ -73,7 +83,7 @@ function resize() {
 	context.setTransform(ratio, 0, 0, ratio, 0, 0);
 	context.lineCap = "round";
 	context.lineJoin = "round";
-	if (saved !== null) context.putImageData(saved, 0, 0);
+	if (saved !== null) context.drawImage(saved, 0, 0, previous.width, previous.height);
 }
 
 function report() {
@@ -109,15 +119,28 @@ function segment(entry, from, to) {
 	context.stroke();
 }
 
+function choose(entry, pick) {
+	if (pick.dataset.color !== undefined) {
+		entry.color = pick.dataset.color;
+		entry.picked = true;
+	}
+	if (pick.dataset.size !== undefined) entry.size = Number(pick.dataset.size);
+}
+
+// Keyboard picks apply to the person's own pointer, the primary mouse (pointer id 1).
+bar.addEventListener("keydown", (event) => {
+	if (event.key !== "Enter" && event.key !== " ") return;
+	const pick = event.target instanceof Element ? event.target.closest("[data-color],[data-size]") : null;
+	if (pick === null) return;
+	event.preventDefault();
+	choose(state(1), pick);
+});
+
 window.addEventListener("pointerdown", (event) => {
 	const entry = state(event.pointerId);
 	const pick = event.target instanceof Element ? event.target.closest("[data-color],[data-size]") : null;
 	if (pick !== null) {
-		if (pick.dataset.color !== undefined) {
-			entry.color = pick.dataset.color;
-			entry.picked = true;
-		}
-		if (pick.dataset.size !== undefined) entry.size = Number(pick.dataset.size);
+		choose(entry, pick);
 		return;
 	}
 	if (event.target !== paper) return;

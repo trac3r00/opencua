@@ -24,7 +24,8 @@
 </p>
 
 **Many agents, one window, your Mac untouched.** Agents see apps through ScreenCaptureKit and the Accessibility
-tree, and act through CGEvent posted to the app itself, so your cursor and front app stay where you left them.
+tree, and act through input aimed at the app itself (events posted to its process, or an opencua surface's own
+input socket), so your cursor and front app stay where you left them.
 On a surface window opencua launches, several agents and subagents work at once, each with its own named, colored
 cursor; their strokes are merged so none is cut and a cursor that waited still draws its curves.
 

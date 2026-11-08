@@ -86,7 +86,8 @@ function startLauncher(name: string, env: Record<string, string> = {}) {
 		stdin: "pipe",
 		stdout: "pipe",
 		stderr: "ignore",
-		env: { ...process.env, FAKE_LOG: log, OPENCUA_NOTIFICATIONS: "off", ...env },
+		// Supervision is on unless a case turns it off, whatever the runner's own environment says.
+		env: { ...process.env, FAKE_LOG: log, OPENCUA_NOTIFICATIONS: "off", OPENCUA_SUPERVISOR: "on", ...env },
 	});
 	const received: Message[] = [];
 	const waiters: { readonly match: (message: Message) => boolean; readonly resolve: (message: Message) => void }[] =

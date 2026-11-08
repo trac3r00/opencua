@@ -261,10 +261,9 @@ function withNamesLock(path: string, write: () => void): void {
 			} catch {
 				// The holder released it meanwhile.
 			}
-			if (Date.now() - started > NAMES_LOCK_WAIT_MS) {
-				write();
-				return;
-			}
+			// A holder older than the stale limit is removed above, so waiting past that limit means the lock cannot be
+			// taken at all; the name is then left unrecorded rather than written over another process's entry.
+			if (Date.now() - started > NAMES_LOCK_STALE_MS + NAMES_LOCK_WAIT_MS) return;
 			Atomics.wait(lockPause, 0, 0, 2);
 		}
 	}

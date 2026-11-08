@@ -24,16 +24,16 @@ const SPECIAL_KEYS = new Map<number, string>([
 	[0xffff, "forwarddelete"],
 	[0xff8d, "return"],
 	[0xffe1, "shift"],
-	[0xffe2, "shift"],
+	[0xffe2, "rightshift"],
 	[0xffe3, "control"],
-	[0xffe4, "control"],
+	[0xffe4, "rightcontrol"],
 	// RFB clients send Command as Meta or Super, left or right.
 	[0xffe7, "command"],
 	[0xffe8, "command"],
 	[0xffeb, "command"],
 	[0xffec, "command"],
 	[0xffe9, "option"],
-	[0xffea, "option"],
+	[0xffea, "rightoption"],
 	[0x20, "space"],
 ]);
 
@@ -266,8 +266,12 @@ function resolveKey(keysym: number): { code: number; flag: number } {
 				? `f${keysym - 0xffbd}`
 				: undefined);
 	if (name === undefined) throw new Error("Unsupported guest keysym.");
+	// A right-side modifier keeps its own key code and sets the same modifier flag as the left one.
+	const modifier = name.replace(/^right/, "");
 	const flag =
-		name === "shift" || name === "control" || name === "command" || name === "option" ? modifierFlags([name]) : 0;
+		modifier === "shift" || modifier === "control" || modifier === "command" || modifier === "option"
+			? modifierFlags([modifier])
+			: 0;
 	return { code: virtualKeyCodeFor(name), flag };
 }
 

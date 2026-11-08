@@ -44,7 +44,7 @@ Every arm gets only its own MCP server. If a vendor ships a skill or server inst
 | ID | App and window | Part of agent k (N = 4) | Checker (runs in the guest, never through a tested tool) |
 |---|---|---|---|
 | T1 | TextEdit, one document with headings "Agent 1" to "Agent 4" | type a given sentence under heading k | AppleScript reads the document text: each sentence once, under its own heading, nothing else changed |
-| T2 | Reminders, one window on list "Bench" | add reminders "k-a", "k-b", "k-c" | AppleScript reads the list: exactly 12 items, each once |
+| T2 | Reminders, one window on list "Bench" (as first planned; Amendment 1 replaced it with a Finder rename, the task the pilots measured) | add reminders "k-a", "k-b", "k-c" | AppleScript reads the list: exactly 12 items, each once (see Amendment 1 for the rename checker) |
 | T3 | Finder, one window on `~/Bench/t3` with folders A1 to A4 and files f1 to f8 | move files f(2k-1) and f(2k) into folder Ak | `ls` of every folder: each file in its folder, no other change |
 
 Each task also runs with **N = 1**: one agent does all four parts. This is the baseline per arm.
@@ -62,9 +62,11 @@ A guest script resets the app state before every trial.
 
 ## Repetitions and order
 
-- Pilot: 1 repetition of every arm, task and N (18 trials, 45 agent runs). The pilot only proves the harness
+- Pilot: 1 repetition of every arm, task and N. With the three arms planned here that is 18 trials and 45 agent
+  runs; with agent-desktop-headed added later it is 24 trials and 60 agent runs. The pilot only proves the harness
   works and is not analysed, unless it is promoted unchanged.
-- Main: 3 repetitions (54 trials, 135 agent runs), arms in a rotated order per repetition.
+- Main: 3 repetitions (54 trials and 135 agent runs for three arms; 72 trials and 180 agent runs for four), arms in a
+  rotated order per repetition.
 
 ## Feasibility gates (each must pass before trials)
 
@@ -154,8 +156,9 @@ not analysed. Startup time is excluded from wall time for every arm, as before.
 
 ## Pilot results (1 trial per cell; harness check, not a ranking)
 
-Harness, checkers and raw rows: `.omo/evidence/vm-bench-2026-11-06/`. Pass is the file checker, never the agent's
-own report. Wall time excludes guest startup.
+Harness, checkers and raw rows: `.omo/evidence/vm-bench-2026-11-06/` on the measuring Mac. That directory is local
+and not part of this repository, so these results cannot be audited from the repository alone. Pass is the file
+checker, never the agent's own report. Wall time excludes guest startup.
 
 | Arm | T1 N=1 | T1 N=4 | T2 N=1 | T2 N=4 | T3 N=1 | T3 N=4 |
 |---|---|---|---|---|---|---|
@@ -213,9 +216,10 @@ Harness changes: the pilot driver flushes and reboots to confirm the guest check
 right before `tart stop` had been lost); the T1 checker returns the file text; trial logs keep each tool input and
 the start of each result.
 
-## OpenCUA pilot p3 (after the fixes in Amendment 6; 1 trial per cell)
+## OpenCUA pilot p3 (after the Amendment 6 fixes except the guest flush; 1 trial per cell)
 
-Rows and logs: `/tmp/opencua-vmbench/runs/*-rp3*` (moved to `.omo/evidence/vm-bench-2026-11-06/` at the end).
+Rows and logs: `/tmp/opencua-vmbench/runs/*-rp3*` (moved to `.omo/evidence/vm-bench-2026-11-06/` at the end, local
+only). The guest flush after typing came after p3 and was checked by the T1 re-run `rp3f`.
 Pass is the file checker. Wall time is from the first action and excludes guest start.
 
 | Task | N = 1 | N = 4 |

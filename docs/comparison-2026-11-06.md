@@ -1,8 +1,8 @@
 # OpenCUA compared with Cua Driver, agent-desktop and Codex Computer Use (2026-11-06)
 
 This is a dated record, judged from each product's code and measured on this Mac (Apple M1 Pro,
-macOS 27.2). Every claim cites a file and line from the version named here, a string in a shipped
-bundle, or a local measurement. Something a source does not show is marked UNKNOWN. It is never
+macOS 27.2). Claims cite a file (with a line where one was recorded) or symbol from the version named here, a
+string in a shipped bundle, or a local measurement. Something a source does not show is marked UNKNOWN. It is never
 assumed to be absent.
 
 Versions read:
@@ -45,7 +45,7 @@ counts how many pointers are down at once.
 | Tool | Page: most pointers down at once | Rows drawn | Wall time for 5 drags | Notes |
 |---|---|---|---|---|
 | OpenCUA (installed helper, this tree) | 5 | 5 of 5, 52 of 52 samples each, no ink between rows | 2.5 s (2 s drags) | every call succeeded on the first try |
-| Cua Driver 0.38.0 (latest release, `delivery_mode: background`, `duration_ms: 2000`) | 1 | 5 of 5 complete, but 168 pt below the requested rows (168 pt is the window's top edge on screen; cause UNKNOWN) | 18.4 s; calls finished one after another at 3.7 / 7.4 / 11.2 / 14.9 / 18.4 s | A window's screenshot frame belongs to the last session that observed it ("belongs to another session"), so agents re-observed and retried 6 times in total |
+| Cua Driver 0.38.0 (latest release; its artifact hash and commit were not recorded, so this row is not exactly reproducible; `delivery_mode: background`, `duration_ms: 2000`) | 1 | 5 of 5 complete, but 168 pt below the requested rows (168 pt is the window's top edge on screen; cause UNKNOWN) | 18.4 s; calls finished one after another at 3.7 / 7.4 / 11.2 / 14.9 / 18.4 s | A window's screenshot frame belongs to the last session that observed it ("belongs to another session"), so agents re-observed and retried 6 times in total |
 | Cua Driver 0.23.2 (previously installed) | 0 | 0 | refusals arrived about 575 ms apart | "Background drag is unavailable on macOS; use delivery_mode: foreground" for all 5 |
 | Codex Computer Use 26.1027.1001730 | not run | | | see Follow-up attempts |
 | agent-desktop 1.2.0 (`--headed`, Accessibility granted to Ghostty) | not read (board counter missing) | UNKNOWN where they landed: `focus-window --app opencua-surface` returned WINDOW_NOT_FOUND, so the board was not brought forward | 16.8 s; drags finished one after another at 3.4 / 6.8 / 10.1 / 13.5 / 16.8 s | each reported `delivered_unverified`; the serial finish times match the machine-wide `interaction.lock` |

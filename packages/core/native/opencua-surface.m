@@ -670,7 +670,8 @@ static NSString *const kPageAckScript =
 // the pressed element, like implicit capture). Pointer capture calls on these
 // pointers are accepted as no-ops instead of throwing for an unknown id.
 static NSString *const kMultiPointerScript =
-    @"(function(){var S=new Map(),own=new Set(),P=Element.prototype;"
+    @"(function(){var S=new Map(),own=new Set(),ids=new Map(),next=1000,"
+    @"P=Element.prototype;"
     @"['setPointerCapture','releasePointerCapture'].forEach(function(n){"
     @"var f=P[n];P[n]=function(id){if(own.has(id))return;return "
     @"f.call(this,id);};});"
@@ -680,13 +681,14 @@ static NSString *const kMultiPointerScript =
     @"function fire(type,t,id,x,y,down,button){t.dispatchEvent(new "
     @"PointerEvent(type,"
     @"{pointerId:id,pointerType:'pen',isPrimary:false,clientX:x,clientY:y,"
-    @"screenX:x,"
-    @"screenY:y,button:button,buttons:down?1:0,pressure:down?0.5:0,width:1,"
+    @"screenX:x+(window.screenX||0),"
+    @"screenY:y+(window.screenY||0),button:button,buttons:down?1:0,pressure:down?0.5:0,width:1,"
     @"height:1,"
     @"bubbles:true,cancelable:true,composed:true,view:window}));}"
     @"window.__opencuaPointers=function(batch){for(var i=0;i<batch.length;i++){"
     @"var "
-    @"e=batch[i],id=1000+(e[0]%2000000000),k=e[1],x=e[2],y=e[3];own.add(id);"
+    @"e=batch[i],id=ids.get(e[0]),k=e[1],x=e[2],y=e[3];"
+    @"if(id===undefined){id=next++;ids.set(e[0],id);}own.add(id);"
     @"if(typeof e[4]==='string')(window.__opencuaPointerColors||"
     @"(window.__opencuaPointerColors={}))[id]=e[4];"
     @"var s=S.get(id);if(!s){s={t:null,down:false};S.set(id,s);}"

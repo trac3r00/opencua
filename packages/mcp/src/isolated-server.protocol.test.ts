@@ -389,6 +389,7 @@ describe("#given the isolated MCP entrypoint #when used #then only the owned gue
 		expect(observed.isError).not.toBe(true);
 		expect(body(observed)["accessibility_error"]).toContain("no accessibility permission");
 		expect(typeof body(observed)["observation_token"]).toBe("string");
+		expect(observed.content).toContainEqual({ type: "image", mimeType: "image/png", data: png.toString("base64") });
 	});
 
 	it("flushes guest writes right after keys or typing, so a save survives an abrupt guest power-off", async () => {

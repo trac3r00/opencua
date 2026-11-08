@@ -624,8 +624,11 @@ static void InstallEventTap(void) {
                                                recordingStatus, inputStatus];
   // Setting the button's image and title lays the status item out again even
   // when nothing changed; that was most of this process's idle CPU.
+  // A transient tooltip (a copy or launch failure) replaces the label, so the
+  // next tick restores it even when the state did not change.
   static NSString *shownLabel = nil;
-  if ([label isEqualToString:shownLabel]) {
+  if ([label isEqualToString:shownLabel] &&
+      [gStatusItem.button.toolTip isEqualToString:label]) {
     return;
   }
   shownLabel = label;
