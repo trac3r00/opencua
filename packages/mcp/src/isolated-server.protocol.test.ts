@@ -57,6 +57,12 @@ async function fixture() {
 	const refresh = vi.fn(async () => undefined);
 	const screenshot = vi.fn(async () => ({ data: png, mimeType: "image/png" as const, width: 1, height: 1 }));
 	const paste = vi.fn(async (_value: string) => undefined);
+	const chord = vi.fn(async (_keysyms: readonly number[]) => undefined);
+	const flush = vi.fn(async () => undefined);
+	const accessibility = vi.fn(async (_image: { width: number; height: number }) => ({
+		app: "TextEdit",
+		elements: [{ role: "AXTextArea", depth: 1, value: "Agent 1:", frame: [0, 0, 1, 1] as const }],
+	}));
 	const close = vi.fn(async () => {
 		running = false;
 	});
@@ -75,11 +81,13 @@ async function fixture() {
 			click,
 			scroll: async () => undefined,
 			drag: async () => undefined,
-			chord: async () => undefined,
+			chord,
 			close,
 		},
 		screenshot,
 		paste,
+		flush,
+		accessibility,
 		close,
 	};
 	const start = vi.fn(async () => source);
@@ -108,6 +116,9 @@ async function fixture() {
 		refresh,
 		screenshot,
 		paste,
+		chord,
+		flush,
+		accessibility,
 		close,
 		seenOwners,
 		size,
@@ -262,6 +273,274 @@ describe("#given the isolated MCP entrypoint #when used #then only the owned gue
 			parentAgentName: "OmO",
 			sessionId: "fixture-session",
 		});
+	});
+
+	it("lets interleaved children act on their own tokens and tells each how many others acted since it observed", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const reader = { id: "reader", name: "Reader" };
+		const writer = { id: "writer", name: "Writer" };
+		const readerSeen = await test.call({ op: "observe", actor: reader });
+		const writerSeen = await test.call({ op: "observe", actor: writer });
+
+		const readerActed = await test.call({
+			op: "act",
+			actor: reader,
+			observation_token: token(readerSeen),
+			action: { type: "click", x: 0, y: 0 },
+		});
+		const writerActed = await test.call({
+			op: "act",
+			actor: writer,
+			observation_token: token(writerSeen),
+			action: { type: "move", x: 0, y: 0 },
+		});
+
+		expect([readerActed.isError, writerActed.isError]).toEqual([undefined, undefined]);
+		expect(body(readerActed)["others_acted_since_observation"]).toBe(0);
+		expect(body(writerActed)["others_acted_since_observation"]).toBe(1);
+		expect([test.click.mock.calls.length, test.move.mock.calls.length]).toEqual([1, 1]);
+	});
+
+	it("sends keys named like cmd and S as RFB keysyms, and keeps the token when a name is unknown", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const observed = await test.call({ op: "observe" });
+
+		const unknown = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "key", keys: ["cmd", "hyper"] },
+		});
+		const saved = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "key", keys: ["cmd", "S"] },
+		});
+
+		expect(body(unknown)).toMatchObject({ message: "unknown-key-name: hyper", effect: "refused" });
+		expect(saved.isError).not.toBe(true);
+		expect(test.chord.mock.calls).toEqual([[[0xffe7, 0x73]]]);
+	});
+
+	it("refuses an act that requires an unchanged desktop after another actor acted, and hands back a fresh observation", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const editor = { id: "editor", name: "Editor" };
+		const other = { id: "other", name: "Other" };
+		const editorSeen = await test.call({ op: "observe", actor: editor });
+		const otherSeen = await test.call({ op: "observe", actor: other });
+		await test.call({
+			op: "act",
+			actor: other,
+			observation_token: token(otherSeen),
+			action: { type: "move", x: 0, y: 0 },
+		});
+
+		const stale = await test.call({
+			op: "act",
+			actor: editor,
+			observation_token: token(editorSeen),
+			require_unchanged: true,
+			action: { type: "type", text: "must wait for a fresh look" },
+		});
+		const retried = await test.call({
+			op: "act",
+			actor: editor,
+			observation_token: token(stale),
+			require_unchanged: true,
+			action: { type: "type", text: "typed after a fresh look" },
+		});
+
+		expect(stale.isError).not.toBe(true);
+		expect(body(stale)).toMatchObject({
+			dispatched: false,
+			refused: "stale-observation",
+			others_acted_since_observation: 1,
+		});
+		expect(stale.content).toContainEqual({ type: "image", mimeType: "image/png", data: png.toString("base64") });
+		expect(body(retried)).toMatchObject({ dispatched: true, others_acted_since_observation: 0 });
+		expect(test.paste.mock.calls).toEqual([["typed after a fresh look"]]);
+	});
+
+	it("returns the guest's accessibility elements with the screenshot only when asked", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+
+		const plain = await test.call({ op: "observe" });
+		const rich = await test.call({ op: "observe", accessibility: true });
+
+		expect(body(plain)["accessibility"]).toBeUndefined();
+		expect(body(rich)["accessibility"]).toEqual({
+			app: "TextEdit",
+			elements: [{ role: "AXTextArea", depth: 1, value: "Agent 1:", frame: [0, 0, 1, 1] }],
+		});
+		expect(test.accessibility.mock.calls).toEqual([[{ width: 1, height: 1 }]]);
+		expect(rich.content).toContainEqual({ type: "image", mimeType: "image/png", data: png.toString("base64") });
+	});
+
+	it("still returns the screenshot and token when the accessibility read fails, naming the failure", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		test.accessibility.mockRejectedValueOnce(new Error("The guest has no accessibility permission for its agent."));
+
+		const observed = await test.call({ op: "observe", accessibility: true });
+
+		expect(observed.isError).not.toBe(true);
+		expect(body(observed)["accessibility_error"]).toContain("no accessibility permission");
+		expect(typeof body(observed)["observation_token"]).toBe("string");
+	});
+
+	it("flushes guest writes right after keys or typing, so a save survives an abrupt guest power-off", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const order: string[] = [];
+		test.chord.mockImplementation(async () => {
+			order.push("key");
+		});
+		test.flush.mockImplementation(async () => {
+			order.push("flush");
+		});
+		const observed = await test.call({ op: "observe" });
+
+		const saved = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "key", keys: ["cmd", "s"] },
+		});
+		const clicked = await test.call({
+			op: "act",
+			observation_token: token(saved),
+			action: { type: "click", x: 0, y: 0 },
+		});
+
+		expect(order).toEqual(["key", "flush"]);
+		expect(body(saved)["flushed"]).toBe(true);
+		expect(body(clicked)["flushed"]).toBeUndefined();
+	});
+
+	it("reports a failed flush without calling the dispatched input unverified", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		test.flush.mockRejectedValueOnce(new Error("guest agent busy"));
+		const observed = await test.call({ op: "observe" });
+
+		const typed = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "type", text: "saved text" },
+		});
+
+		expect(typed.isError).not.toBe(true);
+		expect(body(typed)).toMatchObject({ dispatched: true, flushed: false });
+	});
+
+	it("runs an actor's batch of steps without another actor's input landing in between", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const order: string[] = [];
+		test.click.mockImplementation(async (x: number) => {
+			order.push(`click ${x}`);
+			await Promise.resolve();
+		});
+		test.chord.mockImplementation(async (keysyms: readonly number[]) => {
+			order.push(`key ${keysyms.join("+")}`);
+		});
+		test.paste.mockImplementation(async (value: string) => {
+			order.push(`type ${value}`);
+		});
+		const renamer = { id: "renamer", name: "Renamer" };
+		const other = { id: "other", name: "Other" };
+		const renamerSeen = await test.call({ op: "observe", actor: renamer });
+		const otherSeen = await test.call({ op: "observe", actor: other });
+
+		const [batch, single] = await Promise.all([
+			test.call({
+				op: "act",
+				actor: renamer,
+				observation_token: token(renamerSeen),
+				actions: [
+					{ type: "click", x: 0, y: 0 },
+					{ type: "key", keys: ["return"] },
+					{ type: "type", text: "report-1-done.txt" },
+					{ type: "key", keys: ["return"] },
+				],
+			}),
+			test.call({
+				op: "act",
+				actor: other,
+				observation_token: token(otherSeen),
+				action: { type: "click", x: 0, y: 0 },
+			}),
+		]);
+
+		expect([batch.isError, single.isError]).toEqual([undefined, undefined]);
+		expect(order).toEqual(["click 0", "key 65293", "type report-1-done.txt", "key 65293", "click 0"]);
+		expect(body(batch)["steps"]).toBe(4);
+	});
+
+	it("refuses an act that gives both action and actions before any input", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const observed = await test.call({ op: "observe" });
+		const result = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "click", x: 0, y: 0 },
+			actions: [{ type: "click", x: 0, y: 0 }],
+		});
+		expect(result.isError).toBe(true);
+		expect(test.click).not.toHaveBeenCalled();
+	});
+
+	it("presses a key the requested number of times in one action", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const observed = await test.call({ op: "observe" });
+
+		const result = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "key", keys: ["backspace"], repeat: 8 },
+		});
+
+		expect(result.isError).not.toBe(true);
+		expect(test.chord.mock.calls).toEqual(Array.from({ length: 8 }, () => [[0xff08]]));
+	});
+
+	it("refuses a chord that names one key twice, points to repeat, and keeps the token", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const observed = await test.call({ op: "observe" });
+
+		const doubled = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "key", keysyms: [0xff08, 0xff08] },
+		});
+		const single = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "key", keysyms: [0xff08] },
+		});
+
+		expect(body(doubled)).toMatchObject({ effect: "refused" });
+		expect(String(body(doubled)["message"])).toContain("repeat");
+		expect(single.isError).not.toBe(true);
+		expect(test.chord.mock.calls).toEqual([[[0xff08]]]);
+	});
+
+	it("refuses a key action that gives both keysyms and keys before any input", async () => {
+		const test = await fixture();
+		await test.call({ op: "start" });
+		const observed = await test.call({ op: "observe" });
+		const result = await test.call({
+			op: "act",
+			observation_token: token(observed),
+			action: { type: "key", keysyms: [0xffe7], keys: ["cmd"] },
+		});
+		expect(result.isError).toBe(true);
+		expect(test.chord).not.toHaveBeenCalled();
 	});
 
 	it("refuses a new actor once the server holds its limit of 64", async () => {

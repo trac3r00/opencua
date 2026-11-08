@@ -22,10 +22,18 @@ const SPECIAL_KEYS = new Map<number, string>([
 	[0xff56, "pagedown"],
 	[0xff57, "end"],
 	[0xffff, "forwarddelete"],
+	[0xff8d, "return"],
 	[0xffe1, "shift"],
+	[0xffe2, "shift"],
 	[0xffe3, "control"],
+	[0xffe4, "control"],
+	// RFB clients send Command as Meta or Super, left or right.
 	[0xffe7, "command"],
+	[0xffe8, "command"],
+	[0xffeb, "command"],
+	[0xffec, "command"],
 	[0xffe9, "option"],
+	[0xffea, "option"],
 	[0x20, "space"],
 ]);
 

@@ -255,27 +255,27 @@ export class MacOSHostComputer extends HostComputer {
 
 	async move(position: Point): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.move(position));
+		await this.pointerBurst(() => this.input.move(position));
 	}
 
 	async click(position: Point, options?: PointerOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.click(position, "left", options?.modifiers));
+		await this.pointerBurst(() => this.input.click(position, "left", options?.modifiers));
 	}
 
 	async rightClick(position: Point, options?: PointerOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.click(position, "right", options?.modifiers));
+		await this.pointerBurst(() => this.input.click(position, "right", options?.modifiers));
 	}
 
 	async middleClick(position: Point, options?: PointerOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.click(position, "middle", options?.modifiers));
+		await this.pointerBurst(() => this.input.click(position, "middle", options?.modifiers));
 	}
 
 	async doubleClick(position: Point, options?: PointerOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.doubleClick(position, options?.modifiers));
+		await this.pointerBurst(() => this.input.doubleClick(position, options?.modifiers));
 	}
 
 	async type(text: string): Promise<void> {
@@ -540,7 +540,16 @@ export class MacOSHostComputer extends HostComputer {
 
 	async drag(options: DragOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.drag(options));
+		await this.pointerBurst(() => this.input.drag(options));
+	}
+
+	/**
+	 * Pointer input to an owned surface goes to that one process (its socket, or events posted to its pid), never to the
+	 * shared event stream, so the cursors of different agents on one surface do not wait for each other's bursts.
+	 */
+	private pointerBurst<T>(burst: () => Promise<T>): Promise<T> {
+		const pid = this.input.currentTargetPid;
+		return pid !== undefined && isOwnedSurfacePid(pid) ? burst() : this.inputLock.run(burst);
 	}
 
 	async getCursorPosition(): Promise<Point> {

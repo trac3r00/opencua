@@ -16,19 +16,26 @@
 // another cursor changed them, and presses again where that cursor was, so
 // every cursor's stroke continues without waiting for the others to finish.
 //
+// With --multi-pointer the window does not merge anything: each cursor gets
+// its own pointer (its own pointerId) in the page, so presses and drags of
+// different cursors are down at the same time. macOS gives a web page one
+// mouse (tablet events of different devices still arrive as pointerId 1), so
+// these pointers are page PointerEvents of type "pen"; a page must handle
+// pointer events to use them.
+//
 // usage: opencua-surface <url> <title> <x,y,width,height in top-left screen
-// points> [cursor-names.json]
+// points> [cursor-names.json] [--multi-pointer]
 //        opencua-surface --self-test
 
 #import <AppKit/AppKit.h>
+#import <WebKit/WebKit.h>
 #include <errno.h>
 #include <fcntl.h>
+#import <objc/message.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
-#import <WebKit/WebKit.h>
-#import <objc/message.h>
 
 static NSString *gNamesPath = nil;
 
@@ -79,6 +86,8 @@ static BOOL Alternatives(NSPoint a, NSPoint b) {
 @property(nonatomic) MuxKind kind;
 @property(nonatomic) NSPoint point;
 @property(nonatomic) BOOL context;
+// When the cursor sent it.
+@property(nonatomic) NSTimeInterval arrived;
 @end
 
 @implementation MuxEvent
@@ -90,8 +99,13 @@ static BOOL Alternatives(NSPoint a, NSPoint b) {
 @property(nonatomic) NSTimeInterval seen;
 @property(nonatomic, strong) NSMutableArray<NSValue *> *context;
 @property(nonatomic, strong) NSMutableArray<MuxEvent *> *pending;
-// The press of a pick already in effect was not sent, so neither is its release.
+// The press of a pick already in effect was not sent, so neither is its
+// release.
 @property(nonatomic) BOOL swallowUp;
+// How long after it was sent each of this cursor's events goes to the page: a
+// cursor that waited for the mouse replays its input from when it got the
+// mouse, with the spacing it was sent with, so its curves stay curves.
+@property(nonatomic) NSTimeInterval shift;
 @end
 
 @implementation MuxCursor
@@ -117,6 +131,8 @@ static BOOL Alternatives(NSPoint a, NSPoint b) {
 // and releases already sent, and double clicks are timed from when the page
 // handled a press. A busy page then never falls behind the cursors.
 @property(nonatomic) BOOL paced;
+// No press held and no input waiting: pumping would change nothing.
+- (BOOL)quiet;
 @end
 
 @implementation CursorMux {
@@ -144,6 +160,18 @@ static BOOL Alternatives(NSPoint a, NSPoint b) {
     _picks = [NSMutableArray array];
   }
   return self;
+}
+
+- (BOOL)quiet {
+  if (_down) {
+    return NO;
+  }
+  for (MuxCursor *cursor in _cursors.allValues) {
+    if (cursor.pending.count > 0) {
+      return NO;
+    }
+  }
+  return YES;
 }
 
 // Every pick pressed on the page, oldest first.
@@ -269,6 +297,10 @@ static const CGFloat kSameSpot = 7;
   event.kind = kind;
   event.point = point;
   event.context = context;
+  event.arrived = now;
+  if (cursor.pending.count == 0 && !(_down && _holder == tag)) {
+    cursor.shift = 0;
+  }
   [cursor.pending addObject:event];
   cursor.seen = now;
   [self pump:now];
@@ -317,6 +349,7 @@ static const CGFloat kSameSpot = 7;
   }
   _holder = tag;
   _sliceStart = now;
+  cursor.shift = MAX(0, now - cursor.pending.firstObject.arrived);
   return YES;
 }
 
@@ -340,7 +373,8 @@ static const CGFloat kSameSpot = 7;
   }
   if (event.kind == MuxDown || event.kind == MuxDrag) {
     if (!_down && event.kind == MuxDrag) {
-      [self press:MuxDown at:(cursor.hasLast ? cursor.last : event.point) now:now];
+      [self press:MuxDown
+               at:(cursor.hasLast ? cursor.last : event.point)now:now];
     }
     _down = YES;
     if (event.kind == MuxDown) {
@@ -373,6 +407,12 @@ static const CGFloat kSameSpot = 7;
     return NO;
   }
   return [self hitRecently:event.point now:now];
+}
+
+// Whether the cursor's next event is due on the page.
+- (BOOL)due:(MuxCursor *)cursor now:(NSTimeInterval)now {
+  MuxEvent *event = cursor.pending.firstObject;
+  return event != nil && event.arrived + cursor.shift <= now + 1e-9;
 }
 
 - (BOOL)othersWaitingBesides:(int64_t)tag {
@@ -414,7 +454,8 @@ static const CGFloat kSameSpot = 7;
       MuxCursor *current = _holder == 0 ? nil : _cursors[@(_holder)];
       MuxEvent *next = current.pending.firstObject;
       if (_down && next != nil &&
-          (next.kind == MuxDrag || next.kind == MuxUp)) {
+          (next.kind == MuxDrag || next.kind == MuxUp) &&
+          [self due:current now:now]) {
         [current.pending removeObjectAtIndex:0];
         [self deliver:next for:_holder now:now];
         continue;
@@ -423,14 +464,14 @@ static const CGFloat kSameSpot = 7;
     }
     MuxCursor *holder = _holder == 0 ? nil : _cursors[@(_holder)];
     BOOL others = [self othersWaitingBesides:_holder];
-    BOOL keep =
-        holder != nil &&
-        (!others || (_down && now - holder.seen < kStuck) ||
-         (now - _sliceStart < kSlice &&
-          (holder.pending.count > 0 || now - holder.seen < kIdle)));
+    BOOL keep = holder != nil &&
+                (!others || (_down && holder.pending.count > 0) ||
+                 (_down && now - holder.seen < kStuck) ||
+                 (now - _sliceStart < kSlice &&
+                  (holder.pending.count > 0 || now - holder.seen < kIdle)));
     BOOL holderWaits = holder != nil && [self mustWait:holder now:now];
     if (keep && !holderWaits) {
-      if (holder.pending.count == 0) {
+      if (![self due:holder now:now]) {
         return;
       }
       MuxEvent *event = holder.pending.firstObject;
@@ -457,7 +498,7 @@ static const CGFloat kSameSpot = 7;
       }
     }
     if (!switched) {
-      if (holder != nil && holder.pending.count > 0 && !holderWaits) {
+      if (holder != nil && !holderWaits && [self due:holder now:now]) {
         MuxEvent *event = holder.pending.firstObject;
         [holder.pending removeObjectAtIndex:0];
         [self deliver:event for:_holder now:now];
@@ -479,8 +520,7 @@ static BOOL ParseAgentLine(const char *line, int64_t *tag, BOOL *context,
   char letter = 0;
   double x = 0;
   double y = 0;
-  if (sscanf(line, "%lld %d %c %lf %lf", &value, &flag, &letter, &x, &y) !=
-      5) {
+  if (sscanf(line, "%lld %d %c %lf %lf", &value, &flag, &letter, &x, &y) != 5) {
     return NO;
   }
   const char *kinds = "DGUM";
@@ -537,9 +577,9 @@ static BOOL ParseAgentLine(const char *line, int64_t *tag, BOOL *context,
   fcntl(listener, F_SETFL, O_NONBLOCK);
   _deliver = [deliver copy];
   _clients = [NSMutableSet set];
-  _accept = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,
-                                   (uintptr_t)listener, 0,
-                                   dispatch_get_main_queue());
+  _accept =
+      dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)listener, 0,
+                             dispatch_get_main_queue());
   __weak AgentChannel *weakSelf = self;
   dispatch_source_set_event_handler(_accept, ^{
     int client = accept(listener, NULL, NULL);
@@ -554,9 +594,9 @@ static BOOL ParseAgentLine(const char *line, int64_t *tag, BOOL *context,
 - (void)readFrom:(int)client {
   fcntl(client, F_SETFL, O_NONBLOCK);
   NSMutableData *buffer = [NSMutableData data];
-  dispatch_source_t source = dispatch_source_create(
-      DISPATCH_SOURCE_TYPE_READ, (uintptr_t)client, 0,
-      dispatch_get_main_queue());
+  dispatch_source_t source =
+      dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)client, 0,
+                             dispatch_get_main_queue());
   __weak AgentChannel *weakSelf = self;
   __weak dispatch_source_t weakSource = source;
   dispatch_source_set_event_handler(source, ^{
@@ -625,6 +665,38 @@ static NSString *const kPageAckScript =
     @"addEventListener('pointerdown',function(e){r('d',e);},true);"
     @"addEventListener('pointerup',function(e){r('u',e);},true);})();";
 
+// --multi-pointer: one page pointer per cursor. Each cursor's press, drags and
+// release go to the element under its own point (moves while pressed stay on
+// the pressed element, like implicit capture). Pointer capture calls on these
+// pointers are accepted as no-ops instead of throwing for an unknown id.
+static NSString *const kMultiPointerScript =
+    @"(function(){var S=new Map(),own=new Set(),P=Element.prototype;"
+    @"['setPointerCapture','releasePointerCapture'].forEach(function(n){"
+    @"var f=P[n];P[n]=function(id){if(own.has(id))return;return "
+    @"f.call(this,id);};});"
+    @"var "
+    @"h=P.hasPointerCapture;P.hasPointerCapture=function(id){if(own.has(id)){"
+    @"var s=S.get(id);return !!(s&&s.t===this);}return h.call(this,id);};"
+    @"function fire(type,t,id,x,y,down,button){t.dispatchEvent(new "
+    @"PointerEvent(type,"
+    @"{pointerId:id,pointerType:'pen',isPrimary:false,clientX:x,clientY:y,"
+    @"screenX:x,"
+    @"screenY:y,button:button,buttons:down?1:0,pressure:down?0.5:0,width:1,"
+    @"height:1,"
+    @"bubbles:true,cancelable:true,composed:true,view:window}));}"
+    @"window.__opencuaPointers=function(batch){for(var i=0;i<batch.length;i++){"
+    @"var "
+    @"e=batch[i],id=1000+(e[0]%2000000000),k=e[1],x=e[2],y=e[3];own.add(id);"
+    @"if(typeof e[4]==='string')(window.__opencuaPointerColors||"
+    @"(window.__opencuaPointerColors={}))[id]=e[4];"
+    @"var s=S.get(id);if(!s){s={t:null,down:false};S.set(id,s);}"
+    @"var hit=document.elementFromPoint(x,y)||document.documentElement;"
+    @"if(k==='D'){if(s.down&&s.t)fire('pointerup',s.t,id,x,y,false,0);"
+    @"s.t=hit;s.down=true;fire('pointerdown',hit,id,x,y,true,0);}"
+    @"else if(k==='U'){var t=s.down&&s.t?s.t:hit;s.down=false;s.t=null;"
+    @"fire('pointerup',t,id,x,y,false,0);}"
+    @"else{fire('pointermove',s.down&&s.t?s.t:hit,id,x,y,s.down,-1);}}};})();";
+
 @interface PageAck : NSObject <WKScriptMessageHandler>
 @property(nonatomic, weak) NSWindow *window;
 @property(nonatomic, weak) WKWebView *web;
@@ -634,9 +706,11 @@ static NSString *const kPageAckScript =
 @implementation PageAck
 - (void)userContentController:(WKUserContentController *)controller
       didReceiveScriptMessage:(WKScriptMessage *)message {
-  NSArray *body = [message.body isKindOfClass:NSArray.class] ? message.body : nil;
+  NSArray *body =
+      [message.body isKindOfClass:NSArray.class] ? message.body : nil;
   WKWebView *web = self.web;
-  if (body.count != 3 || web == nil || ![body[1] isKindOfClass:NSNumber.class] ||
+  if (body.count != 3 || web == nil ||
+      ![body[1] isKindOfClass:NSNumber.class] ||
       ![body[2] isKindOfClass:NSNumber.class]) {
     return;
   }
@@ -711,6 +785,11 @@ static NSColor *ColorFromHex(NSString *hex) {
     NSSize size = [name sizeWithAttributes:attributes];
     NSRect box = NSMakeRect(p.x + 10, p.y - 13 - size.height, size.width + 6,
                             size.height + 1);
+    // Near the right edge the label goes left of the arrow, so a cursor's name
+    // and purpose stay readable wherever it works.
+    if (NSMaxX(box) > NSWidth(self.bounds) && p.x - 4 - box.size.width >= 0) {
+      box.origin.x = p.x - 4 - box.size.width;
+    }
     [[color colorWithAlphaComponent:0.9] setFill];
     [[NSBezierPath bezierPathWithRoundedRect:box xRadius:3 yRadius:3] fill];
     [name drawAtPoint:NSMakePoint(box.origin.x + 3, box.origin.y)
@@ -727,6 +806,10 @@ static NSColor *ColorFromHex(NSString *hex) {
            at:(NSPoint)location
       context:(BOOL)context;
 @property(nonatomic) BOOL paced;
+@property(nonatomic) BOOL multiPointer;
+@property(nonatomic, weak) WKWebView *web;
+@property(nonatomic, strong) NSTimer *pumpTimer;
+@property(nonatomic, strong) NSMutableArray<NSArray *> *pointerBatch;
 - (void)pageHandled:(BOOL)down at:(NSPoint)location;
 @end
 
@@ -781,6 +864,10 @@ static NSColor *ColorFromHex(NSString *hex) {
     self.cursorLayer.marks[key] = mark;
     self.cursorLayer.needsDisplay = YES;
   }
+  if (self.multiPointer) {
+    [self queuePointer:owner kind:kind at:location];
+    return;
+  }
   if (self.mux == nil) {
     self.mux = [CursorMux new];
     self.mux.paced = self.paced;
@@ -788,21 +875,104 @@ static NSColor *ColorFromHex(NSString *hex) {
     self.mux.emit = ^(MuxKind merged, NSPoint point) {
       [weakSelf deliver:merged at:point];
     };
-    // Waiting cursors get the mouse when the holder's slice ends, even if no
-    // new input arrives to trigger it.
-    [NSTimer scheduledTimerWithTimeInterval:0.008
-                                    repeats:YES
-                                      block:^(NSTimer *timer) {
-                                        [weakSelf.mux
-                                            pump:NSProcessInfo.processInfo
-                                                     .systemUptime];
-                                      }];
   }
   [self.mux cursor:owner
               kind:kind
                 at:location
            context:context
                now:NSProcessInfo.processInfo.systemUptime];
+  [self keepPumping];
+}
+
+// Waiting cursors get the mouse when the holder's slice ends, even if no new
+// input arrives to trigger it. The timer runs only while a press is held or
+// input waits, so an idle surface costs no CPU.
+- (void)keepPumping {
+  if (self.pumpTimer != nil || [self.mux quiet]) {
+    return;
+  }
+  __weak SurfaceWindow *weakSelf = self;
+  self.pumpTimer = [NSTimer
+      scheduledTimerWithTimeInterval:0.008
+                             repeats:YES
+                               block:^(NSTimer *timer) {
+                                 SurfaceWindow *surface = weakSelf;
+                                 if (surface == nil) {
+                                   [timer invalidate];
+                                   return;
+                                 }
+                                 [surface.mux pump:NSProcessInfo.processInfo
+                                                       .systemUptime];
+                                 if ([surface.mux quiet]) {
+                                   [timer invalidate];
+                                   surface.pumpTimer = nil;
+                                 }
+                               }];
+}
+
+// Queues one cursor's event for its own page pointer; all events that arrive
+// before the main queue turns go to the page in one script call, in order.
+- (void)queuePointer:(int64_t)owner kind:(MuxKind)kind at:(NSPoint)location {
+  WKWebView *web = self.web;
+  if (web == nil) {
+    return;
+  }
+  NSPoint client = [web convertPoint:location fromView:nil];
+  NSString *code = kind == MuxDown   ? @"D"
+                   : kind == MuxDrag ? @"G"
+                   : kind == MuxUp   ? @"U"
+                                     : @"M";
+  if (self.pointerBatch == nil) {
+    self.pointerBatch = [NSMutableArray array];
+  }
+  // The cursor's label color travels with its events, so a page can draw in
+  // the same color the cursor is labeled with. A cursor new since the last
+  // once-a-second names poll reads the file now, so its first stroke has it.
+  NSString *ownerKey = @(owner).stringValue;
+  if (self.cursorLayer != nil && self.cursorLayer.names[ownerKey] == nil &&
+      gNamesPath != nil) {
+    NSData *data = [NSData dataWithContentsOfFile:gNamesPath];
+    id parsed = data == nil ? nil
+                            : [NSJSONSerialization JSONObjectWithData:data
+                                                              options:0
+                                                                error:NULL];
+    if ([parsed isKindOfClass:NSDictionary.class]) {
+      self.cursorLayer.names = parsed;
+      self.cursorLayer.needsDisplay = YES;
+    }
+  }
+  id color = self.cursorLayer.names[ownerKey][@"color"];
+  [self.pointerBatch
+      addObject:[color isKindOfClass:NSString.class]
+                    ? @[ @(owner), code, @(client.x), @(client.y), color ]
+                    : @[ @(owner), code, @(client.x), @(client.y) ]];
+  if (self.pointerBatch.count > 1) {
+    return;
+  }
+  __weak SurfaceWindow *weakSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [weakSelf flushPointers];
+  });
+}
+
+- (void)flushPointers {
+  NSArray *batch = self.pointerBatch;
+  self.pointerBatch = nil;
+  WKWebView *web = self.web;
+  if (batch.count == 0 || web == nil) {
+    return;
+  }
+  NSData *json = [NSJSONSerialization dataWithJSONObject:batch
+                                                 options:0
+                                                   error:NULL];
+  if (json == nil) {
+    return;
+  }
+  NSString *call = [NSString
+      stringWithFormat:
+          @"window.__opencuaPointers&&window.__opencuaPointers(%@)",
+          [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding]];
+  [web evaluateJavaScript:call completionHandler:nil];
 }
 
 - (void)deliver:(MuxKind)kind at:(NSPoint)point {
@@ -827,6 +997,175 @@ static NSColor *ColorFromHex(NSString *hex) {
   return NO;
 }
 @end
+
+// Generated-case property test (seeded, not coverage guided): 2 to 4 cursors,
+// each in its own region of the page, draw strokes at the same time on one
+// surface. Every cursor's stroke must reach the page whole (same points, same
+// order, never cut by another cursor) and with the spacing it was sent with,
+// however long that cursor waited for the mouse. Returns NO and says why on a
+// violation.
+typedef struct {
+  NSTimeInterval t;
+  int64_t tag;
+  MuxKind kind;
+  CGFloat x;
+  CGFloat y;
+} FuzzEvent;
+
+static const NSUInteger kFuzzMax = 1024;
+
+static uint32_t FuzzNext(uint32_t *state) {
+  *state ^= *state << 13;
+  *state ^= *state >> 17;
+  *state ^= *state << 5;
+  return *state;
+}
+
+static double FuzzUniform(uint32_t *state, double low, double high) {
+  return low + (high - low) * (FuzzNext(state) % 1000000) / 1000000.0;
+}
+
+static BOOL FuzzWaypointReplay(uint32_t seed, char *why, size_t whySize) {
+  uint32_t state = seed * 2654435761u + 1;
+  FuzzEvent *in = calloc(kFuzzMax, sizeof(FuzzEvent));
+  FuzzEvent *out = calloc(kFuzzMax, sizeof(FuzzEvent));
+  __block NSUInteger outCount = 0;
+  __block NSTimeInterval clock = 0;
+  NSUInteger inCount = 0;
+  int cursors = 2 + (int)(FuzzNext(&state) % 3);
+  for (int cursor = 1; cursor <= cursors; cursor += 1) {
+    NSTimeInterval t = FuzzUniform(&state, 0, 0.3);
+    int strokes = 1 + (int)(FuzzNext(&state) % 3);
+    for (int stroke = 0; stroke < strokes; stroke += 1) {
+      int points = 2 + (int)(FuzzNext(&state) % 11);
+      for (int point = 0; point < points; point += 1) {
+        MuxKind kind = point == 0 ? MuxDown : MuxDrag;
+        in[inCount++] =
+            (FuzzEvent){t, cursor, kind, cursor * 1000 + stroke * 100 + point,
+                        (CGFloat)(FuzzNext(&state) % 500)};
+        if (point == points - 1) {
+          in[inCount] = in[inCount - 1];
+          in[inCount].kind = MuxUp;
+          in[inCount].t = t + FuzzUniform(&state, 0.004, 0.03);
+          t = in[inCount].t;
+          inCount += 1;
+        } else {
+          t += FuzzUniform(&state, 0.004, 0.03);
+        }
+      }
+      t += FuzzUniform(&state, 0.02, 0.2);
+    }
+  }
+  // Feed in arrival order (stable per cursor), pumping every 8 ms like the
+  // window's timer.
+  NSUInteger *order = calloc(inCount, sizeof(NSUInteger));
+  for (NSUInteger index = 0; index < inCount; index += 1) {
+    order[index] = index;
+  }
+  for (NSUInteger a = 1; a < inCount; a += 1) {
+    for (NSUInteger b = a; b > 0 && in[order[b]].t < in[order[b - 1]].t;
+         b -= 1) {
+      NSUInteger swap = order[b];
+      order[b] = order[b - 1];
+      order[b - 1] = swap;
+    }
+  }
+  CursorMux *mux = [CursorMux new];
+  mux.emit = ^(MuxKind kind, NSPoint point) {
+    if (outCount < kFuzzMax) {
+      out[outCount++] =
+          (FuzzEvent){clock, (int64_t)(point.x / 1000), kind, point.x, point.y};
+    }
+  };
+  NSUInteger fed = 0;
+  NSTimeInterval tick = 0;
+  BOOL ok = YES;
+  while (fed < inCount || ![mux quiet]) {
+    if (tick > 30) {
+      snprintf(why, whySize, "stalled: input still waiting after 30 s");
+      ok = NO;
+      break;
+    }
+    if (fed < inCount && in[order[fed]].t <= tick) {
+      FuzzEvent event = in[order[fed++]];
+      clock = event.t;
+      [mux cursor:event.tag
+             kind:event.kind
+               at:NSMakePoint(event.x, event.y)
+          context:NO
+              now:clock];
+    } else {
+      clock = tick;
+      [mux pump:clock];
+      tick += 0.008;
+    }
+  }
+  // Same points in the same order per cursor, with the sent spacing.
+  for (int cursor = 1; ok && cursor <= cursors; cursor += 1) {
+    NSUInteger i = 0;
+    NSUInteger o = 0;
+    NSUInteger previousIn = 0;
+    NSUInteger previousOut = 0;
+    for (;;) {
+      while (i < inCount && in[i].tag != cursor) {
+        i += 1;
+      }
+      while (o < outCount && out[o].tag != cursor) {
+        o += 1;
+      }
+      if (i >= inCount || o >= outCount) {
+        if (i < inCount || o < outCount) {
+          snprintf(why, whySize, "cursor %d: %s", cursor,
+                   i < inCount ? "input lost" : "extra output");
+          ok = NO;
+        }
+        break;
+      }
+      if (in[i].kind != out[o].kind || in[i].x != out[o].x ||
+          in[i].y != out[o].y) {
+        snprintf(why, whySize,
+                 "cursor %d: sent %d %.0f,%.0f, page got %d %.0f,%.0f", cursor,
+                 (int)in[i].kind, in[i].x, in[i].y, (int)out[o].kind, out[o].x,
+                 out[o].y);
+        ok = NO;
+        break;
+      }
+      if (in[i].kind != MuxDown && previousOut < o) {
+        double sent = in[i].t - in[previousIn].t;
+        double got = out[o].t - out[previousOut].t;
+        if (fabs(sent - got) > 0.0085) {
+          snprintf(why, whySize,
+                   "cursor %d at %.0f,%.0f: sent %.1f ms after the previous "
+                   "point, page got it %.1f ms after",
+                   cursor, in[i].x, in[i].y, sent * 1000, got * 1000);
+          ok = NO;
+          break;
+        }
+      }
+      previousIn = i;
+      previousOut = o;
+      i += 1;
+      o += 1;
+    }
+  }
+  // A stroke is never cut: nothing of another cursor between a press and its
+  // release.
+  int64_t pressing = 0;
+  for (NSUInteger o = 0; ok && o < outCount; o += 1) {
+    if (pressing != 0 && out[o].tag != pressing) {
+      snprintf(why, whySize, "cursor %lld cut into cursor %lld's stroke",
+               out[o].tag, pressing);
+      ok = NO;
+    }
+    pressing = out[o].kind == MuxDown ? out[o].tag
+               : out[o].kind == MuxUp ? 0
+                                      : pressing;
+  }
+  free(order);
+  free(in);
+  free(out);
+  return ok;
+}
 
 // Replays scripted cursor input through CursorMux at explicit times and
 // compares the merged stream with what the page must receive.
@@ -872,6 +1211,7 @@ static int SelfTest(void) {
   at(1, MuxUp, 10, 0, NO, 0.020);
   at(2, MuxUp, 110, 100, NO, 0.021);
   [mux pump:0.10];
+  [mux pump:0.13];
   check(@"queued strokes", @"D0,0 G10,0 U10,0 D100,100 G110,100 U110,100");
 
   // A stroke is never cut for a waiting cursor; it gets the mouse after.
@@ -906,6 +1246,7 @@ static int SelfTest(void) {
   at(2, MuxDown, 200, 200, NO, 0.04);
   at(2, MuxUp, 200, 200, NO, 0.05);
   [mux pump:0.10];
+  [mux pump:0.13];
   at(1, MuxDown, 110, 100, NO, 1.20);
   [mux pump:1.30];
   check(@"far swatches of one palette replace each other",
@@ -994,14 +1335,54 @@ static int SelfTest(void) {
   [mux acked:YES at:NSMakePoint(105, 1317) now:0.80];
   [mux acked:NO at:NSMakePoint(105, 1317) now:0.80];
   at(1, MuxDown, 200, 200, NO, 1.40);
-  check(@"paced: the old pick waits a second after the page handled it",
-        @"");
+  check(@"paced: the old pick waits a second after the page handled it", @"");
   [mux pump:1.70];
   check(@"paced: then it is re-applied", @"D89,1317 U89,1317");
 
   // A page that never answers does not stall the cursors.
   [mux pump:3.80];
   check(@"paced: no answer for two seconds lets input go", @"D200,200");
+
+  // A cursor that waited for the mouse draws its stroke with the spacing it
+  // sent it with, not as one burst the page joins with a straight line.
+  reset();
+  at(1, MuxDown, 0, 0, NO, 0.000);
+  at(2, MuxDown, 100, 100, NO, 0.001);
+  at(1, MuxDrag, 10, 0, NO, 0.020);
+  at(2, MuxDrag, 110, 100, NO, 0.021);
+  at(2, MuxDrag, 120, 110, NO, 0.041);
+  at(1, MuxUp, 10, 0, NO, 0.050);
+  at(2, MuxUp, 120, 110, NO, 0.061);
+  [mux pump:0.10];
+  check(@"waiting cursor: its press when it gets the mouse",
+        @"D0,0 G10,0 U10,0 D100,100");
+  [mux pump:0.115];
+  check(@"waiting cursor: its next point not yet", @"");
+  [mux pump:0.12];
+  check(@"waiting cursor: 20 ms after its press", @"G110,100");
+  [mux pump:0.14];
+  check(@"waiting cursor: 20 ms after that", @"G120,110");
+  [mux pump:0.16];
+  check(@"waiting cursor: its release", @"U120,110");
+
+  {
+    int attempted = 0;
+    int failing = 0;
+    for (uint32_t seed = 1; seed <= 500; seed += 1) {
+      char why[256] = {0};
+      attempted += 1;
+      if (!FuzzWaypointReplay(seed, why, sizeof(why))) {
+        if (failing < 3) {
+          fprintf(stderr, "FAIL waypoint replay seed %u: %s\n", seed, why);
+        }
+        failing += 1;
+      }
+    }
+    printf(
+        "waypoint replay: %d attempted, %d executed, 0 discarded, %d failing\n",
+        attempted, attempted, failing);
+    failures += failing;
+  }
 
   // Lines of the agent pointer channel.
   {
@@ -1016,8 +1397,9 @@ static int SelfTest(void) {
       failures += 1;
       fprintf(stderr, "FAIL channel line\n");
     }
-    const char *bad[] = {"0 0 D 1 1", "4294967296 0 D 1 1", "7 0 X 1 1",
-                         "7 0 D 1", "", "7 0 D nan 1"};
+    const char *bad[] = {"0 0 D 1 1", "4294967296 0 D 1 1",
+                         "7 0 X 1 1", "7 0 D 1",
+                         "",          "7 0 D nan 1"};
     for (size_t index = 0; index < sizeof(bad) / sizeof(bad[0]); index += 1) {
       if (ParseAgentLine(bad[index], &tag, &context, &kind, &point)) {
         failures += 1;
@@ -1128,6 +1510,11 @@ int main(int argc, const char *argv[]) {
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0) {
       return SelfTest();
     }
+    BOOL multiPointer = NO;
+    if (argc >= 5 && strcmp(argv[argc - 1], "--multi-pointer") == 0) {
+      multiPointer = YES;
+      argc -= 1;
+    }
     if (argc < 4) {
       fprintf(stderr, "usage: opencua-surface <url> <title> <x,y,width,height> "
                       "[cursor-names.json]\n");
@@ -1165,21 +1552,32 @@ int main(int argc, const char *argv[]) {
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
     PageAck *ack = [PageAck new];
     [configuration.userContentController
-        addUserScript:[[WKUserScript alloc]
-                            initWithSource:kPageAckScript
-                             injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-                          forMainFrameOnly:YES]];
-    [configuration.userContentController addScriptMessageHandler:ack
-                                                            name:@"opencuaInput"];
-    SurfaceWebView *web =
-        [[SurfaceWebView alloc] initWithFrame:root.bounds
-                                configuration:configuration];
+        addUserScript:
+            [[WKUserScript alloc]
+                  initWithSource:kPageAckScript
+                   injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                forMainFrameOnly:YES]];
+    [configuration.userContentController
+        addScriptMessageHandler:ack
+                           name:@"opencuaInput"];
+    if (multiPointer) {
+      [configuration.userContentController
+          addUserScript:
+              [[WKUserScript alloc]
+                    initWithSource:kMultiPointerScript
+                     injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                  forMainFrameOnly:YES]];
+    }
+    SurfaceWebView *web = [[SurfaceWebView alloc] initWithFrame:root.bounds
+                                                  configuration:configuration];
     ack.web = web;
     __weak SurfaceWindow *ackTarget = window;
     ack.handled = ^(BOOL down, NSPoint location) {
       [ackTarget pageHandled:down at:location];
     };
     window.paced = YES;
+    window.multiPointer = multiPointer;
+    window.web = web;
     web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     // WebKit stops painting a window it believes is covered; the surface sits
     // behind the person's windows on purpose, so keep it rendering or agents
@@ -1238,7 +1636,12 @@ int main(int argc, const char *argv[]) {
                options:NSKeyValueObservingOptionNew
                context:NULL];
     }
-    [web loadRequest:[NSURLRequest requestWithURL:url]];
+    if (url.isFileURL) {
+      [web loadFileURL:url
+          allowingReadAccessToURL:url.URLByDeletingLastPathComponent];
+    } else {
+      [web loadRequest:[NSURLRequest requestWithURL:url]];
+    }
     // Shown behind every other window and never activated, so it never covers
     // what the person is doing; they bring it forward themselves to watch.
     window.level = NSNormalWindowLevel - 1;
@@ -1250,6 +1653,7 @@ int main(int argc, const char *argv[]) {
                                 NSWindowCollectionBehaviorIgnoresCycle |
                                 NSWindowCollectionBehaviorFullScreenAuxiliary;
     [window orderBack:nil];
+    __block NSData *lastNames = nil;
     [NSTimer
         scheduledTimerWithTimeInterval:1.0
                                repeats:YES
@@ -1259,6 +1663,12 @@ int main(int argc, const char *argv[]) {
                                    }
                                    NSData *data = [NSData
                                        dataWithContentsOfFile:gNamesPath];
+                                   // Redraw only when a name changed.
+                                   if (data == nil ||
+                                       [data isEqualToData:lastNames]) {
+                                     return;
+                                   }
+                                   lastNames = data;
                                    id parsed =
                                        data == nil
                                            ? nil

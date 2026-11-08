@@ -136,6 +136,20 @@ describe("#given an owned VM supervisor #when it starts #then input and credenti
 		}
 	});
 
+	it("waits while the booted guest has no display to capture yet, then starts", async () => {
+		boundary.connect.mockRejectedValueOnce(
+			new Error("Guest command failed (1): could not create image from display"),
+		);
+
+		const supervisor = await TartGuestSupervisor.start(directory, owner, { connect: boundary.connect });
+		supervisors.push(supervisor);
+
+		expect(boundary.connect).toHaveBeenCalledTimes(2);
+		expect(boundary.delay).toHaveBeenCalledTimes(1);
+		expect(boundary.spawn).toHaveBeenCalledTimes(1);
+		expect(supervisor.status().inputAvailable).toBe(true);
+	});
+
 	it("refuses an already-running owned VM before starting another runtime", async () => {
 		const socket = Object.assign(new EventEmitter(), { setTimeout: vi.fn(), destroy: vi.fn() });
 		boundary.ipc.mockImplementation(() => {
@@ -148,6 +162,28 @@ describe("#given an owned VM supervisor #when it starts #then input and credenti
 		expect(boundary.ipc).toHaveBeenCalledWith({
 			path: join(directory, "guest-store/vms/opencua-fixture/control.sock"),
 		});
+	});
+
+	it("joins an already-running owned VM only when attaching was asked for, and never stops it", async () => {
+		const socket = Object.assign(new EventEmitter(), { setTimeout: vi.fn(), destroy: vi.fn() });
+		boundary.ipc.mockImplementation(() => {
+			queueMicrotask(() => socket.emit("connect"));
+			return socket;
+		});
+
+		const supervisor = await TartGuestSupervisor.start(
+			directory,
+			owner,
+			{ connect: boundary.connect },
+			{ attach: true },
+		);
+		await supervisor.click(5, 6);
+		await supervisor.close();
+
+		expect(boundary.spawn).not.toHaveBeenCalled();
+		expect(child.kill).not.toHaveBeenCalled();
+		expect(channel.pointer).toHaveBeenCalledWith(5, 6, 1);
+		expect(channel.close).toHaveBeenCalled();
 	});
 
 	it("forces headless isolation flags and attributes a child's cursor without exposing credentials", async () => {

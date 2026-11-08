@@ -94,3 +94,17 @@ describe("#given named agent cursors #when scopes overlap #then ownership follow
 		expect(entered).toBe(0);
 	});
 });
+
+describe("#given a worker's purpose #when its cursor owner is set #then the purpose is a short single-line label", () => {
+	it("keeps a short purpose, flattens control characters and ends a long one with an ellipsis", () => {
+		const owner = (purpose: string) =>
+			withCursorIdentity("worker", () => currentCursorOwner(), { agentName: "painter", sessionId: "s", purpose });
+
+		expect(owner("draw row 7")?.purpose).toBe("draw row 7");
+		expect(owner("draw\nrow\t7")?.purpose).toBe("draw row 7");
+		const long = owner("x".repeat(80))?.purpose ?? "";
+		expect(Array.from(long).length).toBe(48);
+		expect(long.endsWith("\u2026")).toBe(true);
+		expect(owner("   ")?.purpose).toBeUndefined();
+	});
+});

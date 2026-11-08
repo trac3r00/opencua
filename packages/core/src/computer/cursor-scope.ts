@@ -4,6 +4,23 @@ export interface CursorOwner {
 	readonly agentName: string;
 	readonly sessionId: string;
 	readonly parentAgentName?: string;
+	/** What the cursor is doing (a worker's task), shown beside its name where cursors are labeled. */
+	readonly purpose?: string;
+}
+
+/** Longest purpose shown on a cursor label; longer ones end with an ellipsis. */
+const PURPOSE_LABEL_CHARACTERS = 48;
+
+function purposeLabel(purpose: string): string {
+	const clean = Array.from(purpose)
+		.map((character) => (character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 ? " " : character))
+		.join("")
+		.replace(/\s+/g, " ")
+		.trim();
+	const characters = Array.from(clean);
+	return characters.length <= PURPOSE_LABEL_CHARACTERS
+		? clean
+		: `${characters.slice(0, PURPOSE_LABEL_CHARACTERS - 1).join("")}…`;
 }
 
 interface CursorContext {
@@ -31,6 +48,9 @@ export function withCursorIdentity<T>(identity: string, callback: () => T, owner
 		agentName: owner.agentName.trim(),
 		sessionId: owner.sessionId.trim(),
 		...(owner.parentAgentName === undefined ? {} : { parentAgentName: owner.parentAgentName.trim() }),
+		...(owner.purpose === undefined || purposeLabel(owner.purpose) === ""
+			? {}
+			: { purpose: purposeLabel(owner.purpose) }),
 	});
 	return cursorIdentity.run({ identity, owner: snapshot }, callback);
 }

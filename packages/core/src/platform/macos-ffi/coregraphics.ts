@@ -3,7 +3,7 @@ import {
 	isOwnedSurfacePid,
 	nameSurfaceCursor,
 	sendSurfacePointer,
-	surfaceCursorTag,
+	surfaceCursorFor,
 	surfaceCursorUserData,
 } from "../owned-surfaces.js";
 import { createNSEventBackedMouseEvent } from "./appkit.js";
@@ -272,8 +272,7 @@ function sendToOwnedSurface(options: MouseEventOptions): boolean {
 	if (targetPid === undefined || targetWindow === undefined || options.button !== "left") return false;
 	if ((options.flags ?? 0) !== 0) return false;
 	if (!isOwnedSurfacePid(targetPid)) return false;
-	const identity = currentCursorIdentity();
-	const tag = identity === undefined ? 1 : surfaceCursorTag(identity);
+	const { tag, name } = surfaceCursorFor(currentCursorIdentity(), currentCursorOwner());
 	const sent = sendSurfacePointer(targetPid, {
 		tag,
 		context: inContextClick(),
@@ -281,7 +280,7 @@ function sendToOwnedSurface(options: MouseEventOptions): boolean {
 		x: options.position.x - targetWindow.bounds.x,
 		y: options.position.y - targetWindow.bounds.y,
 	});
-	if (sent) nameSurfaceCursor(tag, currentCursorOwner()?.agentName ?? identity ?? "opencua");
+	if (sent) nameSurfaceCursor(tag, name);
 	return sent;
 }
 
@@ -290,9 +289,8 @@ const K_CG_EVENT_SOURCE_USER_DATA = 42;
 
 function stampSurfaceCursor(event: CGEventRef, targetPid: number): void {
 	if (!isOwnedSurfacePid(targetPid)) return;
-	const identity = currentCursorIdentity();
 	// Every agent event carries a nonzero tag, so the surface can tell it from the person's own clicks.
-	const tag = identity === undefined ? 1 : surfaceCursorTag(identity);
+	const { tag, name } = surfaceCursorFor(currentCursorIdentity(), currentCursorOwner());
 	setIntegerValueField(event, K_CG_EVENT_SOURCE_USER_DATA, surfaceCursorUserData(tag, inContextClick()));
-	nameSurfaceCursor(tag, currentCursorOwner()?.agentName ?? identity ?? "opencua");
+	nameSurfaceCursor(tag, name);
 }

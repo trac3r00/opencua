@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="960" height="360" rx="18" fill="#0f172a"/>
+  <text x="480" y="44" text-anchor="middle" font-size="22" font-weight="700" fill="#f8fafc">Eyes &#183; Hands &#183; Shared surface</text>
+  <text x="480" y="70" text-anchor="middle" font-size="14" fill="#94a3b8">How an agent sees and acts without taking over your Mac</text>
+
+  <g>
+    <rect x="30" y="96" width="270" height="200" rx="14" fill="#1e293b" stroke="#38bdf8" stroke-width="2"/>
+    <text x="165" y="130" text-anchor="middle" font-size="19" font-weight="700" fill="#38bdf8">Eyes</text>
+    <text x="52" y="168" font-size="14" fill="#e2e8f0">ScreenCaptureKit window shots</text>
+    <text x="52" y="198" font-size="14" fill="#e2e8f0">Accessibility tree, element ids</text>
+    <text x="52" y="228" font-size="14" fill="#e2e8f0">Vision text read of a window</text>
+    <text x="52" y="270" font-size="12" fill="#94a3b8">get_app_state</text>
+  </g>
+
+  <g>
+    <rect x="345" y="96" width="270" height="200" rx="14" fill="#1e293b" stroke="#a78bfa" stroke-width="2"/>
+    <text x="480" y="130" text-anchor="middle" font-size="19" font-weight="700" fill="#a78bfa">Hands</text>
+    <text x="367" y="168" font-size="14" fill="#e2e8f0">CGEvent posted to the app's pid</text>
+    <text x="367" y="198" font-size="14" fill="#e2e8f0">Your cursor and front app stay put</text>
+    <text x="367" y="228" font-size="14" fill="#e2e8f0">click, type_text, scroll, drag</text>
+    <text x="367" y="270" font-size="12" fill="#94a3b8">background delivery</text>
+  </g>
+
+  <g>
+    <rect x="660" y="96" width="270" height="200" rx="14" fill="#1e293b" stroke="#34d399" stroke-width="2"/>
+    <text x="795" y="130" text-anchor="middle" font-size="19" font-weight="700" fill="#34d399">Shared surface</text>
+    <text x="682" y="168" font-size="14" fill="#e2e8f0">A window opencua owns</text>
+    <text x="682" y="198" font-size="14" fill="#e2e8f0">One labeled cursor per agent</text>
+    <text x="682" y="228" font-size="14" fill="#e2e8f0">Strokes merged, never cut</text>
+    <text x="682" y="270" font-size="12" fill="#94a3b8">single or multi pointer</text>
+  </g>
+
+  <path d="M300 196 L345 196" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M615 196 L660 196" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <text x="480" y="332" text-anchor="middle" font-size="13" fill="#94a3b8">Your own apps get input only in the background; agents draw together only on surfaces opencua launched.</text>
+</svg>

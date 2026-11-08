@@ -49,7 +49,10 @@
 		"native/history-recorder.m",
 		"native/history-recorder",
 		"native/opencua-surface.m",
-		"native/opencua-surface"
+		"native/opencua-surface",
+		"native/guest-axdump.m",
+		"native/guest-axdump",
+		"native/surface-pages"
 	],
 	"dependencies": {
 		"get-windows": "9.3.0",

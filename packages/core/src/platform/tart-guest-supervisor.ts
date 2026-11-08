@@ -56,6 +56,8 @@ export class TartGuestSupervisor {
 		readonly owner: CursorOwner,
 		private readonly target: TartGuestTarget,
 		private readonly runtime: GuestRuntimeProcess,
+		/** Joined a guest another session started: it never stops that runtime. */
+		private readonly attached = false,
 	) {
 		Object.freeze(this.owner);
 	}
@@ -64,13 +66,17 @@ export class TartGuestSupervisor {
 		directory: string,
 		owner: CursorOwner,
 		dependencies: Partial<GuestSupervisorDependencies> = {},
+		options: { readonly attach?: boolean } = {},
 	): Promise<TartGuestSupervisor> {
 		const target = await readTartGuestTarget(directory, owner);
 		assertInputMayContinue(currentInputScope());
-		if (dependencies.connect === undefined && (await socketExists(target)))
+		const attach = options.attach === true;
+		const running = (attach || dependencies.connect === undefined) && (await socketExists(target));
+		// Joining is opt-in: by default a running guest may belong to a runtime this server cannot vouch for.
+		if (running && !attach)
 			throw new Error("The owned VM already has a control socket; refuse to attach to another runtime.");
-		const runtime = (dependencies.start ?? startRuntime)(target);
-		const supervisor = new TartGuestSupervisor({ ...owner }, target, runtime);
+		const runtime = running ? attachedRuntime() : (dependencies.start ?? startRuntime)(target);
+		const supervisor = new TartGuestSupervisor({ ...owner }, target, runtime, running);
 		const abort = new AbortController();
 		const timeout = setTimeout(() => abort.abort(new Error("Owned VM input startup timed out.")), 180_000);
 		const markExited = () => {
@@ -102,7 +108,7 @@ export class TartGuestSupervisor {
 				? connectGuest(directory, owner, abort.signal)
 				: dependencies.connect(directory, owner);
 		const connecting = (async () => {
-			if (dependencies.connect === undefined) await waitForSocket(target, abort.signal);
+			if (dependencies.connect === undefined && !running) await waitForSocket(target, abort.signal);
 			let input: GuestInput | undefined;
 			while (input === undefined) {
 				abort.signal.throwIfAborted();
@@ -111,8 +117,9 @@ export class TartGuestSupervisor {
 				try {
 					input = await supervisor.reconnectInput();
 				} catch (error) {
-					// The host socket exists before the guest agent finishes booting.
-					if (!(error instanceof Error) || !error.message.includes("GRPCConnectionPoolError")) throw error;
+					// The host socket exists before the guest agent finishes booting, and the agent answers before the
+					// login session has a display to capture; both clear on their own within the startup timeout.
+					if (!(error instanceof Error) || !GUEST_BOOTING.test(error.message)) throw error;
 					await delay(250, undefined, { signal: abort.signal });
 				}
 			}
@@ -255,6 +262,7 @@ if (!board.setStringForType($(${JSON.stringify(text)}), $.NSPasteboardTypeString
 			await this.tail;
 			this.input?.close();
 			this.reconnectInput = undefined;
+			if (this.attached) return;
 			if (!this.stopped) this.runtime.stop();
 			let timeout: ReturnType<typeof setTimeout> | undefined;
 			try {
@@ -335,6 +343,7 @@ if (!board.setStringForType($(${JSON.stringify(text)}), $.NSPasteboardTypeString
 	}
 }
 
+const GUEST_BOOTING = /GRPCConnectionPoolError|could not create image from display/;
 const DRAG_SAMPLE_PIXELS = 24;
 const MAX_DRAG_STEPS = 511;
 
@@ -367,6 +376,15 @@ async function pressChord(input: GuestInput, keysyms: readonly number[]): Promis
 	}
 	if (errors.length === 1) throw errors[0];
 	if (errors.length > 1) throw new AggregateError(errors, "Guest key chord failed.");
+}
+
+/** A guest runtime owned by another session: no output to drain, no exit to observe, nothing to stop. */
+function attachedRuntime(): GuestRuntimeProcess {
+	return {
+		output: (async function* () {})(),
+		exited: new Promise<number | null>(() => undefined),
+		stop(): void {},
+	};
 }
 
 function startRuntime(target: TartGuestTarget): GuestRuntimeProcess {

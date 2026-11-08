@@ -19,7 +19,7 @@ architectures=(-arch arm64 -arch x86_64)
 deployment_target=(-mmacosx-version-min=15.0)
 availability_errors=(-Werror=unguarded-availability -Werror=unguarded-availability-new)
 
-for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m; do
+for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m; do
 	if [[ ! -f "${native_dir}/${source}" ]]; then
 		echo "error: missing ${native_dir}/${source}" >&2
 		exit 1
@@ -87,7 +87,20 @@ clang \
 	-o "${native_dir}/opencua-surface"
 echo "built ${native_dir}/opencua-surface ($(lipo -archs "${native_dir}/opencua-surface"))"
 
-(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m >build-inputs.sha256)
+# Copied into agent-owned guests (Apple virtual Macs, always arm64) by the isolated server; never run on the host.
+clang \
+	-arch arm64 \
+	-O2 \
+	-fobjc-arc \
+	"${deployment_target[@]}" \
+	"${availability_errors[@]}" \
+	-framework AppKit \
+	-framework ApplicationServices \
+	"${native_dir}/guest-axdump.m" \
+	-o "${native_dir}/guest-axdump"
+echo "built ${native_dir}/guest-axdump ($(lipo -archs "${native_dir}/guest-axdump"))"
+
+(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m >build-inputs.sha256)
 echo "recorded input hashes in ${native_dir}/build-inputs.sha256"
 
 # Sign the helpers with the stable identity (see scripts/sign-native.sh): ad-hoc builds change
