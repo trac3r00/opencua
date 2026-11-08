@@ -55,6 +55,13 @@ if [[ "${1:-}" == "--repair" ]]; then
 	exit 0
 fi
 
+for existing in opencua apple-cua; do
+	if [[ -f "$signing/$existing-signing.key" ]]; then
+		echo "$signing/$existing-signing.key already exists; a new identity would replace it and macOS would ask for every permission again." >&2
+		echo "To fix a keychain that does not unlock, keep it: $0 --repair" >&2
+		exit 1
+	fi
+done
 mkdir -p "$signing"
 KC="$signing/opencua-signing.keychain-db"
 PASS="opencua-local-signing"
@@ -66,6 +73,7 @@ openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
 chmod 600 "$signing/opencua-signing.key"
 openssl pkcs12 -export -legacy -out "$signing/opencua-signing.p12" -inkey "$signing/opencua-signing.key" \
 	-in "$signing/opencua-signing.crt" -passout "pass:$PASS"
+chmod 600 "$signing/opencua-signing.p12"
 security create-keychain -p "$PASS" "$KC" 2>/dev/null || true
 security import "$signing/opencua-signing.key" -k "$KC" -T /usr/bin/codesign -P ""
 security import "$signing/opencua-signing.crt" -k "$KC" -T /usr/bin/codesign
