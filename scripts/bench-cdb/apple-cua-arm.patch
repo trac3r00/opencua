@@ -18,7 +18,7 @@ index bdceb47b5..24f0021fa 100644
  # saw 14 script timeouts, so the AX addendum asks for the maximum on every call. The driver binary is unchanged.
  RUN_SCRIPT_ADDENDUM += 'Pass "timeout_ms": 120000 on every run_script call.\n'
 
-+APPLE_CUA_ADDENDUM = (
++OPENCUA_ADDENDUM = (
 +    "\n\nName the task app explicitly. Observe with get_app_state (profile fast for semantic targets, "
 +    "visual when pixels matter); use its observation_token and returned element ids, never guessed ids. "
 +    "Prefer set_value or click_target for a described control, run_steps with expect for a known sequence, "
@@ -44,7 +44,7 @@ index bdceb47b5..24f0021fa 100644
              "Do not use the internet; the task's localhost site is allowed.",
          )
 +    if arm == "cc-apple-cua":
-+        return prompt + APPLE_CUA_ADDENDUM
++        return prompt + OPENCUA_ADDENDUM
      build = CUA_BUILDS.get(arm)
      if build is None:
          return prompt
@@ -57,9 +57,9 @@ index bdceb47b5..24f0021fa 100644
 +        env = claude_env()
 +        env["HOME"] = str(WORK / "apple-home")
 +        env.update(
-+            APPLE_CUA_DELIVERY="background",
-+            APPLE_CUA_TOOLSET="full",
-+            APPLE_CUA_ALLOWED_BUNDLE_IDS=",".join(settings["allowed_bundle_ids"]),
++            OPENCUA_DELIVERY="background",
++            OPENCUA_TOOLSET="full",
++            OPENCUA_ALLOWED_BUNDLE_IDS=",".join(settings["allowed_bundle_ids"]),
 +        )
 +        config = {
 +            "mcpServers": {
@@ -137,7 +137,7 @@ index 000000000..65798557c
 +    }
 +    (tmp_path / "apple-cua.json").write_text(json.dumps(settings))
 +    with mock.patch.object(ca, "WORK", tmp_path), mock.patch.dict(
-+        "os.environ", {"APPLE_CUA_IPHONE": "1", "UNRELATED_SECRET": "not-forwarded"}
++        "os.environ", {"OPENCUA_IPHONE": "1", "UNRELATED_SECRET": "not-forwarded"}
 +    ):
 +        path, server = ca.mcp_config_for("cc-apple-cua", tmp_path / "run")
 +    entry = json.loads(path.read_text())["mcpServers"][server]
@@ -146,10 +146,10 @@ index 000000000..65798557c
 +    assert entry["command"] == settings["helper_launcher"]
 +    assert entry["args"] == [settings["server"]]
 +    assert entry["env"]["HOME"] == str(tmp_path / "apple-home")
-+    assert entry["env"]["APPLE_CUA_DELIVERY"] == "background"
-+    assert entry["env"]["APPLE_CUA_TOOLSET"] == "full"
-+    assert entry["env"]["APPLE_CUA_ALLOWED_BUNDLE_IDS"] == "ai.cua.benchlab,com.apple.calculator"
-+    assert "APPLE_CUA_IPHONE" not in entry["env"]
++    assert entry["env"]["OPENCUA_DELIVERY"] == "background"
++    assert entry["env"]["OPENCUA_TOOLSET"] == "full"
++    assert entry["env"]["OPENCUA_ALLOWED_BUNDLE_IDS"] == "ai.cua.benchlab,com.apple.calculator"
++    assert "OPENCUA_IPHONE" not in entry["env"]
 +    assert "UNRELATED_SECRET" not in entry["env"]
 +    argv = ca.claude_argv(
 +        mcp_config=path, server=server, model="offline", max_turns=45, max_budget_usd=6

@@ -1,35 +1,35 @@
 {
-  "upstream": {
-    "repository": "https://github.com/trycua/cua.git",
-    "sha": "f06d538f7f743f063ee9312035874c489d9e63f6",
-    "retrieved": "2026-10-28",
-    "bench_path": "libs/cua-driver-bench"
-  },
-  "comparison": {
-    "arm": "cc-cua-driver",
-    "version": "0.34.0",
-    "git_sha": "b0968e1b12834e485dda68789541a3cc57664a9f",
-    "reason": "Pinned main build 1fa2247ae745f5029211573ad4f5c3087efcf641 has no matching release asset. The 0.38.0 release targets 85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19, not that commit."
-  },
-  "claude_code_version": "2.1.310 (Claude Code)",
-  "claude_bin": "/opt/homebrew/bin/claude",
-  "macos_version": "26.6.2",
-  "macos_build": "25G83",
-  "python_version": "3.12.11",
-  "pytest_version": "9.0.3",
-  "apple_cua": {
-    "commit": "7f4e0f8ab3df896c7eabf687ffeafd8a2598fbe0",
-    "arm": "cc-apple-cua",
-    "server": "packages/mcp/dist/server.js",
-    "helper_launcher": "packages/mcp/dist/apple-cua-mcp.app/Contents/MacOS/apple-cua-mcp",
-    "node": "packages/mcp/dist/apple-cua-mcp.app/Contents/Resources/node",
-    "node_version": "v26.7.0",
-    "skill": "skills/apple-cua",
-    "env": {
-      "APPLE_CUA_DELIVERY": "background",
-      "APPLE_CUA_TOOLSET": "full",
-      "APPLE_CUA_ALLOWED_BUNDLE_IDS": "ai.cua.benchlab,com.apple.calculator,com.google.Chrome,org.libreoffice.script,org.gnucash.Gnucash,com.trycua.cdbbench.copperfield-mail,com.trycua.cdbbench.signal-quay-chat,com.trycua.cdbbench.daymark-calendar,com.trycua.cdbbench.ledger-lantern-mail,com.trycua.cdbbench.rillwatch-cases,com.trycua.cdbbench.margin-lantern-manual"
-    },
-    "iphone": false
-  }
+	"upstream": {
+		"repository": "https://github.com/trycua/cua.git",
+		"sha": "f06d538f7f743f063ee9312035874c489d9e63f6",
+		"retrieved": "2026-10-28",
+		"bench_path": "libs/cua-driver-bench"
+	},
+	"comparison": {
+		"arm": "cc-cua-driver",
+		"version": "0.34.0",
+		"git_sha": "b0968e1b12834e485dda68789541a3cc57664a9f",
+		"reason": "Pinned main build 1fa2247ae745f5029211573ad4f5c3087efcf641 has no matching release asset. The 0.38.0 release targets 85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19, not that commit."
+	},
+	"claude_code_version": "2.1.310 (Claude Code)",
+	"claude_bin": "/opt/homebrew/bin/claude",
+	"macos_version": "26.6.2",
+	"macos_build": "25G83",
+	"python_version": "3.12.11",
+	"pytest_version": "9.0.3",
+	"apple_cua": {
+		"commit": "7f4e0f8ab3df896c7eabf687ffeafd8a2598fbe0",
+		"arm": "cc-apple-cua",
+		"server": "packages/mcp/dist/server.js",
+		"helper_launcher": "packages/mcp/dist/opencua-mcp.app/Contents/MacOS/opencua-mcp",
+		"node": "packages/mcp/dist/opencua-mcp.app/Contents/Resources/node",
+		"node_version": "v26.7.0",
+		"skill": "skills/apple-cua",
+		"env": {
+			"OPENCUA_DELIVERY": "background",
+			"OPENCUA_TOOLSET": "full",
+			"OPENCUA_ALLOWED_BUNDLE_IDS": "ai.cua.benchlab,com.apple.calculator,com.google.Chrome,org.libreoffice.script,org.gnucash.Gnucash,com.trycua.cdbbench.copperfield-mail,com.trycua.cdbbench.signal-quay-chat,com.trycua.cdbbench.daymark-calendar,com.trycua.cdbbench.ledger-lantern-mail,com.trycua.cdbbench.rillwatch-cases,com.trycua.cdbbench.margin-lantern-manual"
+		},
+		"iphone": false
+	}
 }

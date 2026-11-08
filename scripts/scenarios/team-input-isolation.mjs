@@ -211,15 +211,15 @@ function server(kind, scratch, index) {
 	if (!Array.isArray(argv) || !argv.every((part) => typeof part === "string") || !argv.length)
 		throw new Error(`invalid command for ${kind}`);
 	const env = {
-		APPLE_CUA_DELIVERY: "background",
-		APPLE_CUA_TOOLSET: "full",
-		APPLE_CUA_ALLOWED_BUNDLE_IDS: "com.apple.TextEdit,com.apple.ScriptEditor2",
+		OPENCUA_DELIVERY: "background",
+		OPENCUA_TOOLSET: "full",
+		OPENCUA_ALLOWED_BUNDLE_IDS: "com.apple.TextEdit,com.apple.ScriptEditor2",
 	};
 	if (kind === "apple")
 		Object.assign(env, {
 			// Both sessions share the SAME input-lock path; never isolate the lock by session.
-			APPLE_CUA_HOME: join(scratch, "home"),
-			APPLE_CUA_BIN_DIR: join(scratch, "bin"),
+			OPENCUA_HOME: join(scratch, "home"),
+			OPENCUA_BIN_DIR: join(scratch, "bin"),
 			TEAM_INPUT_LOCK_LOG: join(scratch, `lock-${index}.jsonl`),
 			TEAM_INPUT_LOCK_MODULE: join(root, "packages/core/dist/platform/input-lock.js"),
 			NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(join(root, "scripts/scenarios/team-input-lock-metrics.mjs")).href}`,

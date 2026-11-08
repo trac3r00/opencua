@@ -59,9 +59,9 @@ and SHA-256 values are recorded in `$CDB_BENCH_WORK/apple-cua-observed.json`.
 build apple-cua: build it in the designated worktree first.
 
 Only the runner's environment allowlist/fixed values plus the three
-`APPLE_CUA_*` entries in `pins.json` reach this server. Delivery stays
+`OPENCUA_*` entries in `pins.json` reach this server. Delivery stays
 `background` in **both** conditions, toolset is `full`, and
-`APPLE_CUA_IPHONE` is absent even if the parent sets it. The server uses an
+`OPENCUA_IPHONE` is absent even if the parent sets it. The server uses an
 isolated HOME under `$CDB_BENCH_WORK/apple-home`; Claude's subscription HOME
 remains unchanged. The bundle allowlist
 contains the ten-task app set, plus Calculator for upstream's capture probe;
@@ -88,13 +88,13 @@ pnpm install --frozen-lockfile
 # Link the existing .signing directory here if needed; never copy/log keys.
 # Isolate setup's launcher/config writes and skip its browser-service setup.
 export CDB_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/apple-cua-cdb.XXXXXX")"
-export APPLE_CUA_HOME="$CDB_ROOT/work/apple-home"
-export APPLE_CUA_BIN_DIR="$CDB_ROOT/work/bin"
-mkdir -p "$APPLE_CUA_HOME" "$APPLE_CUA_BIN_DIR"
-APPLE_CUA_BROWSER=off ./scripts/setup.sh --yes --no-doctor
+export OPENCUA_HOME="$CDB_ROOT/work/apple-home"
+export OPENCUA_BIN_DIR="$CDB_ROOT/work/bin"
+mkdir -p "$OPENCUA_HOME" "$OPENCUA_BIN_DIR"
+OPENCUA_BROWSER=off ./scripts/setup.sh --yes --no-doctor
 # Must print nothing. Report any matches; do not repair shared paths here.
 grep -l apple-cua-wt "$HOME/.local/bin/apple-cua" \
-  "$HOME/.omo/agent/mcp.json" "$HOME/.apple-cua/bundle/bundle.json"
+  "$HOME/.omo/agent/mcp.json" "$HOME/.opencua/bundle/bundle.json"
 bash scripts/bench-cdb/setup.sh --prepare
 ```
 

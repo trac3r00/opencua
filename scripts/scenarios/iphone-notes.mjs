@@ -20,9 +20,9 @@ export const NONCE_ALPHABET = "ACDEFHJKMNPRTUVWXY3479";
 export const NONCE_PREFIX = "CUA";
 export const NONCE_BODY_LENGTH = 8;
 export const SERVER_ENV = Object.freeze({
-	APPLE_CUA_IPHONE: "1",
-	APPLE_CUA_DELIVERY: "background",
-	APPLE_CUA_CURSOR: "off",
+	OPENCUA_IPHONE: "1",
+	OPENCUA_DELIVERY: "background",
+	OPENCUA_CURSOR: "off",
 });
 const CALL_TIMEOUT_MS = 20_000;
 const STATUS_TIMEOUT_MS = 15_000;
@@ -317,7 +317,7 @@ async function main(argv) {
 		out: undefined,
 		cli: [process.execPath, fileURLToPath(new URL("../../packages/cli/dist/cli.js", import.meta.url))],
 		helper: fileURLToPath(
-			new URL("../../packages/mcp/dist/apple-cua-mcp.app/Contents/MacOS/apple-cua-mcp", import.meta.url),
+			new URL("../../packages/mcp/dist/opencua-mcp.app/Contents/MacOS/opencua-mcp", import.meta.url),
 		),
 		record: true,
 	};

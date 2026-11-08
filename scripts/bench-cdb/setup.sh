@@ -82,8 +82,8 @@ for app in "$root"/libs/cua-driver-bench/taskpack/tasks/shared/*/apps/*; do
 done
 timeout 300 "$root/venv/bin/python" "$bench/tools/install_cua_driver.py" --work "$CDB_BENCH_WORK"
 
-helper="$repo/packages/mcp/dist/apple-cua-mcp.app"
-[[ -x "$helper/Contents/MacOS/apple-cua-mcp" && -f "$repo/packages/mcp/dist/server.js" ]] ||
+helper="$repo/packages/mcp/dist/opencua-mcp.app"
+[[ -x "$helper/Contents/MacOS/opencua-mcp" && -f "$repo/packages/mcp/dist/server.js" ]] ||
 	fail "missing built apple-cua server/helper; run isolated worktree setup as documented in README.md"
 [[ "$("$helper/Contents/Resources/node" --version)" == "$(node -p 'require(process.argv[1]).apple_cua.node_version' "$here/pins.json")" ]] ||
 	fail "bundled Node version differs from pins.json"
@@ -100,7 +100,7 @@ const config = {
   server: join(repo, pins.apple_cua.server),
   node: join(repo, pins.apple_cua.node),
   skill: join(repo, pins.apple_cua.skill),
-  allowed_bundle_ids: pins.apple_cua.env.APPLE_CUA_ALLOWED_BUNDLE_IDS.split(","),
+  allowed_bundle_ids: pins.apple_cua.env.OPENCUA_ALLOWED_BUNDLE_IDS.split(","),
 };
 const hashes = Object.fromEntries(["helper_launcher", "server", "node"].map(key =>
   [key, createHash("sha256").update(readFileSync(config[key])).digest("hex")]));

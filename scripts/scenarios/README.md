@@ -85,7 +85,7 @@ The apple-only `--import` preload measures elapsed time around the existing
 `InputLock.acquire` promise, including acquire overhead, and records every
 acquisition's result. It does not modify core source, its budgets, or its return
 value. Both apple processes use the same machine-wide lock path; sandboxing
-`APPLE_CUA_HOME` does not change `APPLE_CUA_STATE_DIR`. The two controls have no
+`OPENCUA_HOME` does not change `OPENCUA_STATE_DIR`. The two controls have no
 equivalent exposed lock-wait measurement: their field is `null`, never an
 invented zero. Every `input-lock-busy` response is counted and fails the trial.
 Publish the claim **“no interleaving across concurrent sessions”** only beside
@@ -115,8 +115,8 @@ Before **any** setup script or apple-cua CLI, isolate the install directories:
 ```sh
 home_root=$(mktemp -d -t apple-cua-t13-home.XXXXXX)
 bin_root=$(mktemp -d -t apple-cua-t13-bin.XXXXXX)
-export APPLE_CUA_HOME="$home_root/home" APPLE_CUA_BIN_DIR="$bin_root/bin"
-mkdir -p "$APPLE_CUA_HOME" "$APPLE_CUA_BIN_DIR"
+export OPENCUA_HOME="$home_root/home" OPENCUA_BIN_DIR="$bin_root/bin"
+mkdir -p "$OPENCUA_HOME" "$OPENCUA_BIN_DIR"
 # Never use --register. After setup, this must print nothing:
 grep -l apple-cua-wt ~/.local/bin/apple-cua ~/.omo/agent/mcp.json ~/.apple-cua/bundle/bundle.json
 # Stop processes using the sandbox before removing these task-owned roots.

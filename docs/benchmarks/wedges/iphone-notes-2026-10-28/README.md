@@ -1,6 +1,6 @@
 # Wedge B: a real iPhone over MCP (Notes nonce round-trip)
 
-A single-system scenario, not a head-to-head. apple-cua's MCP server, spawned with `APPLE_CUA_IPHONE=1` (the
+A single-system scenario, not a head-to-head. apple-cua's MCP server, spawned with `OPENCUA_IPHONE=1` (the
 `ios_*` tools register only then), drives a real iPhone through macOS iPhone Mirroring. Each repetition:
 
 1. `ios_observe` the Mirroring window (a fresh nonce that is already on screen fails the run as stale state);

@@ -72,7 +72,7 @@ describe("readiness", () => {
 		});
 		assert.match(report.readiness_failure, /phone-not-ready/);
 		assert.deepEqual(calls, ["ios_observe"]);
-		assert.equal(report.server.env.APPLE_CUA_IPHONE, "1");
+		assert.equal(report.server.env.OPENCUA_IPHONE, "1");
 	});
 });
 
