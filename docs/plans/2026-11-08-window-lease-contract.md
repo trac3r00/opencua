@@ -124,9 +124,11 @@ matches: today's observation-only behaviour, unchanged.
   gesture chains concurrently; workers under one lease share one lane.
 - The lease region is the outer bound. A worker `region` (screenshot pixels, worker-coordinator.ts:276)
   is mapped by `regionOnScreen` (172-184) and must lie inside the lease region, else assignment is
-  refused (`lease-region-exceeded`). Effective region = intersection, applied with `withInputRegion`
-  (input-region.ts:22). Direct tools (`click`, `run_steps`, `set_value`, ...) run inside
-  `withInputRegion(leaseRect)` too, so the lease confines them without a worker.
+  refused (`lease-region-exceeded`). `withInputRegion` takes global screen points (input-region.ts:5,
+  21), while the lease region is window-local, so each step translates it by the window's live origin
+  (`leaseRectOnScreen`; item 4 refuses a moved window) before intersecting and applying it. Direct
+  tools (`click`, `run_steps`, `set_value`, ...) run inside `withInputRegion(leaseRectOnScreen)` too,
+  so the lease confines them without a worker.
 - `tools` is checked per step kind in the session before any input (section 3, item 8).
 
 ### 2.5 Overlap rule
@@ -136,9 +138,13 @@ Disjoint regions run concurrently; overlapping ones wait. New `WindowScheduler` 
 (positive-area intersection, as `regionsOverlap`, worker-coordinator.ts:187) no active and no
 earlier-queued request; otherwise it waits FIFO with a bounded timeout (default 30 s, then refusal
 `lease-wait-timeout`). Both the wait and the admission are audited. Assignment-time overlap inside
-one coordinator stays a refusal (312-316): that is a planning error, not contention. Cross-process
-contention is covered in phase 1 by the existing machine-wide `InputLock` (input-lock.ts:74) around
-each leased burst; a shared scheduler file is decision 5.
+one coordinator stays a refusal (312-316): that is a planning error, not contention. In phase 1 this
+rule holds only within one server process. Across processes, each leased burst runs under the existing
+machine-wide `InputLock` (input-lock.ts:74), but `InputLock.run` throws `input-lock-busy` after its
+wait budget instead of queueing FIFO (input-lock.ts:129-133), and it reserves nothing between bursts,
+so another process can interleave an overlapping request. Phase 1 therefore surfaces cross-process
+contention as the refusal `input-lock-busy` (audited as `refuse`), never as `lease-wait-timeout`. A
+shared cross-process region reservation is decision 5.
 
 ### 2.6 Expiry and revocation
 
@@ -155,7 +161,9 @@ No auto-rebind to a new window with the same title.
 ### 2.7 Audit log
 
 `<stateDir>/audit/lease-YYYY-MM-DD.jsonl`, append-only, 0600, one `appendFileSync` per line, lines
-kept under 4 KiB so concurrent processes do not interleave. One JSON object per line:
+kept under 4 KiB. POSIX guarantees atomic writes only for pipes (`PIPE_BUF`), not regular files, so
+non-interleaving is an expectation: phase 1 tests it with two concurrent writer processes, and the
+writer takes a per-file lock if that test ever interleaves. One JSON object per line:
 
 | Field | Meaning |
 | --- | --- |
@@ -165,7 +173,7 @@ kept under 4 KiB so concurrent processes do not interleave. One JSON object per 
 | `session`, `worker`, `cursor` | agent-chosen attribution from `CursorOwner` (cursor-scope.ts:3-9), when present |
 | `pid`, `bundleId`, `windowId`, `region` | the target as checked at that moment |
 | `tool`, `step` | step kind and index |
-| `code`, `reason` | on `refuse`/`expire`: `lease-required`, `lease-expired`, `lease-tool-forbidden`, `lease-region-exceeded`, `lease-focus-elsewhere`, `lease-window-gone`, `lease-wait-timeout`, `person-active` |
+| `code`, `reason` | on `refuse`/`expire`: `lease-required`, `lease-expired`, `lease-tool-forbidden`, `lease-region-exceeded`, `lease-focus-elsewhere`, `lease-window-gone`, `lease-wait-timeout`, `input-lock-busy`; on `wait`: `person-active` when the person's own input holds the lease back |
 | `waitedMs`, `blockedBy` | on `admit`: how long and which lease id held the overlap |
 | `by` | `cli`, `menu`, `server` |
 
@@ -183,11 +191,12 @@ observation-only.
 | 2 | `SLEventPostToPid` | skylight.ts:34-37 | `if (!isOwnedSurfacePid(pid) && !leasedHere(pid)) denyHostInteraction("host-window")`. A post outside a leased flow stays refused even for a leased pid. |
 | 3 | `assertInputAvailable` | macos.ts:915-918 | add `|| leasedHere(targetPid)`. |
 | 4 | `preflightInput` | macos.ts:1246-1249 | add `|| leasedHere(expected.pid)`; for leased windows force `requireSameBounds` so a moved window invalidates the region mapping. |
-| 5 | `captureScreenshot`, `recognizeWindowText` | macos.ts:214, 1168 | allow only when the lease lists `capture` and `windowId === lease.target.windowId`; never the full screen. |
+| 5 | `captureScreenshot`, `recognizeWindowText` | macos.ts:214, 1168 | allow only when the lease lists `capture` and `windowId === lease.target.windowId`; never the full screen. For a region-scoped lease, crop the image and the OCR output to `leaseRectOnScreen`, and refuse capture until cropping exists; only a whole-window lease sees the whole window. |
 | 6 | `activateBehind` | macos-input.ts:456 | add `|| leasedHere(pid)` to the early return: no `setProcessAppActive` for a leased window (it is a denial at skylight.ts:167 and would otherwise throw mid-click). |
 | 7 | `postText`, `postKey` | macos-input.ts:814-850, 857-862 | before each keystroke, `focusedWindowIdForPid(pid) === lease.target.windowId` (`macos-ffi/accessibility.ts:313`), else `lease-focus-elsewhere`; keep `assertFocusInInputRegion` (818, 836, 859). |
-| 8 | `beginMutation` | guarded-session.ts:2129-2160 | after 2152: `lease = resolveLease(holder, pid)`; non-owned pid without a live lease -> `InputRefusal("lease-required")`; step kinds not in `tools` -> `lease-tool-forbidden`; return the lease. The four callers (814-820, 874-877, 984-988, 1301-1308) wrap the action in `scheduler.acquire` + `withLease` + `withInputRegion`. |
+| 8 | `beginMutation` | guarded-session.ts:2129-2160 | after 2152: `lease = resolveLease(holder, pid, observation.windowId)`, matching `target.windowId` too, so a lease on one window never authorizes another window of the same process (pointer, keyboard and accessibility steps alike); non-owned pid without a live lease -> `InputRefusal("lease-required")`; step kinds not in `tools` -> `lease-tool-forbidden`; return the lease. The four callers (814-820, 874-877, 984-988, 1301-1308) wrap the action in `scheduler.acquire` + `withLease` + `withInputRegion`. |
 | 9 | `laneKey` | guarded-session.ts:2579-2581 | `${pid}:L:${leaseId}` for a leased pid. |
+| 9b | `MacOSInputController.serialize` | macos-input.ts:633-641 | the same `${pid}:L:${leaseId}` gesture lane for a leased pid; without it disjoint leases on one app still serialize per pid. |
 | 10 | `WorkerCoordinator` ctor, `assign`, `run`, `status` | worker-coordinator.ts:266-274, 276-340, 558-690, 471-494 | `sharedApp = (pid) => isOwnedSurfacePid(pid) \|\| hasLiveLease(holder, pid)`; require worker region inside the lease region; keep the surface-only message (309) for unleased pids; report `lease_id`, `lease_expires_at` in status. |
 | 11 | `refusingControl`, tool descriptions | worker-tools.ts:77-96, 105, 168 | map `LeaseRefusal` to `isError` with `reason` and a hint that only the person grants leases (`opencua lease grant`). |
 | 12 | `createNativeComputer` | native-policy.ts:37-49 | read `OPENCUA_LEASE_HOLDER` (trimmed, no control characters, <= 128 chars as cursor-scope.ts:37-48 does for names); pass to `MacOSHostComputer` and `GuardedSession`. Absent: nothing changes. |

@@ -171,7 +171,7 @@ describe("#given an observed viewport #when a click point is validated and mappe
 			executed += 1;
 			const end = start + extent;
 			for (const value of [screen.x, screen.y]) {
-				if (value < start || (end > start && value >= end))
+				if (!Number.isFinite(value) || value < start || (end > start ? value >= end : value !== start))
 					failing.push(`start=${start} extent=${extent} -> ${value}`);
 			}
 		}
