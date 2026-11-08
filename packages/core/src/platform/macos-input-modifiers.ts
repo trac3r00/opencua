@@ -34,8 +34,11 @@ export async function withHeldModifiers<T>(
 			const keyCode = virtualKeyCodeFor(modifier);
 			const flagsBefore = flags;
 			flags |= modifierFlags([modifier]);
-			post(keyCode, true, flags);
+			// A post can send the key and still throw (cleanup after the send), so a failed press is released
+			// too. Assumed harmless, not tested against a real app: a modifier key-up for a key that never
+			// went down leaves the flags as they already are.
 			pressed.push({ keyCode, flagsAfterRelease: flagsBefore });
+			post(keyCode, true, flags);
 		}
 		result = await gesture(flags);
 	} catch (error: unknown) {

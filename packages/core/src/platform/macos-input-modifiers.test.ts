@@ -113,7 +113,7 @@ describe("#given a gesture that holds modifiers", () => {
 		expect(post).toHaveBeenCalledWith(58, false, 0);
 	});
 
-	it("#when a key cannot be pressed #then only the keys already down are released", async () => {
+	it("#when a key cannot be pressed #then it and the keys already down are released, last first", async () => {
 		const post = vi.fn((keyCode: number, keyDown: boolean, _flags: number) => {
 			if (keyDown && keyCode === 56) {
 				throw new Error("press failed");
@@ -127,8 +127,26 @@ describe("#given a gesture that holds modifiers", () => {
 		expect(post.mock.calls).toEqual([
 			[55, true, COMMAND],
 			[56, true, COMMAND | SHIFT],
+			[56, false, COMMAND],
 			[55, false, 0],
 		]);
+	});
+
+	it("#when a key is sent but its post still throws #then that key goes back up too", async () => {
+		const down = new Set<number>();
+		const post = vi.fn((keyCode: number, keyDown: boolean, _flags: number) => {
+			if (keyDown) down.add(keyCode);
+			else down.delete(keyCode);
+			if (keyDown && keyCode === 56) {
+				throw new Error("cleanup after send failed");
+			}
+		});
+
+		await expect(withHeldModifiers(["command", "shift"], post, async () => "done")).rejects.toThrow(
+			"cleanup after send failed",
+		);
+
+		expect([...down]).toEqual([]);
 	});
 
 	it("#when no modifiers are given #then no key is posted and the gesture has no flags to stamp", async () => {
