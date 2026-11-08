@@ -688,7 +688,14 @@ static NSString *const kMultiPointerScript =
     @"window.__opencuaPointers=function(batch){for(var i=0;i<batch.length;i++){"
     @"var "
     @"e=batch[i],id=ids.get(e[0]),k=e[1],x=e[2],y=e[3];"
-    @"if(id===undefined){id=next++;ids.set(e[0],id);}own.add(id);"
+    @"if(id===undefined){id=next++;ids.set(e[0],id);"
+    // At most 256 cursor tags are kept; the oldest ones not pressed are
+    // forgotten, so a long-lived surface does not grow with retired workers.
+    @"if(ids.size>256){for(var it of ids){var old=S.get(it[1]);"
+    @"if(it[1]!==id&&(!old||!old.down)){ids.delete(it[0]);S.delete(it[1]);"
+    @"own.delete(it[1]);if(window.__opencuaPointerColors)"
+    @"delete window.__opencuaPointerColors[it[1]];if(ids.size<=256)break;}}}}"
+    @"own.add(id);"
     @"if(typeof e[4]==='string')(window.__opencuaPointerColors||"
     @"(window.__opencuaPointerColors={}))[id]=e[4];"
     @"var s=S.get(id);if(!s){s={t:null,down:false};S.set(id,s);}"

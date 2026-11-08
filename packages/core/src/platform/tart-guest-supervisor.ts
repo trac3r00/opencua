@@ -262,7 +262,11 @@ if (!board.setStringForType($(${JSON.stringify(text)}), $.NSPasteboardTypeString
 			await this.tail;
 			this.input?.close();
 			this.reconnectInput = undefined;
-			if (this.attached) return;
+			if (this.attached) {
+				// Joined guests are never stopped, but their liveness probe is.
+				this.runtime.stop();
+				return;
+			}
 			if (!this.stopped) this.runtime.stop();
 			let timeout: ReturnType<typeof setTimeout> | undefined;
 			try {
@@ -389,11 +393,14 @@ function attachedRuntime(target: TartGuestTarget): GuestRuntimeProcess {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	const exited = new Promise<number | null>((resolve) => {
 		timer = setInterval(() => {
-			void socketExists(target).then((present) => {
-				if (present) return;
-				clearInterval(timer);
-				resolve(null);
-			});
+			void socketExists(target)
+				.then((present) => {
+					if (present) return;
+					clearInterval(timer);
+					resolve(null);
+				})
+				// A probe that fails says nothing about the guest; the next tick tries again.
+				.catch(() => undefined);
 		}, ATTACHED_LIVENESS_MS);
 		timer.unref();
 	});
