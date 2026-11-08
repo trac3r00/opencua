@@ -40,8 +40,9 @@ if [[ ! -f "$keychain" ]]; then
 	keychain=""
 fi
 
-if [[ "$identity" != "-" ]]; then
-	security unlock-keychain -p "$keychain_password" "$keychain" 2>/dev/null || true
+if [[ "$identity" != "-" ]] && ! security unlock-keychain -p "$keychain_password" "$keychain"; then
+	echo "sign-native: $keychain does not unlock, so nothing can be signed as \"$identity\". Repair it, keeping the same identity and its permission grants: $repo/scripts/create-signing-identity.sh --repair" >&2
+	exit 1
 fi
 
 for path in "$@"; do

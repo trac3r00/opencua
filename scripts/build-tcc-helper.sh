@@ -54,7 +54,10 @@ fi
 sign_identity="${OPENCUA_SIGN_IDENTITY:--}"
 keychain_args=()
 if [[ "$sign_identity" == "$stable_identity" && -f "$signing_keychain" ]]; then
-	security unlock-keychain -p "$keychain_password" "$signing_keychain" 2>/dev/null || true
+	if ! security unlock-keychain -p "$keychain_password" "$signing_keychain"; then
+		echo "$signing_keychain does not unlock, so the helper cannot be signed as \"$stable_identity\" and the working helper was left as it is. Repair the keychain, keeping the same identity and its permission grants: $repo/scripts/create-signing-identity.sh --repair" >&2
+		exit 1
+	fi
 	keychain_args=(--keychain "$signing_keychain")
 fi
 minimum_macos="15.0"
@@ -203,13 +206,17 @@ fi
 
 version="$("$node_bin" -p 'require(process.argv[1]).version' "$repo/packages/mcp/package.json")"
 
-rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+# Built beside the current helper and moved into place only once signed and verified: a failed build leaves the
+# working helper (and the permissions macOS granted it) untouched, and a running helper keeps its own files.
+build="$out_dir/.opencua-mcp.app.build-$$"
+trap 'rm -rf "$build"' EXIT
+rm -rf "$build"
+mkdir -p "$build/Contents/MacOS" "$build/Contents/Resources"
 
-cp -c "$node_bin" "$app/Contents/Resources/node" 2>/dev/null || cp "$node_bin" "$app/Contents/Resources/node"
-chmod 755 "$app/Contents/Resources/node"
+cp -c "$node_bin" "$build/Contents/Resources/node" 2>/dev/null || cp "$node_bin" "$build/Contents/Resources/node"
+chmod 755 "$build/Contents/Resources/node"
 
-cc "${launcher_flags[@]}" -o "$app/Contents/MacOS/$executable" "$launcher_source"
+cc "${launcher_flags[@]}" -o "$build/Contents/MacOS/$executable" "$launcher_source"
 
 # The icon ships as a multi-resolution .icns so Finder, System Settings and the privacy panes
 # render the helper as an app instead of a generic process.
@@ -220,19 +227,19 @@ for size in 16 32 128 256 512; do
 	sips -z "$size" "$size" "$icon_source" --out "$iconset/icon_${size}x${size}.png" >/dev/null
 	sips -z "$((size * 2))" "$((size * 2))" "$icon_source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$iconset" -o "$app/Contents/Resources/appicon.icns"
+iconutil -c icns "$iconset" -o "$build/Contents/Resources/appicon.icns"
 rm -rf "$iconset"
 
-info_plist "$version" >"$app/Contents/Info.plist"
-if ! plutil -lint "$app/Contents/Info.plist" >/dev/null; then
+info_plist "$version" >"$build/Contents/Info.plist"
+if ! plutil -lint "$build/Contents/Info.plist" >/dev/null; then
 	echo "Info.plist failed plutil -lint" >&2
 	exit 1
 fi
-inputs_digest >"$app/$stamp"
+inputs_digest >"$build/$stamp"
 
 # The bundled Node carries the bundle's identifier and is signed before the bundle, so a grant
 # recorded for the bundle id covers the process that asks and the bundle seal covers it (and the stamp).
-codesign --force --sign "$sign_identity" ${keychain_args[@]+"${keychain_args[@]}"} --identifier "$bundle_id" "$app/Contents/Resources/node"
+codesign --force --sign "$sign_identity" ${keychain_args[@]+"${keychain_args[@]}"} --identifier "$bundle_id" "$build/Contents/Resources/node"
 # The always-on cua-history watcher lives inside the bundle so it is the same app as the MCP
 # helper: one code identity, one entry in System Settings, so a single grant of Input Monitoring
 # and Accessibility covers it. Signed with the bundle id like node, before the bundle is sealed.
@@ -241,12 +248,20 @@ if [[ -f "$history_source" ]]; then
 	cc "${launcher_flags[@]}" -fobjc-arc \
 		-framework AppKit -framework Foundation -framework ApplicationServices \
 		-framework CoreGraphics -framework Carbon \
-		-o "$app/Contents/MacOS/history-recorder" "$history_source"
-	codesign --force --sign "$sign_identity" ${keychain_args[@]+"${keychain_args[@]}"} --identifier "$bundle_id" "$app/Contents/MacOS/history-recorder"
+		-o "$build/Contents/MacOS/history-recorder" "$history_source"
+	codesign --force --sign "$sign_identity" ${keychain_args[@]+"${keychain_args[@]}"} --identifier "$bundle_id" "$build/Contents/MacOS/history-recorder"
 fi
 # Hardened runtime stays off: the executable is Node and needs its JIT pages.
-codesign --force --sign "$sign_identity" ${keychain_args[@]+"${keychain_args[@]}"} "$app"
-codesign --verify --deep --strict "$app"
+codesign --force --sign "$sign_identity" ${keychain_args[@]+"${keychain_args[@]}"} "$build"
+codesign --verify --deep --strict "$build"
+retired="$out_dir/.opencua-mcp.app.old-$$"
+if [[ -d "$app" ]]; then mv "$app" "$retired"; fi
+if ! mv "$build" "$app"; then
+	if [[ -d "$retired" ]]; then mv "$retired" "$app"; fi
+	echo "could not move the new helper into $app; the previous helper is back in place" >&2
+	exit 1
+fi
+rm -rf "$retired"
 "$lsregister" -f "$app" ||
 	echo "warning: LaunchServices did not register $app, so System Settings may not list it" >&2
 

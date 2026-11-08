@@ -13,7 +13,12 @@ export interface Layout {
 	readonly helperApp: string;
 	/** The helper's launcher, the command every MCP client registration runs. */
 	readonly helperExecutable: string;
+	/** The server.js every registration runs: the linked developer checkout's (see `opencua dev link`), else this one's. */
 	readonly server: string;
+	/** $OPENCUA_HOME/dev-link.json, written by `opencua dev link`. */
+	readonly devLinkPath: string;
+	/** The developer checkout `opencua dev link` points the server at; undefined when not linked. */
+	readonly devCheckout: string | undefined;
 	readonly cli: string;
 	readonly setupScript: string;
 	readonly helperBuildScript: string;
@@ -92,12 +97,16 @@ export function resolveLayout(
 		platform === "win32" ? join(env["LOCALAPPDATA"] ?? home, "opencua", "bin") : join(home, ".local/bin");
 	const binDir = resolve(nonEmpty(env["OPENCUA_BIN_DIR"]) ?? nonEmpty(env["APPLE_CUA_BIN_DIR"]) ?? defaultBin);
 	const helperApp = join(checkout, "packages/mcp/dist/opencua-mcp.app");
+	const devLinkPath = join(openCuaHome, "dev-link.json");
+	const devCheckout = readDevLink(devLinkPath);
 	return {
 		checkout,
 		nativeDir: join(checkout, "packages/core/native"),
 		helperApp,
 		helperExecutable: platform === "darwin" ? join(helperApp, "Contents/MacOS/opencua-mcp") : process.execPath,
-		server: join(checkout, "packages/mcp/dist/server.js"),
+		server: join(devCheckout ?? checkout, "packages/mcp/dist/server.js"),
+		devLinkPath,
+		devCheckout,
 		cli: join(checkout, "packages/cli/dist/cli.js"),
 		setupScript: join(checkout, platform === "win32" ? "scripts/install.ps1" : "scripts/setup.sh"),
 		helperBuildScript: join(checkout, "scripts/build-tcc-helper.sh"),
@@ -127,6 +136,27 @@ export function displayPath(path: string, home: string): string {
 		}
 	}
 	return path;
+}
+
+/**
+ * The checkout recorded in dev-link.json; undefined when there is no link, it cannot be read, or the checkout is gone
+ * (moved or deleted), so the registrations fall back to the installed server instead of a missing one.
+ */
+export function readDevLink(path: string): string | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || !("checkout" in parsed)) {
+		return undefined;
+	}
+	if (typeof parsed.checkout !== "string" || parsed.checkout === "") {
+		return undefined;
+	}
+	const checkout = canonicalPath(parsed.checkout);
+	return existsSync(join(checkout, "packages/mcp/package.json")) ? checkout : undefined;
 }
 
 export function readInstallMarker(path: string): InstallMarker | undefined {
