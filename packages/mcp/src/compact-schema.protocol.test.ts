@@ -11,9 +11,9 @@ const LEAN_BUDGET_BYTES = 10_500;
 // windows (36,978 bytes on 2026-11-04), then the click `context` flag for windows several cursors share (37,078 bytes on
 // 2026-11-04), then the per-worker `region` on manage_workers assignments (37,381 bytes on 2026-11-07), the
 // surface `listen` op (37,459 bytes on 2026-11-07), `surface` pointers and the built-in opencua:board (37,617 bytes
-// on 2026-11-08), then worker `session_id` and `release_session` (MEASURED bytes on 2026-11-08). The full list still
+// on 2026-11-08), then worker `session_id` and `release_session` (38,145 bytes on 2026-11-08). The full list still
 // omits the repeated per-type step schema.
-const FULL_BUDGET_BYTES = 1;
+const FULL_BUDGET_BYTES = 38_200;
 
 let closeHarness: (() => Promise<void>) | undefined;
 
