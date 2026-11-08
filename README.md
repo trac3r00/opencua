@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="./docs/assets/architecture.svg" alt="Eyes (ScreenCaptureKit, Accessibility tree, Vision text) feed Hands (CGEvent posted to the app's pid in the background), which drive a shared surface where each agent has its own labeled cursor" width="100%" />
+  <img src="./docs/assets/architecture.svg" alt="Eyes (ScreenCaptureKit, Accessibility tree, Vision text) feed Hands (SkyLight events posted to the app's pid in the background), which drive a shared surface where each agent has its own labeled cursor" width="100%" />
 </p>
 
 **Many agents, one window, your Mac untouched.** Agents see apps through ScreenCaptureKit and the Accessibility

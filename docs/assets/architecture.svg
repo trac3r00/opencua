@@ -15,7 +15,7 @@
   <g>
     <rect x="345" y="96" width="270" height="200" rx="14" fill="#1e293b" stroke="#a78bfa" stroke-width="2"/>
     <text x="480" y="130" text-anchor="middle" font-size="19" font-weight="700" fill="#a78bfa">Hands</text>
-    <text x="367" y="168" font-size="14" fill="#e2e8f0">CGEvent posted to the app's pid</text>
+    <text x="367" y="168" font-size="14" fill="#e2e8f0">SkyLight events posted to the app's pid</text>
     <text x="367" y="198" font-size="14" fill="#e2e8f0">Your cursor and front app stay put</text>
     <text x="367" y="228" font-size="14" fill="#e2e8f0">click, type_text, scroll, drag</text>
     <text x="367" y="270" font-size="12" fill="#94a3b8">background delivery</text>
