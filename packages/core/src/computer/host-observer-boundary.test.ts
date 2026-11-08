@@ -24,11 +24,14 @@ const compiled = ts.transpileModule(declaration.getText(source), {
 
 function fixture() {
 	const exports: Record<string, unknown> = {};
-	let effects = 0;
-	let controllers = 0;
-	const effect = () => {
-		effects++;
-	};
+	const dispatched: string[] = [];
+	const controllerArgs: unknown[][] = [];
+	let locked = 0;
+	const record =
+		(name: string) =>
+		async (..._args: unknown[]): Promise<void> => {
+			dispatched.push(name);
+		};
 	runInNewContext(
 		compiled,
 		{
@@ -36,20 +39,27 @@ function fixture() {
 			CursorKeyedObservations,
 			HostComputer: Object,
 			InputLock: class {
-				run = effect;
+				run = <T>(burst: () => Promise<T>): Promise<T> => {
+					locked++;
+					return burst();
+				};
 			},
 			MacOSInputController: class {
-				constructor() {
-					controllers++;
+				constructor(...args: unknown[]) {
+					controllerArgs.push(args);
 				}
-				move = effect;
-				click = effect;
-				typeText = effect;
-				setMode = effect;
+				readonly currentTargetPid = 4242;
+				move = record("move");
+				click = record("click");
+				doubleClick = record("doubleClick");
+				typeText = record("typeText");
+				scroll = record("scroll");
+				drag = record("drag");
 			},
 			denyHostInteraction,
+			isOwnedSurfacePid: () => false,
 			cursorMotionFromEnvironment: () => undefined,
-			NOOP_POINTER_OVERLAY: { highlight: effect, set: effect },
+			NOOP_POINTER_OVERLAY: { highlight: () => undefined, set: () => undefined },
 			NOOP_DISPLAY_SLEEP: {},
 			isScreenLocked: () => false,
 		},
@@ -59,67 +69,74 @@ function fixture() {
 	if (typeof hostConstructor !== "function") throw new Error("Missing host constructor");
 	const instance: unknown = Reflect.construct(hostConstructor, []);
 	if (typeof instance !== "object" || instance === null) throw new Error("Missing host instance");
-	return { hostConstructor, instance, effects: () => effects, controllers: () => controllers };
+	return { hostConstructor, instance, dispatched, controllerArgs, locked: () => locked };
 }
 
-describe("#given the shared host #when input is requested #then it remains observation-only", () => {
-	it("advertises no input or shared clipboard capability", () => {
+function method(instance: object, name: string): (...args: unknown[]) => unknown {
+	const found: unknown = Reflect.get(instance, name);
+	if (typeof found !== "function") throw new Error(`Missing method: ${name}`);
+	return (...args) => Reflect.apply(found, instance, args);
+}
+
+describe("#given the macOS host #when its capabilities are read #then the person's apps take background input", () => {
+	it("advertises screenshot, input and clipboard capability", () => {
 		const { instance } = fixture();
 		expect(Reflect.get(instance, "capabilities")).toEqual({
-			supportsScreenshot: false,
-			supportsInput: false,
+			supportsScreenshot: true,
+			supportsInput: true,
 			supportsAccessibility: true,
-			supportsClipboard: false,
+			supportsClipboard: true,
 		});
 		expect(Object.isFrozen(Reflect.get(instance, "capabilities"))).toBe(true);
 	});
 
+	it("builds its input controller with background activation off, because activation is a host-focus primitive", () => {
+		const { controllerArgs } = fixture();
+		expect(controllerArgs).toHaveLength(1);
+		expect(controllerArgs[0]?.[4]).toBe("background");
+		expect(controllerArgs[0]?.[5]).toBe(false);
+	});
+});
+
+describe("#given the macOS host #when attended delivery is requested #then global input stays refused", () => {
 	it("rejects attended construction before creating an input controller", () => {
-		const { hostConstructor, effects, controllers } = fixture();
-		const built = controllers();
+		const { hostConstructor, controllerArgs, dispatched } = fixture();
 		expect(() => Reflect.construct(hostConstructor, [{ delivery: "attended" }])).toThrow(HostInteractionDenied);
-		expect(controllers()).toBe(built);
-		expect(effects()).toBe(0);
+		expect(controllerArgs).toHaveLength(1);
+		expect(dispatched).toEqual([]);
 	});
+});
 
+describe("#given the macOS host #when a host app gets input #then it reaches the input controller under the input lock", () => {
 	it.each([
-		"screenshot",
-		"move",
-		"click",
-		"rightClick",
-		"middleClick",
-		"doubleClick",
-		"type",
-		"key",
-		"invokeMenu",
-		"scroll",
-		"drag",
-		"getCursorPosition",
-		"setValue",
-		"selectText",
-		"performAction",
-		"pressAtPosition",
-		"scrollElementIntoView",
-		"showPointerAt",
-		"typeIntoFocused",
-	])("refuses %s before dispatching any input", async (method) => {
-		const { instance, effects } = fixture();
-		const dispatch: unknown = Reflect.get(instance, method);
-		if (typeof dispatch !== "function") throw new Error(`Missing method: ${method}`);
-		await expect(Promise.resolve().then(() => Reflect.apply(dispatch, instance, []))).rejects.toBeInstanceOf(
-			HostInteractionDenied,
-		);
-		expect(effects()).toBe(0);
+		{ name: "move", args: [{ x: 1, y: 2 }], expected: "move" },
+		{ name: "click", args: [{ x: 1, y: 2 }], expected: "click" },
+		{ name: "rightClick", args: [{ x: 1, y: 2 }], expected: "click" },
+		{ name: "doubleClick", args: [{ x: 1, y: 2 }], expected: "doubleClick" },
+		{ name: "type", args: ["hello"], expected: "typeText" },
+		{ name: "scroll", args: [{ x: 1, y: 2, deltaY: 3 }], expected: "scroll" },
+		{ name: "drag", args: [{ from: { x: 1, y: 2 }, to: { x: 3, y: 4 } }], expected: "drag" },
+	])("dispatches $name for a pid opencua did not launch", async ({ name, args, expected }) => {
+		const { instance, dispatched, locked } = fixture();
+		await method(instance, name)(...args);
+		expect(dispatched).toEqual([expected]);
+		expect(locked()).toBe(1);
 	});
 
-	it("reports an isolation requirement before reading observation state", async () => {
-		const { instance, effects } = fixture();
-		const preflight: unknown = Reflect.get(instance, "preflightInput");
-		if (typeof preflight !== "function") throw new Error("Missing preflightInput");
-		await expect(Reflect.apply(preflight, instance, [])).resolves.toEqual({
+	it("checks the stored observation instead of refusing the host outright", async () => {
+		const { instance, dispatched } = fixture();
+		const expected = {
+			pid: 4242,
+			bundleId: "com.apple.calculator",
+			windowId: 7,
+			windowBounds: { x: 0, y: 0, width: 100, height: 100 },
+			generation: 1,
+			observedElementIds: new Set<number>(),
+		};
+		await expect(method(instance, "preflightInput")(expected)).resolves.toEqual({
 			ok: false,
-			reason: "isolated-session-required",
+			reason: "observation-replaced",
 		});
-		expect(effects()).toBe(0);
+		expect(dispatched).toEqual([]);
 	});
 });

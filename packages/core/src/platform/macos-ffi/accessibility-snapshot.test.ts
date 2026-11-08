@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
-/** Host AX mutations are refused before any native call; observation keeps working. */
-const HOST_WINDOW_REFUSAL = /host-window cannot operate on the human desktop/;
-
 const koffiMock = vi.hoisted(() => {
 	type Reference = {
 		readonly type: string;
@@ -424,7 +421,7 @@ describe("#given an app with a focused window", () => {
 });
 
 describe("#given a window-scoped accessibility walk", () => {
-	it("#when an off-Space window is exposed only as AXFocusedWindow #then its controls remain observed and a host action is refused", async () => {
+	it("#when an off-Space window is exposed only as AXFocusedWindow #then its controls remain observed and actionable", async () => {
 		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
 		koffiMock.applicationElement.children = [];
 		koffiMock.applicationElement.windows = [];
@@ -436,8 +433,8 @@ describe("#given a window-scoped accessibility walk", () => {
 		expect(state.windowTitle).toBe("Fixture");
 		expect(state.elements.map((element) => element.role)).toEqual(["AXWindow", "AXTextField", "AXButton"]);
 		if (button === undefined) throw new Error("focused window button was not observed");
-		expect(() => performActionByIndex(process.pid, button.id, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		performActionByIndex(process.pid, button.id, "AXPress");
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 
 	it("#when the focused off-Space window has a different id #then it is not attributed to the requested window", async () => {
@@ -474,8 +471,8 @@ describe("#given a window-scoped accessibility walk", () => {
 			expect(scoped.elements.map((element) => element.role)).not.toContain("AXMenuBar");
 			expect(item).toMatchObject({ role: "AXMenuItem", actions: ["AXPress"] });
 			if (item === undefined) throw new Error("menu item was not observed");
-			expect(() => performActionByIndex(process.pid, item.id, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-			expect(koffiMock.observableState.pressedTitles).toEqual([]);
+			performActionByIndex(process.pid, item.id, "AXPress");
+			expect(koffiMock.observableState.pressedTitles).toEqual(["Choose"]);
 		},
 	);
 
@@ -514,8 +511,8 @@ describe("#given a window-scoped accessibility walk", () => {
 		]);
 		const button = scoped.elements.find((element) => element.label === "Hidden Target Button");
 		if (button === undefined) throw new Error("hidden window button was not observed");
-		expect(() => performActionByIndex(process.pid, button.id, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressedTitles).toEqual([]);
+		performActionByIndex(process.pid, button.id, "AXPress");
+		expect(koffiMock.observableState.pressedTitles).toEqual(["Hidden Target Button"]);
 		expect(koffiMock.observableState.pressCount).toBe(0);
 	});
 
@@ -653,7 +650,7 @@ describe("#given a subtree observation #when an element index from the previous 
 		expect(() => isWebElementByIndex(process.pid, 999)).toThrow();
 	});
 
-	it("#given browser layout wrappers #when observed at the default depth #then the nested toolbar stays resolvable while host actions are refused", async () => {
+	it("#given browser layout wrappers #when observed at the default depth #then the nested toolbar remains actionable", async () => {
 		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
 		const button = {
 			type: "ax",
@@ -674,8 +671,8 @@ describe("#given a subtree observation #when an element index from the previous 
 		const target = state.elements.find((element) => element.label === "Nested Toolbar Action");
 		expect(state.truncated).toBe(false);
 		if (target === undefined) throw new Error("nested toolbar control was omitted");
-		expect(() => performActionByIndex(process.pid, target.id, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressedTitles).toEqual([]);
+		performActionByIndex(process.pid, target.id, "AXPress");
+		expect(koffiMock.observableState.pressedTitles).toEqual(["Nested Toolbar Action"]);
 	});
 
 	it("marks omitted descendants as truncated and reveals deeper controls in a subtree", async () => {
@@ -702,8 +699,8 @@ describe("#given a subtree observation #when an element index from the previous 
 		expect(subtree.elements.map((element) => element.label)).toEqual(["Middle", "Deep Button"]);
 		const button = subtree.elements.find((element) => element.label === "Deep Button");
 		if (button === undefined) throw new Error("deep button was not observed");
-		expect(() => performActionByIndex(process.pid, button.id, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressedTitles).toEqual([]);
+		performActionByIndex(process.pid, button.id, "AXPress");
+		expect(koffiMock.observableState.pressedTitles).toEqual(["Deep Button"]);
 	});
 
 	it("does not mark a boundary leaf truncated when it has no children", async () => {
@@ -742,9 +739,9 @@ describe("#given a subtree observation #when an element index from the previous 
 		extractAccessibilityTree(process.pid, { windowId: 42 });
 		extractAccessibilityTree(process.pid, { windowId: 42, subtreeOf: 2 });
 
-		expect(() => performActionByIndex(process.pid, 0, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
+		performActionByIndex(process.pid, 0, "AXPress");
 
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 });
 
@@ -757,8 +754,8 @@ describe("#given a subtree request #when the index is not part of the observatio
 			/not part of the current observation/,
 		);
 
-		expect(() => performActionByIndex(process.pid, 2, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		performActionByIndex(process.pid, 2, "AXPress");
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 
 	it("rejects a negative index", async () => {
@@ -804,8 +801,8 @@ describe("#given a settle poll #when it runs with a smaller budget #then the obs
 		const subtree = extractAccessibilityTree(process.pid, { windowId: 42, subtreeOf: 2 });
 		expect(subtree.elements.map((element) => element.role)).toEqual(["AXButton"]);
 
-		expect(() => performActionByIndex(process.pid, 0, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		performActionByIndex(process.pid, 0, "AXPress");
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 });
 
@@ -825,15 +822,15 @@ describe("#given a snapshot whose control was recycled #when the observed id is 
 		expect(koffiMock.observableState.pressCount).toBe(0);
 	});
 
-	it("still resolves an unchanged control, which the host then refuses", async () => {
+	it("still dispatches when the control is unchanged", async () => {
 		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
 		const snapshot = extractAccessibilityTree(process.pid);
 		const button = snapshot.elements.find((element) => element.label === "Target Button");
 		expect(button).toBeDefined();
 
-		expect(() => performActionByIndex(process.pid, button?.id ?? -1, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
+		performActionByIndex(process.pid, button?.id ?? -1, "AXPress");
 
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 });
 
@@ -862,16 +859,16 @@ describe("#given an observation key #when walks and polls run #then the key trac
 });
 
 describe("#given an AX element index from an accessibility snapshot", () => {
-	it("#when the live hierarchy shifts #then the snapshotted element still resolves and the host action is refused", async () => {
+	it("#when the live hierarchy shifts #then the action still targets the snapshotted element", async () => {
 		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
 		const snapshot = extractAccessibilityTree(process.pid);
 		const button = snapshot.elements.find((element) => element.label === "Target Button");
 		expect(button).toBeDefined();
 
 		koffiMock.windowElement.children = [koffiMock.insertedPrefix, koffiMock.textField, koffiMock.targetButton];
-		expect(() => performActionByIndex(process.pid, button?.id ?? -1, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
+		performActionByIndex(process.pid, button?.id ?? -1, "AXPress");
 
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 
 	it("#when a live node appears past the snapshot #then an unobserved id is rejected without acting", async () => {
@@ -885,20 +882,20 @@ describe("#given an AX element index from an accessibility snapshot", () => {
 		expect(koffiMock.accessibilityFunctions.AXUIElementPerformAction).not.toHaveBeenCalled();
 	});
 
-	it("#when a cached value target shifts #then the value write resolves the observed field and is refused", async () => {
+	it("#when a cached value target shifts #then the observed field value changes", async () => {
 		const { extractAccessibilityTree, setValueByIndex } = await import("./accessibility.js");
 		const snapshot = extractAccessibilityTree(process.pid);
 		const field = snapshot.elements.find((element) => element.label === "Editable");
 		expect(field).toBeDefined();
 
 		koffiMock.windowElement.children = [koffiMock.insertedPrefix, koffiMock.textField, koffiMock.targetButton];
-		expect(() => setValueByIndex(process.pid, field?.id ?? -1, "updated")).toThrow(HOST_WINDOW_REFUSAL);
+		setValueByIndex(process.pid, field?.id ?? -1, "updated");
 
-		expect(koffiMock.observableState.fieldValue).toBe("initial");
+		expect(koffiMock.observableState.fieldValue).toBe("updated");
 		expect(koffiMock.observableState.pressCount).toBe(0);
 	});
 
-	it("#when a cached selection target shifts #then the selection resolves the observed field and is refused", async () => {
+	it("#when a cached selection target shifts #then selection applies to the observed field", async () => {
 		const { extractAccessibilityTree } = await import("./accessibility.js");
 		const { selectTextByIndex } = await import("./select-text.js");
 		const snapshot = extractAccessibilityTree(process.pid);
@@ -906,23 +903,23 @@ describe("#given an AX element index from an accessibility snapshot", () => {
 		expect(field).toBeDefined();
 
 		koffiMock.windowElement.children = [koffiMock.insertedPrefix, koffiMock.textField, koffiMock.targetButton];
-		expect(() => selectTextByIndex(process.pid, field?.id ?? -1, { selection: "text", text: "nit" })).toThrow(
-			HOST_WINDOW_REFUSAL,
-		);
+		selectTextByIndex(process.pid, field?.id ?? -1, { selection: "text", text: "nit" });
 
-		expect(koffiMock.observableState.selection).toBeNull();
+		expect(koffiMock.observableState.selection).toEqual({ location: 1, length: 3 });
 		expect(koffiMock.observableState.pressCount).toBe(0);
 	});
 
-	it("#when observed controls are pressed #then the host refusal precedes any native call and the snapshot remains usable", async () => {
+	it("#when AXPress is unsupported #then the native error is preserved and the snapshot remains usable", async () => {
 		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
 		const snapshot = extractAccessibilityTree(process.pid);
 		const field = snapshot.elements.find((element) => element.label === "Editable");
 		const button = snapshot.elements.find((element) => element.label === "Target Button");
 
-		expect(() => performActionByIndex(process.pid, field?.id ?? -1, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(() => performActionByIndex(process.pid, button?.id ?? -1, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		expect(() => performActionByIndex(process.pid, field?.id ?? -1, "AXPress")).toThrow(
+			"AXUIElementPerformAction failed with AXError -25206",
+		);
+		performActionByIndex(process.pid, button?.id ?? -1, "AXPress");
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 });
 
@@ -978,8 +975,8 @@ describe("#given retained accessibility snapshots", () => {
 		expect(koffiMock.coreFoundationFunctions.CFRelease).toHaveBeenCalledTimes(4);
 
 		koffiMock.windowElement.children = [koffiMock.insertedPrefix, koffiMock.textField, koffiMock.targetButton];
-		expect(() => performActionByIndex(process.pid, 4, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
-		expect(koffiMock.observableState.pressCount).toBe(0);
+		performActionByIndex(process.pid, 4, "AXPress");
+		expect(koffiMock.observableState.pressCount).toBe(1);
 	});
 
 	it("#when the observed pid dies #then action lookup invalidates and releases its snapshot", async () => {
@@ -1037,7 +1034,7 @@ describe("#given an outline that holds more rows than it shows #when it is walke
 		expect(shown.walkKey).not.toBe(whole.walkKey);
 	});
 
-	it("resolves the row an id names, with the ids numbered over the shown rows only", async () => {
+	it("acts on the row an id names, with the ids numbered over the shown rows only", async () => {
 		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
 		koffiMock.windowElement.children = [koffiMock.outlineElement];
 		const outline = extractAccessibilityTree(process.pid, { windowId: 42 }).elements.find(
@@ -1050,10 +1047,10 @@ describe("#given an outline that holds more rows than it shows #when it is walke
 			visibleOnly: true,
 		});
 		const row = page.elements.find((element) => element.label === "row-2");
-		expect(() => performActionByIndex(process.pid, row?.id ?? -1, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
+		performActionByIndex(process.pid, row?.id ?? -1, "AXPress");
 
 		expect(page.elements.map((element) => element.label)).toEqual(["list", "row-1", "row-2"]);
-		expect(koffiMock.observableState.pressedTitles).toEqual([]);
+		expect(koffiMock.observableState.pressedTitles).toEqual(["row-2"]);
 	});
 
 	it("finds the same row when the element has to be located by walking again", async () => {
@@ -1063,8 +1060,8 @@ describe("#given an outline that holds more rows than it shows #when it is walke
 		const shown = extractAccessibilityTree(process.pid, { windowId: 42, visibleOnly: true, maxElements: 50 });
 		const row = shown.elements.find((element) => element.label === "row-2");
 
-		expect(() => performActionByIndex(process.pid, row?.id ?? -1, "AXPress")).toThrow(HOST_WINDOW_REFUSAL);
+		performActionByIndex(process.pid, row?.id ?? -1, "AXPress");
 
-		expect(koffiMock.observableState.pressedTitles).toEqual([]);
+		expect(koffiMock.observableState.pressedTitles).toEqual(["row-2"]);
 	});
 });

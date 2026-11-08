@@ -1,6 +1,5 @@
 import type { KoffiFunc } from "koffi";
 import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
-import { isOwnedSurfacePid } from "../owned-surfaces.js";
 import type { CGEventRef, CGPoint } from "./coregraphics-types.js";
 import { koffi } from "./koffi.js";
 
@@ -23,18 +22,14 @@ export interface FocusRestoreToken {
 }
 
 const skyLight = koffi.load("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight");
+const coreGraphics = koffi.load("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics");
 const objc = koffi.load("/usr/lib/libobjc.A.dylib");
 const CG_POINT = koffi.struct("SLCGPoint", { x: "double", y: "double" });
 
-const SLEventPostToPidNative = skyLight.func("SLEventPostToPid", "void", ["int32_t", "void *"]) as KoffiFunc<
+/** Background per-process delivery: the event reaches one app without the HID stream, focus or the pointer. */
+const SLEventPostToPid = skyLight.func("SLEventPostToPid", "void", ["int32_t", "void *"]) as KoffiFunc<
 	(pid: number, event: CGEventRef) => void
 >;
-
-/** Host events reach only windows opencua launched itself; every other process stays refused. */
-function SLEventPostToPid(pid: number, event: CGEventRef): void {
-	if (!isOwnedSurfacePid(pid)) denyHostInteraction("host-window");
-	SLEventPostToPidNative(pid, event);
-}
 
 const SLEventSetAuthenticationMessage = skyLight.func("SLEventSetAuthenticationMessage", "void", [
 	"void *",
@@ -53,9 +48,9 @@ const CGEventSetWindowLocation = skyLight.func("CGEventSetWindowLocation", "void
 
 const CGSMainConnectionID = skyLight.func("CGSMainConnectionID", "uint32_t", []) as KoffiFunc<() => number>;
 
-function SLPSPostEventRecordTo(_psn: Buffer, _eventRecord: object): never {
-	return denyHostInteraction("host-window");
-}
+const SLPSPostEventRecordTo = skyLight.func("SLPSPostEventRecordTo", "int32_t", ["void *", "void *"]) as KoffiFunc<
+	(psn: Buffer, eventRecord: object) => number
+>;
 
 const _SLPSGetFrontProcess = skyLight.func("_SLPSGetFrontProcess", "int32_t", ["void *"]) as KoffiFunc<
 	(psn: Buffer) => number
@@ -71,9 +66,9 @@ const SLSGetConnectionPSN = skyLight.func("SLSGetConnectionPSN", "int32_t", ["ui
 	(connection: number, psn: Buffer) => number
 >;
 
-function CGEventPostToPSN(_psn: Buffer, _event: CGEventRef): never {
-	return denyHostInteraction("host-window");
-}
+const CGEventPostToPSN = coreGraphics.func("CGEventPostToPSN", "void", ["void *", "void *"]) as KoffiFunc<
+	(psn: Buffer, event: CGEventRef) => void
+>;
 
 const objcGetClass = objc.func("objc_getClass", "void *", ["str"]) as KoffiFunc<(name: string) => object | null>;
 const selRegisterName = objc.func("sel_registerName", "void *", ["str"]) as KoffiFunc<(name: string) => object | null>;
@@ -124,7 +119,7 @@ export function buildMouseEventRecord(window: SkyLightTargetWindow, eventType: n
 }
 
 /**
- * The former foreground transport is forbidden on the shared host.
+ * The foreground transport (it brings the target process forward) stays forbidden on the host.
  */
 export function postMouseEventRecordToWindow(
 	_window: SkyLightTargetWindow,
@@ -161,7 +156,7 @@ export function activateWindowWithoutRaise(_window: SkyLightTargetWindow): boole
 }
 
 /**
- * Synthesizing activation on the shared host is not an isolation mechanism.
+ * Synthesized activation changes which app believes it is active, so it stays forbidden on the host.
  */
 export function setProcessAppActive(_psn: Buffer, _windowId: number, _active: boolean): boolean {
 	return denyHostInteraction("host-focus");

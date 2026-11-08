@@ -154,13 +154,17 @@ beforeEach(() => {
 			],
 		}),
 	);
-	// The only execFile call is getRunningMacOSApps (osascript JXA): the human desktop is never captured.
+	// First execFile call: getRunningMacOSApps (osascript JXA). Second: window screenshot (sh).
 	childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
 		callback(
 			null,
 			JSON.stringify([{ name: "Finder", bundleId: "com.apple.finder", pid: TARGET_PID, isActive: true }]),
 			"",
 		);
+	});
+	childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
+		// The sips step would resize to 1280x800; mirror that in the returned png header.
+		callback(null, fakePng(2560, 1600), "");
 	});
 });
 
@@ -272,8 +276,8 @@ describe("#given one observation #when the driver resolves its target window and
 	});
 });
 
-describe("#given an injected overlay #when observing in background #then nothing is drawn on the human desktop", () => {
-	it("observes the window and elements without highlighting them", async () => {
+describe("#given an injected overlay #when observing in background #then the drawn marker shows what is being read", () => {
+	it("highlights the observed window while retaining the observed window and elements", async () => {
 		const overlay = {
 			set: vi.fn(),
 			track: vi.fn(),
@@ -288,8 +292,8 @@ describe("#given an injected overlay #when observing in background #then nothing
 
 			expect(state.windowId).toBe(99);
 			expect(state.elements).not.toHaveLength(0);
-			// The human desktop is observed without drawing a marker or highlight over it.
-			expect(overlay.highlight).not.toHaveBeenCalled();
+			// Background cues are on by default: observing highlights the read region on the drawn marker.
+			expect(overlay.highlight).toHaveBeenCalled();
 		} finally {
 			await computer.close();
 		}
@@ -375,9 +379,9 @@ describe("#given a window that appears just after the first look #when a window 
 	});
 });
 
-describe("#given Screen Recording granted on the human desktop #when get_app_state is asked for an image #then it still observes without capturing", () => {
-	it("returns the elements and the isolation reason, and never starts a capture", async () => {
-		screenshotMock.screenCaptureAllowed.mockReturnValue(true);
+describe("#given no Screen Recording permission #when get_app_state is asked for an image #then it observes without capturing", () => {
+	it("returns the elements and the reason, and never starts a capture that would raise the permission prompt", async () => {
+		screenshotMock.screenCaptureAllowed.mockReturnValue(false);
 		const capturesBefore = screenshotMock.captureWindowImage.mock.calls.length;
 		const subprocessesBefore = childProcessMock.execFile.mock.calls.length;
 		try {
@@ -385,7 +389,7 @@ describe("#given Screen Recording granted on the human desktop #when get_app_sta
 
 			const state = await computer.getAppState(TARGET_PID, { settleMs: 0 });
 
-			expect(state.screenshotUnavailable).toBe("isolated-session-required");
+			expect(state.screenshotUnavailable).toBe("screen-recording-permission");
 			expect(state.screenshotBase64).toBe("");
 			expect(state.elements.map((element) => element.id)).toEqual([5]);
 			// Neither the in-process capture nor the screencapture fallback ran; only the app lookup did.
@@ -528,7 +532,7 @@ describe("#given an app with several windows #when the observation resolves a ta
 		expect(state.windowId).toBe(99);
 		expect(state.windowBounds).toEqual(WINDOW_BOUNDS);
 		expect(accessibilityMock.extractAccessibilityTree).toHaveBeenCalledWith(TARGET_PID, { windowId: 99 });
-		expect(screenshotMock.captureWindowImage).not.toHaveBeenCalled();
+		expect(screenshotMock.captureWindowImage.mock.calls[0]?.[0]).toBe(99);
 	});
 
 	it("names every candidate by the title the app reports when the WindowServer withholds titles", async () => {
@@ -574,7 +578,7 @@ describe("#given an app with several windows #when the observation resolves a ta
 		expect(state.windowId).toBe(42);
 		expect(accessibilityMock.focusedWindowIdsForObservationPid).not.toHaveBeenCalled();
 		expect(accessibilityMock.extractAccessibilityTree).toHaveBeenCalledWith(TARGET_PID, { windowId: 42 });
-		expect(screenshotMock.captureWindowImage).not.toHaveBeenCalled();
+		expect(screenshotMock.captureWindowImage.mock.calls[0]?.[0]).toBe(42);
 	});
 
 	it("reports no candidates when the app has a single window", async () => {
@@ -598,6 +602,9 @@ describe("#given two get_app_state calls #when the second runs #then it reports 
 					"",
 				);
 			});
+			childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
+				callback(null, fakePng(2560, 1600), "");
+			});
 		}
 		const computer = new MacOSHostComputer({ delivery: "background" });
 
@@ -618,6 +625,9 @@ describe("#given two get_app_state calls #when the second runs #then it reports 
 					"",
 				);
 			});
+			childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
+				callback(null, fakePng(2560, 1600), "");
+			});
 		}
 		const computer = new MacOSHostComputer({ delivery: "background" });
 
@@ -637,6 +647,9 @@ describe("#given two get_app_state calls #when the second runs #then it reports 
 					JSON.stringify([{ name: "Finder", bundleId: "com.apple.finder", pid: TARGET_PID, isActive: true }]),
 					"",
 				);
+			});
+			childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
+				callback(null, fakePng(2560, 1600), "");
 			});
 		}
 		const baseElement = {
@@ -680,6 +693,9 @@ describe("#given diff_only mode #when a prior snapshot exists #then the full tre
 					"",
 				);
 			});
+			childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
+				callback(null, fakePng(2560, 1600), "");
+			});
 		}
 		const computer = new MacOSHostComputer();
 
@@ -707,6 +723,9 @@ describe("#given an app-approval store #when an app is not approved #then get_ap
 		);
 		childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
 			callback(null, appsJson, ""),
+		);
+		childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+			callback(null, fakePng(2560, 1600), ""),
 		);
 		const approval = new AppApprovalStore([]);
 		const computer = new MacOSHostComputer({ appApproval: approval });
@@ -768,8 +787,8 @@ describe("#given a URL blocklist #when a browser is on a blocked URL #then get_a
 	});
 });
 
-describe("#given a fresh app session #when get_app_state runs #then the human desktop gets no capture-start highlight", () => {
-	it("never highlights across windowed calls", async () => {
+describe("#given a fresh app session #when get_app_state runs #then it highlights the window once", () => {
+	it("fires the capture-start highlight on the first windowed call only", async () => {
 		const overlay = { set: vi.fn(), highlight: vi.fn(), setMode: vi.fn(), hide: vi.fn(), close: vi.fn() };
 		const appsJson = JSON.stringify([
 			{ name: "Finder", bundleId: "com.apple.finder", pid: TARGET_PID, isActive: true },
@@ -779,13 +798,17 @@ describe("#given a fresh app session #when get_app_state runs #then the human de
 			childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
 				callback(null, appsJson, ""),
 			);
+			childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) =>
+				callback(null, fakePng(2560, 1600), ""),
+			);
 		}
 		const computer = new MacOSHostComputer({ overlay, delivery: "background" });
 
 		await computer.getAppState(TARGET_PID, { settleMs: 0 });
 		await computer.getAppState(TARGET_PID, { settleMs: 0 });
 
-		expect(overlay.highlight).not.toHaveBeenCalled();
+		expect(overlay.highlight).toHaveBeenCalledTimes(1);
+		expect(overlay.highlight).toHaveBeenCalledWith(WINDOW_BOUNDS, TARGET_PID);
 	});
 });
 
@@ -819,10 +842,8 @@ describe("#given a noisy accessibility tree #when get_app_state runs #then non-d
 		const state = await computer.getAppState(TARGET_PID, { settleMs: 0 });
 
 		expect(state.elements.map((element) => element.id)).toEqual([5]);
-		await expect(computer.performAction(TARGET_PID, state.elements[0]?.id ?? -1, "AXPress")).rejects.toThrow(
-			/host-window cannot operate on the human desktop/,
-		);
-		expect(accessibilityMock.performActionByIndex).not.toHaveBeenCalled();
+		await computer.performAction(TARGET_PID, state.elements[0]?.id ?? -1, "AXPress");
+		expect(accessibilityMock.performActionByIndex).toHaveBeenCalledWith(TARGET_PID, 5, "AXPress");
 	});
 });
 
@@ -835,6 +856,9 @@ describe("#given a known app #when get_app_state runs #then it includes the app-
 				JSON.stringify([{ name: "Clock", bundleId: "com.apple.clock", pid: TARGET_PID, isActive: true }]),
 				"",
 			);
+		});
+		childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
+			callback(null, fakePng(2560, 1600), "");
 		});
 		const computer = new MacOSHostComputer();
 
@@ -975,12 +999,12 @@ describe("#given an observed AX app #when the host closes #then its retained acc
 	});
 });
 
-describe("#given an inactive observed app #when opening a native menu #then the human desktop refuses it before any activation", () => {
+describe("#given an inactive observed app #when opening a native menu #then the app is held active only behind the front app", () => {
 	it.each([
 		["AXPopUpButton", "AXPress"],
 		["AXMenuButton", "AXPress"],
 		["AXTextArea", "AXShowMenu"],
-	])("refuses %s %s without holding the app active or dispatching", async (role, action) => {
+	])("activates %s for %s before dispatch", async (role, action) => {
 		accessibilityMock.extractAccessibilityTree.mockReturnValue({
 			axAvailable: true,
 			truncated: false,
@@ -1010,12 +1034,18 @@ describe("#given an inactive observed app #when opening a native menu #then the 
 					held = false;
 				}
 			});
+		accessibilityMock.performActionByIndex.mockImplementation(() => {
+			expect(held).toBe(true);
+		});
 		try {
-			await expect(computer.performAction(TARGET_PID, 5, action)).rejects.toThrow(
-				/host-window cannot operate on the human desktop/,
+			await computer.performAction(TARGET_PID, 5, action);
+			expect(activation).toHaveBeenCalledWith(
+				TARGET_PID,
+				{ id: 99, bounds: WINDOW_BOUNDS },
+				expect.any(Function),
+				expect.any(Function),
 			);
-			expect(activation).not.toHaveBeenCalled();
-			expect(accessibilityMock.performActionByIndex).not.toHaveBeenCalled();
+			expect(accessibilityMock.performActionByIndex).toHaveBeenCalledWith(TARGET_PID, 5, action);
 			expect(held).toBe(false);
 		} finally {
 			activation.mockRestore();
@@ -1049,6 +1079,9 @@ describe("#given a window on a secondary display #when get_app_state remaps fram
 				JSON.stringify([{ name: "Finder", bundleId: "com.apple.finder", pid: TARGET_PID, isActive: true }]),
 				"",
 			);
+		});
+		childProcessMock.execFile.mockImplementationOnce((_file, _args, _options, callback) => {
+			callback(null, fakePng(960, 600), "");
 		});
 		const computer = new MacOSHostComputer({ delivery: "background" });
 

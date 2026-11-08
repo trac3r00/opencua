@@ -54,7 +54,6 @@ import {
 	setProcessAppActive,
 } from "./macos-ffi/skylight.js";
 import { listOnscreenWindows, listWindows } from "./macos-ffi/window-list.js";
-import { startFocusStealWatch } from "./macos-focus-watch.js";
 import { dragSteps, interpolatePointEased, pointerTravelDuration, scrollEventPlan } from "./macos-input-drag.js";
 import { pointerModifierFlags, withHeldModifiers } from "./macos-input-modifiers.js";
 import {
@@ -126,17 +125,12 @@ let keyboardWindowFocuser: (pid: number, windowId: number) => Promise<void> = as
 
 /**
  * Some apps activate themselves in response to background keys (Finder's Go to Folder panel), which
- * would pull the person out of the app they are using. Background delivery snapshots who was
- * frontmost before the input and, if the target app takes the front shortly after, sends it back
- * (polling every few milliseconds, off this thread; see macos-focus-watch.ts). A third app coming
- * forward is left alone.
+ * would pull the person out of the app they are using. A watcher could send the person's app back
+ * (see macos-focus-watch.ts), but that takes restoreFrontProcessNoWindows, a host-focus primitive
+ * that stays refused on the host, so no watch runs here: a watch would throw from its timer. A target that
+ * activates itself keeps the front until the person switches back.
  */
-let focusStealWatcher: (window: SkyLightTargetWindow) => void = (window) => {
-	const guard = focusGuardFor(window);
-	if (guard !== null) {
-		startFocusStealWatch(guard);
-	}
-};
+let focusStealWatcher: (window: SkyLightTargetWindow) => void = () => undefined;
 
 /** The same focus guard for accessibility presses, which can activate an app just as keys can. */
 export function guardAgainstFocusSteal(window: SkyLightTargetWindow): void {

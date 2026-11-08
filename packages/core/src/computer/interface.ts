@@ -24,13 +24,7 @@ export interface ScreenshotResult {
 /** Text read from the pixels of an app window, or why the pixels could not be read. */
 export type WindowTextRead =
 	| { readonly entries: readonly OcrTextEntry[] }
-	| {
-			readonly unavailable:
-				| "isolated-session-required"
-				| "screen-recording-permission"
-				| "no-window"
-				| "recognition-failed";
-	  };
+	| { readonly unavailable: "screen-recording-permission" | "no-window" | "recognition-failed" };
 
 export interface ComputerInterface {
 	readonly capabilities: ComputerCapabilities;

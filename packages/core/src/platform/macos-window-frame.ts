@@ -1,6 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { KoffiFunc } from "koffi";
-import { denyHostInteraction } from "../computer/host-interaction-policy.js";
 import type { Rect } from "../types/index.js";
 import {
 	type AXUIElementRef,
@@ -53,7 +52,6 @@ export async function setWindowFrame(
 	requested: Rect,
 	dependencies: WindowFrameDependencies = nativeWindowFrameDependencies,
 ): Promise<SetWindowFrameResult> {
-	if (dependencies === nativeWindowFrameDependencies) denyHostInteraction("host-window");
 	validateFrame(requested);
 	const initialFrames = await dependencies.windowFrames();
 	const initial = initialFrames.find((window) => window.id === windowId);

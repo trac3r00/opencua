@@ -38,8 +38,6 @@ const { NOOP_POINTER_OVERLAY } = await import("./macos-ffi/cursor-overlay.js");
 const { MacOSInputController } = await import("./macos-input.js");
 const { MacOSHostComputer } = await import("./macos.js");
 
-const HOST_REFUSAL = /host-window cannot operate on the human desktop/;
-
 describe("#given Finder commands that activate their app", () => {
 	let computer: InstanceType<typeof MacOSHostComputer>;
 	beforeEach(() => {
@@ -97,20 +95,20 @@ describe("#given Finder commands that activate their app", () => {
 		expect(menu.invokeMenu).not.toHaveBeenCalled();
 	});
 
-	it("#when another Finder menu command is requested #then the human desktop refuses its native menu route too", async () => {
-		await expect(computer.invokeMenu(4242, ["File", "New Folder"])).rejects.toThrow(HOST_REFUSAL);
-		expect(menu.invokeMenu).not.toHaveBeenCalled();
+	it("#when another Finder menu command is requested #then preserves its native menu route", async () => {
+		await computer.invokeMenu(4242, ["File", "New Folder"]);
+		expect(menu.invokeMenu).toHaveBeenCalledWith(4242, ["File", "New Folder"]);
 	});
 
-	it("#when Finder is already the person's front app #then the key route is refused rather than typed into their app", async () => {
+	it("#when Finder is already the person's front app #then keeps the existing key route", async () => {
 		state.frontmost = true;
-		await expect(goToFolder()).rejects.toThrow(HOST_REFUSAL);
-		expect(MacOSInputController.prototype.pressKey).not.toHaveBeenCalled();
+		await goToFolder();
+		expect(MacOSInputController.prototype.pressKey).toHaveBeenCalledWith("g", { modifiers: ["shift", "cmd"] });
 	});
 
-	it("#when another app uses the same chord #then its menu route is refused as well", async () => {
+	it("#when another app uses the same chord #then keeps its existing menu route", async () => {
 		state.bundleId = "com.example.editor";
-		await expect(goToFolder()).rejects.toThrow(HOST_REFUSAL);
-		expect(menu.pressMenuItem).not.toHaveBeenCalled();
+		await goToFolder();
+		expect(menu.pressMenuItem).toHaveBeenCalledWith(4242, ["Go", "Go to Folder…"]);
 	});
 });

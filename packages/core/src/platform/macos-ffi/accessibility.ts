@@ -1,6 +1,5 @@
 import type { KoffiFunc } from "koffi";
 import type { AXTreeElement } from "../../accessibility/types.js";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
 import { AX_ERROR_CANNOT_COMPLETE, resolveAxMessagingTimeoutSeconds } from "./ax-timeout.js";
 import {
 	type CFArrayRef,
@@ -186,13 +185,16 @@ const AXUIElementGetPid = applicationServices.func(
 	"int32_t AXUIElementGetPid(void *element, _Out_ int32_t *pid)",
 ) as KoffiFunc<(element: AXUIElementRef, pidOut: Int32Array) => number>;
 
-function AXUIElementPerformAction(_element: AXUIElementRef, _action: CFStringRef): never {
-	return denyHostInteraction("host-window");
-}
+const AXUIElementPerformAction = applicationServices.func("AXUIElementPerformAction", "int32_t", [
+	AX_UI_ELEMENT_REF,
+	"void *",
+]) as KoffiFunc<(element: AXUIElementRef, action: CFStringRef) => number>;
 
-function AXUIElementSetAttributeValue(_element: AXUIElementRef, _attribute: CFStringRef, _value: CFTypeRef): never {
-	return denyHostInteraction("host-window");
-}
+const AXUIElementSetAttributeValue = applicationServices.func("AXUIElementSetAttributeValue", "int32_t", [
+	AX_UI_ELEMENT_REF,
+	"void *",
+	"void *",
+]) as KoffiFunc<(element: AXUIElementRef, attribute: CFStringRef, value: CFTypeRef) => number>;
 
 const AXUIElementCopyAttributeValue = applicationServices.func(
 	"int32_t AXUIElementCopyAttributeValue(void *element, void *attribute, _Out_ void **value)",

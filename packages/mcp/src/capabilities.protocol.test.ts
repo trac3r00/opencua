@@ -33,8 +33,8 @@ async function connect(register: (server: McpServer) => void): Promise<Client> {
 const reportSchema = z.object({
 	host: z.object({ workers: z.object({ concurrent: z.boolean() }) }),
 	backend: z.string(),
-	input: z.object({ supported: z.boolean(), reason: z.string(), scope: z.string() }),
-	capture: z.object({ supported: z.boolean(), reason: z.string(), scope: z.string() }),
+	input: z.object({ supported: z.boolean(), scope: z.string(), route: z.string() }),
+	capture: z.object({ supported: z.boolean(), scope: z.string() }),
 	permissions: z.unknown(),
 	session: z.unknown(),
 	delivery: z.unknown(),
@@ -61,8 +61,8 @@ afterEach(() => {
 	}
 });
 
-describe("#given a fully permitted console session #when capabilities are read #then host input remains unavailable", () => {
-	it("keeps unrestricted observation separate from input authorization", async () => {
+describe("#given a fully permitted console session #when capabilities are read #then allowed host apps take background input", () => {
+	it("reports per-process background input and capture with no blocker", async () => {
 		const body = await report({
 			delivery: "background",
 			probeHost: () => GRANTED_HOST,
@@ -70,18 +70,10 @@ describe("#given a fully permitted console session #when capabilities are read #
 		});
 
 		expect(body.approval).toEqual({ allowedBundleIds: null });
-		expect(body.backend).toBe("macos-host-observer");
-		expect(body.input).toEqual({
-			supported: false,
-			reason: "isolated-session-required",
-			scope: "human-desktop",
-		});
-		expect(body.capture).toEqual({
-			supported: false,
-			reason: "isolated-session-required",
-			scope: "human-desktop",
-		});
-		expect(body.advice).toHaveLength(1);
+		expect(body.backend).toBe("macos-native");
+		expect(body.input).toEqual({ supported: true, scope: "allowed-apps", route: "per-process-background" });
+		expect(body.capture).toEqual({ supported: true, scope: "allowed-apps" });
+		expect(body.advice).toEqual([]);
 	});
 
 	it("reports permissions, console mode, delivery and approval", async () => {
@@ -96,12 +88,12 @@ describe("#given a fully permitted console session #when capabilities are read #
 		expect(body.delivery).toMatchObject({ mode: "background" });
 		expect(body.approval).toEqual({ allowedBundleIds: ["com.apple.calculator"] });
 		expect(body.stop).toMatchObject({ stopped: false, armed: true });
-		expect(body.input.supported).toBe(false);
-		expect(body.host.workers.concurrent).toBe(false);
-		expect(body.advice).toHaveLength(1);
+		expect(body.input.supported).toBe(true);
+		expect(body.host.workers.concurrent).toBe(true);
+		expect(body.advice).toEqual([]);
 	});
 
-	it("does not advertise attended input when requested", async () => {
+	it("advertises only background input when attended is requested", async () => {
 		const body = await report({
 			delivery: "attended",
 			probeHost: () => GRANTED_HOST,
@@ -112,7 +104,7 @@ describe("#given a fully permitted console session #when capabilities are read #
 			requestedMode: "attended",
 			modes: ["background"],
 		});
-		expect(body.input.supported).toBe(false);
+		expect(body.input.route).toBe("per-process-background");
 	});
 });
 
@@ -138,7 +130,7 @@ describe("#given missing permissions, a remote session and a user stop #when get
 		expect(body.session).toMatchObject({ mode: "remote" });
 		expect(body.delivery).toMatchObject({ mode: "background" });
 		expect(body.stop).toMatchObject({ stopped: true, source: "cli" });
-		expect(body.advice).toHaveLength(6);
+		expect(body.advice).toHaveLength(5);
 	});
 });
 

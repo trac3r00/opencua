@@ -17,8 +17,9 @@ export function allowedBundleIdsFromEnvironment(value: string | undefined): read
 }
 
 /**
- * The shared-host backend is observation-only. Preserve an explicit attended request so the
- * constructor rejects it, rather than silently accepting a request to borrow the human desktop.
+ * Host input is background-only: it reaches the target app per process and never takes focus, posts global
+ * HID input or moves the physical pointer. Preserve an explicit attended request so the constructor rejects
+ * it, rather than silently downgrading a request to borrow the person's focus and pointer.
  */
 function deliveryFromEnvironment(value: string | undefined): InputDelivery {
 	return value?.trim().toLowerCase() === "attended" ? "attended" : "background";
@@ -36,14 +37,14 @@ export function deliveryFromProcessEnvironment(): InputDelivery {
 
 export function createNativeComputer(platform: NodeJS.Platform = process.platform): GuardedComputerInterface {
 	const appApproval = new AppApprovalStore(allowedBundleIdsFromProcessEnvironment());
-	// Every backend is observation-only on the shared host, so an explicit attended request is a
+	// Windows and Linux host backends take no input, so an explicit attended request is a
 	// configuration error here too, not a per-action refusal later.
 	if (platform !== "darwin" && deliveryFromProcessEnvironment() === "attended") {
 		denyHostInteraction("global-input");
 	}
 	if (platform === "linux") return new GuardedPlatformComputer(createLinuxHostComputer(), { approval: appApproval });
 	if (platform === "win32") return new GuardedPlatformComputer(createWindowsHostComputer(), { approval: appApproval });
-	// The person's desktop takes input only for opencua-owned windows, which are always driven in the background.
+	// The macOS host drives any app the allowlist permits, always in the background.
 	const delivery = process.env["OPENCUA_DELIVERY"] === undefined ? "background" : deliveryFromProcessEnvironment();
 	return new MacOSHostComputer({ appApproval, delivery });
 }

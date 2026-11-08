@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
-const accessibilityMock = vi.hoisted(() => ({ pressElementAtScreenPoint: vi.fn(() => false) }));
+const accessibilityMock = vi.hoisted(() => ({
+	pressElementAtScreenPoint: vi.fn((_pid: number, _x: number, _y: number, _windowId?: number) => false),
+}));
 
 vi.mock("./macos-ffi/accessibility.js", () => accessibilityMock);
 vi.mock("./macos-ffi/lock-screen.js", () => ({ isScreenLocked: () => false }));
@@ -12,10 +14,8 @@ const { MacOSHostComputer } = await import("./macos.js");
 
 beforeEach(() => accessibilityMock.pressElementAtScreenPoint.mockClear());
 
-const HOST_REFUSAL = /host-window cannot operate on the human desktop/;
-
-describe("#given an accessibility press at a screen point on the human desktop #when it runs #then it is refused before any effect", () => {
-	it("#given a different default app #when pressing an explicit pid #then no pointer feedback or press happens", async () => {
+describe("#given an accessibility press at a screen point #when it runs inside a dispatch #then it is held to that dispatch's window", () => {
+	it("#given a different default app #when pressing an explicit pid #then the press goes to that pid", async () => {
 		const set = vi.fn();
 		const computer = new MacOSHostComputer({
 			defaultTargetPid: 5678,
@@ -23,34 +23,33 @@ describe("#given an accessibility press at a screen point on the human desktop #
 			delivery: "background",
 		});
 		try {
-			await expect(computer.pressAtPosition(1234, { x: 5, y: 6 })).rejects.toThrow(HOST_REFUSAL);
-			expect(set).not.toHaveBeenCalled();
-			expect(accessibilityMock.pressElementAtScreenPoint).not.toHaveBeenCalled();
+			await computer.pressAtPosition(1234, { x: 5, y: 6 });
+			expect(accessibilityMock.pressElementAtScreenPoint.mock.calls).toEqual([[1234, 5, 6, undefined]]);
 		} finally {
 			await computer.close();
 		}
 	});
 
-	it("#when the dispatch is bound to an observed window of the app or not #then no element is pressed", async () => {
+	it("#when the dispatch is bound to an observed window of the app #then only an element of that window may be pressed", async () => {
 		// given
 		const computer = new MacOSHostComputer({ overlay: NOOP_POINTER_OVERLAY, delivery: "background" });
 
 		try {
 			// when
-			await expect(
-				runInInputScope({ target: { pid: 1234, windowId: 12 } }, () =>
-					computer.pressAtPosition(1234, { x: 5, y: 6 }),
-				),
-			).rejects.toThrow(HOST_REFUSAL);
-			await expect(computer.pressAtPosition(1234, { x: 7, y: 8 })).rejects.toThrow(HOST_REFUSAL);
-			await expect(
-				runInInputScope({ target: { pid: 5678, windowId: 99 } }, () =>
-					computer.pressAtPosition(1234, { x: 9, y: 10 }),
-				),
-			).rejects.toThrow(HOST_REFUSAL);
+			await runInInputScope({ target: { pid: 1234, windowId: 12 } }, () =>
+				computer.pressAtPosition(1234, { x: 5, y: 6 }),
+			);
+			await computer.pressAtPosition(1234, { x: 7, y: 8 });
+			await runInInputScope({ target: { pid: 5678, windowId: 99 } }, () =>
+				computer.pressAtPosition(1234, { x: 9, y: 10 }),
+			);
 
-			// then
-			expect(accessibilityMock.pressElementAtScreenPoint).not.toHaveBeenCalled();
+			// then: the bound window rides along for its own app only
+			expect(accessibilityMock.pressElementAtScreenPoint.mock.calls).toEqual([
+				[1234, 5, 6, 12],
+				[1234, 7, 8, undefined],
+				[1234, 9, 10, undefined],
+			]);
 		} finally {
 			await computer.close();
 		}

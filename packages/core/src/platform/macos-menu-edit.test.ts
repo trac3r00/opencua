@@ -60,10 +60,8 @@ afterEach(() => {
 	accessibility.focusedWindowShowsFilePanel.mockReturnValue(false);
 });
 
-const HOST_REFUSAL = /host-window cannot operate on the human desktop/;
-
-describe("#given a background Save panel #when its shortcut overlaps the app menu #then the human desktop refuses it", () => {
-	it("refuses Go to Folder before keyboard delivery or a menu lookup", async () => {
+describe("#given a background Save panel #when its shortcut overlaps the app menu #then the panel receives it", () => {
+	it("routes Go to Folder through native keyboard delivery instead of Find Previous", async () => {
 		menu.commandChordMask.mockReturnValue(1);
 		menu.findMenuKeyEquivalent.mockReturnValue({ path: ["Edit", "Find", "Find Previous"], enabled: false });
 		accessibility.focusedWindowShowsFilePanel.mockReturnValue(true);
@@ -71,84 +69,86 @@ describe("#given a background Save panel #when its shortcut overlaps the app men
 		const press = vi.spyOn(MacOSInputController.prototype, "pressKey").mockResolvedValue();
 		const computer = new MacOSHostComputer({ defaultTargetPid: PID, delivery: "background" });
 
-		await expect(computer.key("g", { modifiers: ["command", "shift"] })).rejects.toThrow(HOST_REFUSAL);
+		await computer.key("g", { modifiers: ["command", "shift"] });
 
-		expect(prepare).not.toHaveBeenCalled();
+		expect(prepare).toHaveBeenCalledOnce();
 		expect(menu.findMenuKeyEquivalent).not.toHaveBeenCalled();
-		expect(press).not.toHaveBeenCalled();
+		expect(press).toHaveBeenCalledWith("g", { modifiers: ["command", "shift"] });
 		await computer.close();
 	});
 });
 
-describe("#given Edit menu commands on the human desktop #when invoked #then each is refused before any clipboard, field or menu effect", () => {
+describe("#given Edit menu commands that AppKit validates only while its menu is shown", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		selectText.selectedTextOfFocusedElement.mockReturnValue("chosen words");
 	});
 
-	it("#when a menu command precedes focused typing #then neither runs, so no keyboard readiness fence is armed", async () => {
+	it("#when a menu command precedes focused typing #then its completion arms the keyboard readiness fence", async () => {
+		const clock = vi.spyOn(performance, "now").mockReturnValue(123);
 		const computer = new MacOSHostComputer({ delivery: "background" });
 		try {
-			await expect(computer.invokeMenu(PID, ["File", "New Folder"])).rejects.toThrow(HOST_REFUSAL);
-			await expect(computer.typeIntoFocused(PID, "bench-folder")).rejects.toThrow(HOST_REFUSAL);
+			await computer.invokeMenu(PID, ["File", "New Folder"]);
+			await computer.typeIntoFocused(PID, "bench-folder");
 
-			expect(keyboardFence.awaitKeyboardFence).not.toHaveBeenCalled();
-			expect(accessibility.typeIntoFocusedAXElement).not.toHaveBeenCalled();
+			expect(keyboardFence.awaitKeyboardFence).toHaveBeenCalledWith(123, expect.any(Function), expect.any(Object));
 		} finally {
 			await computer.close();
+			clock.mockRestore();
 		}
 	});
 
-	it("#when Edit > Copy is invoked #then the selection never reaches the clipboard", async () => {
+	it("#when Edit > Copy is invoked #then the focused field's selection goes to the clipboard without opening the menu", async () => {
 		const computer = new MacOSHostComputer({ delivery: "background" });
 
-		await expect(computer.invokeMenu(PID, ["Edit", "Copy"])).rejects.toThrow(HOST_REFUSAL);
+		const result = await computer.invokeMenu(PID, ["Edit", "Copy"]);
 
-		expect(pasteboard.writeClipboard).not.toHaveBeenCalled();
+		expect(result).toEqual({ resolvedPath: ["Edit", "Copy"], action: "accessibility" });
+		expect(pasteboard.writeClipboard).toHaveBeenCalledWith({ type: "text", text: "chosen words" });
 		expect(menu.invokeMenu).not.toHaveBeenCalled();
 		await computer.close();
 	});
 
-	it("#when Edit > Cut is invoked #then nothing is copied or removed from the field", async () => {
+	it("#when Edit > Cut is invoked #then the selection is copied and then removed from the field", async () => {
 		const computer = new MacOSHostComputer({ delivery: "background" });
 
-		await expect(computer.invokeMenu(PID, ["Edit", "Cut"])).rejects.toThrow(HOST_REFUSAL);
+		await computer.invokeMenu(PID, ["Edit", "Cut"]);
 
-		expect(pasteboard.writeClipboard).not.toHaveBeenCalled();
-		expect(selectText.replaceSelectionInFocusedTextElement).not.toHaveBeenCalled();
+		expect(pasteboard.writeClipboard).toHaveBeenCalledWith({ type: "text", text: "chosen words" });
+		expect(selectText.replaceSelectionInFocusedTextElement).toHaveBeenCalledWith(PID, "");
 		await computer.close();
 	});
 
-	it("#when Edit > Select All and Paste are invoked #then the field is neither selected nor typed into", async () => {
+	it("#when Edit > Select All and Paste are invoked #then the field itself is selected and typed into", async () => {
 		const computer = new MacOSHostComputer({ delivery: "background" });
 
-		await expect(computer.invokeMenu(PID, ["Edit", "Select All"])).rejects.toThrow(HOST_REFUSAL);
-		await expect(computer.invokeMenu(PID, ["Edit", "Paste"])).rejects.toThrow(HOST_REFUSAL);
+		await computer.invokeMenu(PID, ["Edit", "Select All"]);
+		await computer.invokeMenu(PID, ["Edit", "Paste"]);
 
-		expect(selectText.selectAllInFocusedTextElement).not.toHaveBeenCalled();
-		expect(pasteboard.readClipboard).not.toHaveBeenCalled();
-		expect(accessibility.typeIntoFocusedAXElement).not.toHaveBeenCalled();
+		expect(selectText.selectAllInFocusedTextElement).toHaveBeenCalledWith(PID);
+		expect(accessibility.typeIntoFocusedAXElement).toHaveBeenCalledWith(PID, "from clipboard");
 		expect(menu.invokeMenu).not.toHaveBeenCalled();
 		await computer.close();
 	});
 
-	it("#when nothing is selected in a native field #then Copy is not handed to the menu either", async () => {
+	it("#when nothing is selected in a native field #then Copy is handed to the menu, which decides", async () => {
 		selectText.selectedTextOfFocusedElement.mockReturnValue(undefined);
 		const computer = new MacOSHostComputer({ delivery: "background" });
 
-		await expect(computer.invokeMenu(PID, ["Edit", "Copy"])).rejects.toThrow(HOST_REFUSAL);
+		await computer.invokeMenu(PID, ["Edit", "Copy"]);
 
 		expect(pasteboard.writeClipboard).not.toHaveBeenCalled();
-		expect(menu.invokeMenu).not.toHaveBeenCalled();
+		expect(menu.invokeMenu).toHaveBeenCalledWith(PID, ["Edit", "Copy"]);
 		await computer.close();
 	});
 
-	it("#when any other path is invoked #then it is not pressed as a menu item", async () => {
+	it("#when any other path is invoked #then it is pressed as a menu item", async () => {
 		const computer = new MacOSHostComputer({ delivery: "background" });
 
-		await expect(computer.invokeMenu(PID, ["Format", "Font", "Bold"])).rejects.toThrow(HOST_REFUSAL);
+		const result = await computer.invokeMenu(PID, ["Format", "Font", "Bold"]);
 
-		expect(menu.invokeMenu).not.toHaveBeenCalled();
+		expect(result.action).toBe("AXPress");
+		expect(menu.invokeMenu).toHaveBeenCalledWith(PID, ["Format", "Font", "Bold"]);
 		await computer.close();
 	});
 });

@@ -35,9 +35,6 @@ const OMITTED_ELEMENTS_NOTE =
 const WINDOW_CONTENT_UNAVAILABLE_NOTE =
 	"this session does not own the Mac's physical screen (Screen Sharing or fast user switching), so the app's window content is not reachable over accessibility: ocrText is the window read from pixels, with screen frames. Keyboard input (type_text, press_keys) still reaches the app; pointer clicks and window-level menu items such as Save do not. Use keyboard routes, and call ask_user when a step needs a click or Save.";
 
-const ISOLATED_CAPTURE_NOTE =
-	"no image: opencua never captures the person's desktop. Elements and ids come from accessibility. For pixels, use an agent-owned isolated desktop.";
-
 const SCREENSHOT_UNAVAILABLE_NOTE =
 	"no image: the process running opencua lacks macOS Screen Recording permission, so no capture was attempted (it would raise a permission prompt over the person's screen). Elements and ids are complete and actions work. If pixels are needed, ask the user to grant Screen Recording to the app that launches this server and restart it.";
 
@@ -296,7 +293,7 @@ export function refusalResult(reason: string, detail?: string): ToolResult {
 			: reason === "user-stopped"
 				? "Nothing was dispatched. Do not retry; tell the user."
 				: reason === "isolated-session-required"
-					? "Nothing was dispatched. This server never acts on the human desktop, so a retry cannot succeed; act in an agent-owned isolated desktop instead."
+					? "Nothing was dispatched. This platform's host backend takes no input (only the macOS host acts on the person's apps, in the background), so a retry cannot succeed; act in an agent-owned isolated desktop instead."
 					: escalation.target === "human"
 						? "Nothing was dispatched; call ask_user to request human help. Host policy must still authorize the app or URL before retrying."
 						: "Nothing was dispatched; observe the app again before retrying.";
@@ -790,10 +787,7 @@ function stateToolResult(
 		payload["windowContentNote"] = WINDOW_CONTENT_UNAVAILABLE_NOTE;
 	}
 	if (state.screenshotUnavailable !== undefined) {
-		payload["screenshotNote"] =
-			state.screenshotUnavailable === "isolated-session-required"
-				? ISOLATED_CAPTURE_NOTE
-				: SCREENSHOT_UNAVAILABLE_NOTE;
+		payload["screenshotNote"] = SCREENSHOT_UNAVAILABLE_NOTE;
 	}
 	if (state.systemPrompts !== undefined && state.systemPrompts.length > 0) {
 		payload["systemPrompts"] = state.systemPrompts.map(describeSystemPrompt);
