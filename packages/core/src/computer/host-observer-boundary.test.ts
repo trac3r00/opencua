@@ -90,11 +90,12 @@ describe("#given the macOS host #when its capabilities are read #then the person
 		expect(Object.isFrozen(Reflect.get(instance, "capabilities"))).toBe(true);
 	});
 
-	it("builds its input controller with background activation off, because activation is a host-focus primitive", () => {
+	it("leaves background activation to the input controller's default, so apps take the first background click", () => {
 		const { controllerArgs } = fixture();
 		expect(controllerArgs).toHaveLength(1);
 		expect(controllerArgs[0]?.[4]).toBe("background");
-		expect(controllerArgs[0]?.[5]).toBe(false);
+		// undefined selects backgroundActivationEnabled(): on unless OPENCUA_BACKGROUND_ACTIVATION turns it off.
+		expect(controllerArgs[0]?.[5]).toBeUndefined();
 	});
 });
 

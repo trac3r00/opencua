@@ -17,6 +17,7 @@
 		"typecheck:tests": "tsgo --noEmit -p tsconfig.test.json",
 		"lint": "biome check .",
 		"lint:fix": "biome check . --write",
+		"pretest": "pnpm --filter @opencua/core build:ts && pnpm --filter @opencua/browser build",
 		"test": "scripts/bun-test.sh packages scripts/bench-v2 scripts/scenarios scripts/preflight.test.mjs scripts/test-support",
 		"test:watch": "bun test --watch",
 		"test:browser:bun": "bun test --isolate packages/browser",

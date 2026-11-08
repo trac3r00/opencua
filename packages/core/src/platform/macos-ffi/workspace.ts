@@ -104,7 +104,17 @@ export function getRunningApplications(): WorkspaceRunningApplication[] {
 	deliverWorkspaceUpdates();
 	return withAutoreleasePool(() => {
 		const applications = msgPointer(sharedWorkspace(), runningApplicationsSelector);
-		return applications === null ? [] : readApplicationArray(applications);
+		if (applications === null) {
+			return [];
+		}
+		const seenPids = new Set<number>();
+		const listed = readApplicationArray(applications, seenPids);
+		for (const pid of processIdentities.keys()) {
+			if (!seenPids.has(pid)) {
+				processIdentities.delete(pid);
+			}
+		}
+		return listed;
 	});
 }
 
@@ -148,7 +158,7 @@ export function findRunningApplication(
 	});
 }
 
-function readApplicationArray(array: object): WorkspaceRunningApplication[] {
+function readApplicationArray(array: object, seenPids?: Set<number>): WorkspaceRunningApplication[] {
 	const count = msgUnsignedInteger(array, countSelector);
 	const applications: WorkspaceRunningApplication[] = [];
 	for (let index = 0; index < count; index += 1) {
@@ -156,7 +166,7 @@ function readApplicationArray(array: object): WorkspaceRunningApplication[] {
 		if (reference === null) {
 			continue;
 		}
-		const application = readApplication(reference);
+		const application = readApplication(reference, seenPids);
 		if (application !== undefined) {
 			applications.push(application);
 		}
@@ -164,17 +174,18 @@ function readApplicationArray(array: object): WorkspaceRunningApplication[] {
 	return applications;
 }
 
-function readApplication(reference: object): WorkspaceRunningApplication | undefined {
+function readApplication(reference: object, seenPids?: Set<number>): WorkspaceRunningApplication | undefined {
 	const name = readStringProperty(reference, localizedNameSelector);
 	const pid = msgProcessIdentifier(reference, processIdentifierSelector);
+	seenPids?.add(pid);
 	// An owned surface is a bare accessory process with no bundle; it is listed so agents can observe and drive it.
 	const owned = Number.isSafeInteger(pid) && pid > 0 && isOwnedSurfacePid(pid);
-	const bundleId = readStringProperty(reference, bundleIdentifierSelector) || (owned ? OWNED_SURFACE_BUNDLE_ID : "");
+	const identity = readProcessIdentity(reference, pid);
+	const bundleId = identity.bundleId || (owned ? OWNED_SURFACE_BUNDLE_ID : "");
 	if (name.length === 0 || bundleId.length === 0 || !Number.isSafeInteger(pid) || pid <= 0) {
 		return undefined;
 	}
-	const bundleUrl = msgPointer(reference, bundleUrlSelector);
-	const path = bundleUrl === null ? "" : readStringProperty(bundleUrl, pathSelector);
+	const path = identity.path;
 	if (!owned && !isDiscoverableApplication(msgInteger(reference, activationPolicySelector), bundleId, path)) {
 		return undefined;
 	}
@@ -185,6 +196,58 @@ function readApplication(reference: object): WorkspaceRunningApplication | undef
 		isActive: msgBool(reference, isActiveSelector),
 		path,
 	};
+}
+
+interface ProcessIdentity {
+	readonly startTime: string;
+	readonly bundleId: string;
+	readonly path: string;
+}
+
+const libSystem = koffi.load("/usr/lib/libSystem.B.dylib");
+const procPidInfo = libSystem.func(
+	"int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize)",
+) as KoffiFunc<(pid: number, flavor: number, argument: number, buffer: Buffer, bufferSize: number) => number>;
+const PROC_PIDTBSDINFO = 3;
+/** sizeof(struct proc_bsdinfo); pbi_start_tvsec and pbi_start_tvusec are its last two uint64 fields. */
+const PROC_BSD_INFO_BYTES = 136;
+const PROC_START_SECONDS_OFFSET = 120;
+const PROC_START_MICROSECONDS_OFFSET = 128;
+
+/** Bundle identity of each listed process, keyed by pid and checked against the process's start time. */
+const processIdentities = new Map<number, ProcessIdentity>();
+
+/** When `pid` started, to the microsecond; undefined when the process is gone. A reused pid starts at another time. */
+function processStartTime(pid: number): string | undefined {
+	const info = Buffer.alloc(PROC_BSD_INFO_BYTES);
+	if (procPidInfo(pid, PROC_PIDTBSDINFO, 0, info, PROC_BSD_INFO_BYTES) !== PROC_BSD_INFO_BYTES) {
+		return undefined;
+	}
+	return `${info.readBigUInt64LE(PROC_START_SECONDS_OFFSET)}.${info.readBigUInt64LE(PROC_START_MICROSECONDS_OFFSET)}`;
+}
+
+/**
+ * A process's bundle identifier and bundle path. Both are fixed for the life of the process, yet NSWorkspace
+ * hands out fresh NSRunningApplication objects after every run-loop turn and each re-reads them from
+ * LaunchServices, which made every enumeration cost tens of milliseconds. They are reused while the same
+ * process (same pid and start time) is running; an incomplete identity, as an app still launching can
+ * report, is read again next time.
+ */
+function readProcessIdentity(reference: object, pid: number): { readonly bundleId: string; readonly path: string } {
+	const startTime = Number.isSafeInteger(pid) && pid > 0 ? processStartTime(pid) : undefined;
+	const cached = processIdentities.get(pid);
+	if (startTime !== undefined && cached?.startTime === startTime) {
+		return cached;
+	}
+	const bundleId = readStringProperty(reference, bundleIdentifierSelector);
+	const bundleUrl = msgPointer(reference, bundleUrlSelector);
+	const path = bundleUrl === null ? "" : readStringProperty(bundleUrl, pathSelector);
+	if (startTime !== undefined && bundleId.length > 0 && path.length > 0) {
+		processIdentities.set(pid, { startTime, bundleId, path });
+	} else {
+		processIdentities.delete(pid);
+	}
+	return { bundleId, path };
 }
 
 function resolveBundleIdentifier(bundleIdOrName: string): string | undefined {

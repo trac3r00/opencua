@@ -22,6 +22,7 @@ vi.mock("./macos-ffi/screenshot.js", () => ({
 	captureDisplayImage: vi.fn(),
 	captureDisplayRegionImage: vi.fn(),
 	captureWindowImage: captureMocks.captureWindowImage,
+	captureWindowImageAsync: async (...args: unknown[]): Promise<unknown> => captureMocks.captureWindowImage(...args),
 	getMainDisplayId: vi.fn(),
 	getMainDisplayLogicalSize: vi.fn(),
 	getMainDisplayNativePixelSize: vi.fn(),

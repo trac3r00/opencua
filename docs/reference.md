@@ -103,6 +103,7 @@ From then on one command covers the whole lifecycle:
 | `opencua permissions grant` | Walk through Accessibility, Screen Recording and Automation for **opencua-mcp**: shows macOS's dialog, opens System Settings and waits until each switch is on |
 | `opencua doctor [--fix]` | Check everything without raising a permission prompt; `--fix` repairs what is safe and asks before the rest |
 | `opencua update` | Fast-forward the checkout, rerun setup, re-apply the registrations, run the doctor |
+| `opencua daemon start\|run\|stop\|status` | A warm read-only daemon on a same-user Unix socket (`~/.opencua/cli-daemon.sock`, 0600, per-start token). `screenshot`, `cursor`, `screen`, `windows list`, `apps list` and `apps state` go through it when it answers and run in-process otherwise; input commands never do. `OPENCUA_CLI_DAEMON=off` bypasses it |
 | `opencua uninstall` | Remove the registrations (backed up), the helper and its permissions, the command and its PATH line, `~/.opencua`, and the checkout the installer made |
 
 ### Configure

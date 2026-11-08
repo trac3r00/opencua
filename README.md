@@ -199,6 +199,7 @@ Day-to-day lifecycle:
 | `opencua doctor [--fix]` | Check everything without triggering a permission prompt |
 | `opencua update` | Fast-forward, rebuild, re-apply registrations, run the doctor |
 | `opencua stop` / `resume` | Stop every agent on this Mac at once / lift the stop |
+| `opencua daemon start` / `stop` / `status` | Keep one warm process so `screenshot`, `cursor`, `screen`, `windows list` and `apps list`/`state` skip start-up (input always runs in-process; `OPENCUA_CLI_DAEMON=off` bypasses it) |
 | `opencua uninstall` | Remove owned registrations/login services, helper, command, PATH line and installation state; retain recorded history and summaries at the reported path |
 
 ## See it work

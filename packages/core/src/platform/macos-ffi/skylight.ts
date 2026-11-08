@@ -52,6 +52,15 @@ const SLPSPostEventRecordTo = skyLight.func("SLPSPostEventRecordTo", "int32_t", 
 	(psn: Buffer, eventRecord: object) => number
 >;
 
+const SLPSSetFrontProcessWithOptions = skyLight.func("SLPSSetFrontProcessWithOptions", "int32_t", [
+	"void *",
+	"uint32_t",
+	"uint32_t",
+]) as KoffiFunc<(psn: Buffer, windowId: number, options: number) => number>;
+
+/** kCPSNoWindows: the process comes forward without raising or ordering any of its windows. */
+const K_CPS_NO_WINDOWS = 0x400;
+
 const _SLPSGetFrontProcess = skyLight.func("_SLPSGetFrontProcess", "int32_t", ["void *"]) as KoffiFunc<
 	(psn: Buffer) => number
 >;
@@ -156,10 +165,17 @@ export function activateWindowWithoutRaise(_window: SkyLightTargetWindow): boole
 }
 
 /**
- * Synthesized activation changes which app believes it is active, so it stays forbidden on the host.
+ * Tells one app it is (or is no longer) active, as cua-driver's background activation does, so it takes the next
+ * background click instead of spending it on activating its window. The front app, window order and the person's
+ * focus do not change: the record goes to that process only.
  */
-export function setProcessAppActive(_psn: Buffer, _windowId: number, _active: boolean): boolean {
-	return denyHostInteraction("host-focus");
+export function setProcessAppActive(psn: Buffer, windowId: number, active: boolean): boolean {
+	const record = Buffer.alloc(0xf8);
+	record[0x04] = 0xf8;
+	record[0x08] = 0x0d;
+	record.writeUInt32LE(windowId, 0x3c);
+	record[0x8a] = active ? 0x01 : 0x02;
+	return SLPSPostEventRecordTo(psn, record) === 0;
 }
 
 export function beginFocusWithoutRaise(_window: SkyLightTargetWindow): FocusRestoreToken | null {
@@ -190,8 +206,12 @@ export function processSerialNumbersMatch(left: Buffer, right: Buffer): boolean 
 	return left.equals(right);
 }
 
-export function restoreFrontProcessNoWindows(_token: FocusRestoreToken): boolean {
-	return denyHostInteraction("host-focus");
+/**
+ * Gives the front back to the person's app after a target app activated itself, without raising its windows. This
+ * only ever undoes a steal: the token names the app that was frontmost before opencua's input.
+ */
+export function restoreFrontProcessNoWindows(token: FocusRestoreToken): boolean {
+	return SLPSSetFrontProcessWithOptions(token.previousPsn, 0, K_CPS_NO_WINDOWS) === 0;
 }
 
 export function postCoreGraphicsEventToWindowOwner(window: SkyLightTargetWindow, event: CGEventRef): boolean {

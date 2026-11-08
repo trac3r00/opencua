@@ -6,6 +6,7 @@ import {
 	type DoctorFacts,
 	detectArchitecture,
 	evaluateDoctor,
+	formatDoctorReport,
 	machOArchitectures,
 	macosSupported,
 	parseSelfCheckOutput,
@@ -181,6 +182,32 @@ describe("#given a fresh helper identity without grants #when the doctor evaluat
 		expect(failures.every((item) => item.manual === true && item.fix !== undefined)).toBe(true);
 		expect(failures[1]?.fix).toContain("Screen & System Audio Recording");
 		expect(report.nextSteps).toHaveLength(2);
+	});
+});
+
+describe("#given a permission check that threw in the helper #when the doctor reports it #then it prints the error, not a missing grant", () => {
+	it("fails Accessibility with the binding error and a rebuild fix instead of a manual grant", () => {
+		const report = parseSelfCheckOutput(
+			JSON.stringify({
+				permissions: {
+					accessibility: false,
+					screenRecording: true,
+					errors: { accessibility: "AXIsProcessTrusted: symbol not found" },
+				},
+				session: { mode: "console" },
+				process: { node: "v22.23.2", arch: "arm64" },
+				automation: {},
+			}),
+		);
+		if (report === undefined) throw new Error("the self-check line should parse");
+
+		const doctor = evaluateDoctor({ ...readyFacts(), selfCheck: { ok: true, report } });
+
+		const accessibility = doctor.checks.find((item) => item.id === "permission:accessibility");
+		expect(accessibility?.status).toBe("fail");
+		expect(accessibility?.manual).not.toBe(true);
+		expect(doctor.onlyManualStepsRemain).toBe(false);
+		expect(formatDoctorReport(doctor)).toContain("AXIsProcessTrusted: symbol not found");
 	});
 });
 

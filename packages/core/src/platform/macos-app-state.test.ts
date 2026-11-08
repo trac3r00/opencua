@@ -43,6 +43,7 @@ const accessibilityMock = vi.hoisted(() => ({
 		() => { readonly focusedWindowId: number | undefined; readonly sheetOwnerWindowId: number | undefined }
 	>(() => ({ focusedWindowId: undefined, sheetOwnerWindowId: undefined })),
 	releaseAccessibilitySnapshot: vi.fn(),
+	accessibilitySnapshotPids: vi.fn<() => readonly number[]>(() => []),
 	releaseSnapshotsForExitedPids: vi.fn<() => number>(() => 0),
 	currentObservationKey: vi.fn(() => "0:test"),
 	performActionByIndex: vi.fn(),
@@ -56,6 +57,7 @@ const screenshotMock = vi.hoisted(() => ({
 	captureDisplayImage: vi.fn(),
 	getMainDisplayId: vi.fn(() => 1),
 	captureWindowImage: vi.fn(),
+	captureWindowImageAsync: async (...args: unknown[]): Promise<unknown> => screenshotMock.captureWindowImage(...args),
 	getMainDisplayLogicalSize: vi.fn(),
 	getMainDisplayNativePixelSize: vi.fn(),
 	screenCaptureAllowed: vi.fn(() => true),

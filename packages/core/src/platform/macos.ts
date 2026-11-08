@@ -27,7 +27,7 @@ import type {
 	ScrollOptions,
 	SelectTextOptions,
 } from "../types/index.js";
-import { type RunningAppInfo, collectAppUsage, getRunningMacOSApps } from "./app-list.js";
+import { type RunningAppInfo, collectAppUsage, findRunningApp, getRunningMacOSApps } from "./app-list.js";
 import { CursorKeyedObservations } from "./cursor-observations.js";
 import { execFileStdout, execFileStdoutBuffer } from "./exec-util.js";
 import { HostComputer, type HostComputerOptions } from "./host.js";
@@ -35,6 +35,7 @@ import { parseImageDimensions, sniffImageMimeType } from "./image-format.js";
 import { InputLock } from "./input-lock.js";
 import { type KeyboardFenceClock, awaitAccessibilityWriteSettled, awaitKeyboardFence } from "./keyboard-fence.js";
 import {
+	accessibilitySnapshotPids,
 	currentObservationKey,
 	elementFrameByIndex,
 	extractAccessibilityTree,
@@ -71,7 +72,7 @@ import { NOOP_DISPLAY_SLEEP } from "./macos-ffi/power.js";
 import {
 	captureDisplayImage,
 	captureDisplayRegionImage,
-	captureWindowImage,
+	captureWindowImageAsync,
 	getMainDisplayId,
 	getMainDisplayLogicalSize,
 	getMainDisplayNativePixelSize,
@@ -191,8 +192,8 @@ export class MacOSHostComputer extends HostComputer {
 			this.isLocked,
 			NOOP_DISPLAY_SLEEP,
 			this.delivery,
-			// Telling a background app it is active is a host-focus primitive, refused on the host.
-			false,
+			// Background activation (no raise, front app unchanged) follows OPENCUA_BACKGROUND_ACTIVATION; on by default.
+			undefined,
 			cursorTravelEnabled,
 		);
 		this.displayId = options.display;
@@ -216,6 +217,11 @@ export class MacOSHostComputer extends HostComputer {
 				"Screen Recording permission is not granted to the process running opencua, so no image was captured (capturing would raise macOS's permission prompt). Grant it in System Settings > Privacy & Security > Screen Recording to the app that launches this server, then restart the server.",
 			);
 		}
+		return await this.captureAllowedScreenshot(options, windowId);
+	}
+
+	/** The capture behind captureScreenshot, for callers that have just checked Screen Recording themselves. */
+	private async captureAllowedScreenshot(options?: ScreenshotOptions, windowId?: number): Promise<ScreenshotResult> {
 		const size = options?.targetSize ?? (await this.getScreenSize());
 		if (options?.region !== undefined) {
 			if (windowId !== undefined) {
@@ -641,9 +647,7 @@ export class MacOSHostComputer extends HostComputer {
 		// observation would return a useless image and a whole-app tree. Stop with the ask instead.
 		assertScreenUnlocked(this.isLocked());
 		const settleMs = options?.settleMs ?? DEFAULT_APP_STATE_SETTLE_MILLISECONDS;
-		const apps = await getRunningMacOSApps();
-		releaseSnapshotsForExitedPids(apps.map((runningApp) => runningApp.pid));
-		const app = resolveTargetApp(apps, targetPid);
+		const app = await resolveObservedApp(targetPid);
 		this.assertAppApproved(app);
 		await this.assertBrowserUrlAllowed(app, options?.requireWindow === true);
 		let windows = await openWindowsForTargeting();
@@ -680,9 +684,6 @@ export class MacOSHostComputer extends HostComputer {
 			...(options?.visibleOnly === true ? { visibleOnly: true } : {}),
 		};
 		const captureTree = options?.includeAccessibilityTree !== false;
-		if (settleMs > 0 && captureTree) {
-			await this.waitForUiSettle(app.pid, settleMs, walkOptions);
-		}
 		// Scope the screenshot to the target window at its own aspect ratio (capped),
 		// so the model sees an undistorted window image and coordinates invert cleanly.
 		// Without a target window, fall back to the full display.
@@ -697,11 +698,22 @@ export class MacOSHostComputer extends HostComputer {
 				: screenCaptureAllowed()
 					? undefined
 					: ("screen-recording-permission" as const);
-		const screenshot =
-			options?.includeScreenshot === false || screenshotUnavailable !== undefined
-				? { data: Buffer.alloc(0), mimeType: "image/png" as const, width: size.width, height: size.height }
-				: await this.captureScreenshot({ targetSize: size, format: "jpeg" }, targetWindow?.id);
-		const tree = captureTree ? extractAccessibilityTree(app.pid, walkOptions) : undefined;
+		const captured = await this.captureSettledObservation({
+			pid: app.pid,
+			settleMs,
+			walkOptions: captureTree ? walkOptions : undefined,
+			screenshot:
+				options?.includeScreenshot === false || screenshotUnavailable !== undefined
+					? undefined
+					: { size, windowId: targetWindow?.id },
+		});
+		const screenshot = captured.screenshot ?? {
+			data: Buffer.alloc(0),
+			mimeType: "image/png" as const,
+			width: size.width,
+			height: size.height,
+		};
+		const { tree } = captured;
 		// WindowServer can hide titles without Screen Recording while the matched AX window still
 		// exposes them. Use that observed title, not an unrelated window from an app-wide fallback.
 		const targetWindowTitle = tree?.windowTitle ?? inventoryTitle;
@@ -898,34 +910,64 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	/**
-	 * Wait for the target app's UI to stop changing before capturing state, instead of
-	 * sleeping a fixed duration. Polls the accessibility tree and returns as soon as two
-	 * consecutive snapshots are identical (the UI has settled) or the `settleMs` cap
-	 * elapses, whichever comes first. This is the ChatGPT computer-use "skyshot settle"
-	 * technique: faster when the UI is already stable, more robust when it is still moving.
+	 * Capture the screenshot and the accessibility tree once the target app's UI has stopped changing, instead of
+	 * sleeping a fixed duration. Accessibility notifications say when the app changes, so the quiet window runs while
+	 * the capture does rather than before it: when no change arrives from the observer's start through the end of the
+	 * capture, and that span covers the quiet window, the capture already shows a settled UI. When something changed,
+	 * the observation waits for quiet (within `settleMs`, as before) and captures again. Without the observer, polling
+	 * the tree before the capture stays as the fallback.
 	 */
-	private async waitForUiSettle(pid: number, settleMs: number, walkOptions: AccessibilityTreeOptions): Promise<void> {
-		if (settleMs <= 0) {
-			return;
-		}
-		// Accessibility notifications say when the app changes, so the common "nothing moved"
-		// case costs one quiet window instead of repeated signature walks, and changes past the
-		// signature cap are still noticed. Polling stays as the fallback when the observer is
-		// unavailable, and remains the source of truth whenever no notifications arrive.
-		const waiter = createAxEventWaiter(pid);
-		if (waiter !== null) {
-			try {
-				waitForAxQuiet(waiter, {
-					quietMs: AX_SETTLE_QUIET_MILLISECONDS,
-					deadlineMs: settleMs,
-					now: () => Date.now(),
-				});
-				return;
-			} finally {
-				waiter.release();
+	private async captureSettledObservation(request: ObservationCaptureRequest): Promise<CapturedObservation> {
+		const { pid, settleMs, walkOptions } = request;
+		const waiter = settleMs > 0 && walkOptions !== undefined ? createAxEventWaiter(pid) : null;
+		if (waiter === null) {
+			if (settleMs > 0 && walkOptions !== undefined) {
+				await this.pollForUiSettle(pid, settleMs, walkOptions);
 			}
+			return await this.captureObservation(request);
 		}
+		try {
+			const started = Date.now();
+			const captured = await this.captureObservation(request);
+			const quietRemainder = Math.max(0, AX_SETTLE_QUIET_MILLISECONDS - (Date.now() - started));
+			if (waiter.drain(quietRemainder) === 0) {
+				return captured;
+			}
+			waitForAxQuiet(waiter, {
+				quietMs: AX_SETTLE_QUIET_MILLISECONDS,
+				deadlineMs: settleMs - (Date.now() - started),
+				now: () => Date.now(),
+			});
+			return await this.captureObservation(request);
+		} finally {
+			waiter.release();
+		}
+	}
 
+	/** The window capture waits on ScreenCaptureKit off this thread, so the tree is walked meanwhile. */
+	private async captureObservation(request: ObservationCaptureRequest): Promise<CapturedObservation> {
+		const { screenshot } = request;
+		const image =
+			screenshot === undefined
+				? undefined
+				: this.captureAllowedScreenshot({ targetSize: screenshot.size, format: "jpeg" }, screenshot.windowId);
+		let tree: ReturnType<typeof extractAccessibilityTree> | undefined;
+		try {
+			tree =
+				request.walkOptions === undefined ? undefined : extractAccessibilityTree(request.pid, request.walkOptions);
+		} catch (error) {
+			// The tree's failure is the one this observation reports; the capture still finishes before it does.
+			await image?.catch(() => undefined);
+			throw error;
+		}
+		return { screenshot: image === undefined ? undefined : await image, tree };
+	}
+
+	/**
+	 * Without accessibility notifications, poll the tree until two consecutive snapshots are identical (the UI has
+	 * settled) or the `settleMs` cap elapses, whichever comes first.
+	 */
+	private async pollForUiSettle(pid: number, settleMs: number, walkOptions: AccessibilityTreeOptions): Promise<void> {
 		// Stability only needs the shape of the visible tree, so each poll walks a capped
 		// slice instead of the whole window; the observation that follows is a full walk.
 		const signatureOptions: AccessibilityTreeOptions = {
@@ -1469,7 +1511,7 @@ async function captureWindowScreenshot(
 	quality: number,
 ): Promise<Buffer> {
 	try {
-		const captured = captureWindowImage(windowId, targetSize.width, targetSize.height, format, quality);
+		const captured = await captureWindowImageAsync(windowId, targetSize.width, targetSize.height, format, quality);
 		parseImageDimensions(captured.data);
 		return captured.data;
 	} catch (error) {
@@ -1477,7 +1519,7 @@ async function captureWindowScreenshot(
 			return await captureWindowScreenshotViaCli(targetSize, windowId, format, quality);
 		}
 		try {
-			const retried = captureWindowImage(windowId, targetSize.width, targetSize.height, format, quality);
+			const retried = await captureWindowImageAsync(windowId, targetSize.width, targetSize.height, format, quality);
 			parseImageDimensions(retried.data);
 			return retried.data;
 		} catch {
@@ -1677,6 +1719,47 @@ function displaysForWindow(
 		.filter(({ intersectionArea }) => intersectionArea > 0)
 		.sort((left, right) => right.intersectionArea - left.intersectionArea)
 		.map(({ display }) => display);
+}
+
+interface ObservationCaptureRequest {
+	readonly pid: number;
+	readonly settleMs: number;
+	/** Undefined when the observation skips the accessibility tree. */
+	readonly walkOptions: AccessibilityTreeOptions | undefined;
+	/** Undefined when the observation carries no image. */
+	readonly screenshot:
+		| { readonly size: { readonly width: number; readonly height: number }; readonly windowId: number | undefined }
+		| undefined;
+}
+
+interface CapturedObservation {
+	readonly screenshot: ScreenshotResult | undefined;
+	readonly tree: ReturnType<typeof extractAccessibilityTree> | undefined;
+}
+
+/**
+ * The app an observation targets, after releasing element snapshots of apps that have quit. A known pid is looked up
+ * on its own: enumerating every running app costs tens of milliseconds, while asking whether each snapshot's app
+ * still runs answers the same question for the few pids that hold one.
+ */
+async function resolveObservedApp(targetPid: number | undefined): Promise<RunningAppInfo> {
+	if (targetPid === undefined) {
+		const apps = await getRunningMacOSApps();
+		releaseSnapshotsForExitedPids(apps.map((runningApp) => runningApp.pid));
+		return resolveTargetApp(apps, targetPid);
+	}
+	const stillRunning: number[] = [];
+	for (const pid of accessibilitySnapshotPids()) {
+		if ((await findRunningApp(pid)) !== undefined) {
+			stillRunning.push(pid);
+		}
+	}
+	releaseSnapshotsForExitedPids(stillRunning);
+	const app = await findRunningApp(targetPid);
+	if (app === undefined) {
+		throw new Error(`No running app matched pid ${targetPid}`);
+	}
+	return app;
 }
 
 function resolveTargetApp(apps: readonly RunningAppInfo[], targetPid: number | undefined): RunningAppInfo {

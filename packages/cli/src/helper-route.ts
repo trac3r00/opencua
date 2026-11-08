@@ -30,5 +30,8 @@ export function needsHelperPermissions(commandPath: string): boolean {
 	if (command === "permissions") {
 		return subcommand === "check" || subcommand === "request";
 	}
+	if (command === "daemon") {
+		return subcommand === "run";
+	}
 	return command !== undefined && DESKTOP_COMMANDS.has(command);
 }

@@ -78,7 +78,6 @@ describe("#given SkyLight's authentication message class #when an authenticated 
 
 describe("#given SkyLight focus primitives #when a host window is targeted #then they stay refused", () => {
 	const window = { id: 11, bounds: { x: 0, y: 0, width: 800, height: 600 } };
-	const token = { previousPsn: Buffer.alloc(8), targetPsn: Buffer.alloc(8) };
 
 	it.each([
 		[
@@ -89,20 +88,47 @@ describe("#given SkyLight focus primitives #when a host window is targeted #then
 			"activateWindowWithoutRaise",
 			(skyLight: typeof import("./skylight.js")) => skyLight.activateWindowWithoutRaise(window),
 		],
-		[
-			"setProcessAppActive",
-			(skyLight: typeof import("./skylight.js")) => skyLight.setProcessAppActive(token.targetPsn, 11, true),
-		],
 		["beginFocusWithoutRaise", (skyLight: typeof import("./skylight.js")) => skyLight.beginFocusWithoutRaise(window)],
-		[
-			"restoreFrontProcessNoWindows",
-			(skyLight: typeof import("./skylight.js")) => skyLight.restoreFrontProcessNoWindows(token),
-		],
 	])("refuses %s before any record is posted", async (_name, dispatch) => {
 		const skyLight = await loadSkyLight(true);
 		expect(() => dispatch(skyLight)).toThrow(/host-focus cannot operate on the human desktop/);
 		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).not.toHaveBeenCalled();
 		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
+	});
+});
+
+describe("#given background activation #when an app is told it is active #then only that process gets one record and the front app is not changed", () => {
+	it("posts one activation record naming the window to the target psn, and never sets the front process", async () => {
+		const skyLight = await loadSkyLight(true);
+		const targetPsn = Buffer.from([1, 0, 0, 0, 2, 0, 0, 0]);
+
+		expect(skyLight.setProcessAppActive(targetPsn, 11, true)).toBe(true);
+
+		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).toHaveBeenCalledTimes(1);
+		const [psn, record] = koffiMock.skyLightFunctions.SLPSPostEventRecordTo.mock.calls[0] as unknown as [
+			Buffer,
+			Buffer,
+		];
+		expect(psn).toBe(targetPsn);
+		expect(record.readUInt32LE(0x3c)).toBe(11);
+		expect(record[0x8a]).toBe(0x01);
+		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
+	});
+});
+
+describe("#given a focus steal #when the front is restored #then the person's app comes back without raising windows", () => {
+	it("sets the previous front process with kCPSNoWindows and no window", async () => {
+		const skyLight = await loadSkyLight(true);
+		const token = { previousPsn: Buffer.from([7, 0, 0, 0, 0, 0, 0, 0]), targetPsn: Buffer.alloc(8) };
+
+		skyLight.restoreFrontProcessNoWindows(token);
+
+		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).toHaveBeenCalledWith(
+			token.previousPsn,
+			0,
+			0x400,
+		);
+		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).not.toHaveBeenCalled();
 	});
 });
 

@@ -73,9 +73,7 @@ describe("#given the focus, HID and pointer wrappers #when invoked in a fake-onl
 		{ module: "coregraphics-bindings", name: "warpCursorPosition", operation: "physical-pointer" },
 		{ module: "skylight", name: "postMouseEventRecordToWindow", operation: "host-focus" },
 		{ module: "skylight", name: "activateWindowWithoutRaise", operation: "host-focus" },
-		{ module: "skylight", name: "setProcessAppActive", operation: "host-focus" },
 		{ module: "skylight", name: "beginFocusWithoutRaise", operation: "host-focus" },
-		{ module: "skylight", name: "restoreFrontProcessNoWindows", operation: "host-focus" },
 		{ module: "workspace", name: "activateApplication", operation: "host-focus" },
 	])("refuses every generated input to $name", ({ module, name, operation }) => {
 		const exports: Record<string, unknown> = {};

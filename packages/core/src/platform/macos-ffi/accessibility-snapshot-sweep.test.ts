@@ -20,17 +20,20 @@ const fixture = vi.hoisted(() => {
 		thirdWindow,
 		release: vi.fn<(reference: object | null) => void>(),
 		retain: vi.fn((reference: object) => reference),
-		getRunningApps: vi.fn(async () =>
-			[41002, 49999].map((pid) => ({
-				pid,
-				name: `Fixture ${pid}`,
-				bundleId: `test.fixture.${pid}`,
-				isActive: false,
-				isRunning: true,
-				path: "",
-			})),
-		),
+		getRunningApps: vi.fn(async () => [41002, 49999].map(runningFixture)),
+		findRunningApp: vi.fn(async (pid: number) => ([41002, 49999].includes(pid) ? runningFixture(pid) : undefined)),
 	};
+
+	function runningFixture(pid: number) {
+		return {
+			pid,
+			name: `Fixture ${pid}`,
+			bundleId: `test.fixture.${pid}`,
+			isActive: false,
+			isRunning: true,
+			path: "",
+		};
+	}
 });
 
 const actualKoffi = { ...(await import("./koffi.js")) };
@@ -104,7 +107,10 @@ vi.mock("./corefoundation.js", () => ({
 	cfArrayValueAt: (reference: readonly object[], index: number) => reference[index] ?? null,
 }));
 
-vi.mock("../app-list.js", () => ({ getRunningMacOSApps: fixture.getRunningApps }));
+vi.mock("../app-list.js", () => ({
+	getRunningMacOSApps: fixture.getRunningApps,
+	findRunningApp: fixture.findRunningApp,
+}));
 vi.mock("./power.js", () => ({ createDisplaySleepAssertion: () => ({ release: () => undefined }) }));
 vi.mock("./coregraphics.js", () => ({
 	createEvent: vi.fn(),
@@ -124,6 +130,7 @@ vi.mock("./screenshot.js", () => ({
 	screenCaptureAllowed: vi.fn(() => true),
 	captureDisplayImage: vi.fn(),
 	captureWindowImage: vi.fn(),
+	captureWindowImageAsync: vi.fn(),
 	captureDisplayRegionImage: vi.fn(),
 }));
 
@@ -138,6 +145,7 @@ beforeEach(() => {
 	fixture.release.mockClear();
 	fixture.retain.mockClear();
 	fixture.getRunningApps.mockClear();
+	fixture.findRunningApp.mockClear();
 });
 
 afterEach(() => {
@@ -210,17 +218,17 @@ describe("#given retained accessibility snapshots #when sweeping exited pids #th
 	});
 });
 
-describe("#given app-state capture #when the running app list resolves #then retained snapshots are swept", () => {
-	it("passes all enumerated running pids to the accessibility sweep", async () => {
+describe("#given app-state capture #when the target pid resolves #then snapshots of apps that quit are swept", () => {
+	it("asks only about the pids holding snapshots instead of enumerating every app", async () => {
 		observe(41001);
 		const key = observe(41002);
 		const sweep = vi.spyOn(accessibility, "releaseSnapshotsForExitedPids");
 		const computer = new MacOSHostComputer();
 		const state = await computer.getAppState(41002, { settleMs: 0, includeScreenshot: false });
 
-		expect(fixture.getRunningApps).toHaveBeenCalledTimes(1);
+		expect(fixture.getRunningApps).not.toHaveBeenCalled();
 		expect(sweep).toHaveBeenCalledTimes(1);
-		expect(sweep).toHaveBeenCalledWith([41002, 49999]);
+		expect(sweep).toHaveBeenCalledWith([41002]);
 		expect(accessibility.currentObservationKey(41001)).toBeUndefined();
 		expect(state.observationKey).not.toBe(key);
 		expect(accessibility.currentObservationKey(41002)).toBe(state.observationKey);

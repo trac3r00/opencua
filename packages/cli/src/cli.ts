@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import * as nodeModule from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -11,20 +12,38 @@ import type {
 	MacOSHostComputer,
 	MacOSHostComputerOptions,
 	PointerMode,
-	ScreenshotOptions,
 	ScrollOptions,
 } from "@opencua/core";
-import { AppApprovalStore, StopSwitch } from "@opencua/core/light";
+import { AppApprovalStore, StopSwitch, resolveStateDir } from "@opencua/core/light";
 import { Command } from "commander";
 import { registerBrowserCommands } from "./browser-commands.js";
+import { registerDaemonCommands } from "./daemon-commands.js";
+import { forwardToDaemon } from "./daemon.js";
 import { IN_HELPER_ENV, needsHelperPermissions } from "./helper-route.js";
 import { registerHistoryCommands } from "./history-commands.js";
 import { registerIosCommands } from "./ios.js";
 import { resolveLayout } from "./layout.js";
 import { registerLifecycleCommands, resolveCursorMotion } from "./lifecycle-commands.js";
+import {
+	type ReadCommandHost,
+	registerAppsListCommand,
+	registerAppsStateCommand,
+	registerCursorCommand,
+	registerScreenCommand,
+	registerScreenshotCommand,
+	registerWindowsListCommand,
+} from "./read-commands.js";
 import { registerSkillsCommands } from "./skills-command.js";
 import { commandPathOf, isInputCommand, stopRefusalFor } from "./stop-gate.js";
 import { registerUtmCommands } from "./utm.js";
+
+// Every CLI run is a fresh process that compiles @opencua/core again; Node's on-disk compile cache keeps that
+// compiled code between runs. Runtimes without it (older Node, Bun under test) simply compile as before; the
+// installed type definitions predate it, hence the reflective lookup.
+const enableCompileCache: unknown = Reflect.get(nodeModule, "enableCompileCache");
+if (typeof enableCompileCache === "function") {
+	Reflect.apply(enableCompileCache, nodeModule, []);
+}
 
 type PackageJson = {
 	version: string;
@@ -47,14 +66,6 @@ type Constructor = new () => unknown;
 type PermissionController = {
 	check(kind: PermissionKind): PermissionStatus | Promise<PermissionStatus>;
 	request(kind: PermissionKind): undefined | Promise<undefined>;
-};
-
-type ScreenshotCommandOptions = {
-	output: string;
-	region?: string;
-	display?: number;
-	format: "png" | "jpeg";
-	quality: number;
 };
 
 type PointCommandOptions = {
@@ -148,45 +159,17 @@ program
 		"deliver input without changing the frontmost app or moving the cursor (the default; kept for scripts that pass it)",
 	);
 
-program
-	.command("screenshot")
-	.description("Take a screenshot")
-	.option("-o, --output <path>", "output file path", "./screenshot.png")
-	.option("-r, --region <x,y,w,h>", "screenshot region in global screen points")
-	.option("--display <id>", "capture this display id instead of the main display", parsePositiveInteger)
-	.option("-f, --format <format>", "image format: png or jpeg", parseScreenshotFormat, "png")
-	.option("-q, --quality <n>", "JPEG quality from 1 to 100", parseQuality, 95)
-	.action(async (options: ScreenshotCommandOptions) => {
-		const region = options.region === undefined ? undefined : parseRegion(options.region);
-		const hostOptions = options.display === undefined ? {} : { display: options.display };
-		await withComputer(async (computer) => {
-			const screenshotOptions: ScreenshotOptions = {
-				format: options.format,
-				quality: options.quality,
-				...(region === undefined ? {} : { region }),
-			};
-			const result = await computer.screenshot(screenshotOptions);
-			writeFileSync(options.output, result.data);
-			writeOutput(
-				{
-					ok: true,
-					action: "screenshot",
-					args: {
-						output: options.output,
-						format: options.format,
-						quality: options.quality,
-						...(region === undefined ? {} : { region }),
-						...(options.display === undefined ? {} : { display: options.display }),
-					},
-					output: options.output,
-					mimeType: result.mimeType,
-					width: result.width,
-					height: result.height,
-				},
-				`Screenshot saved to ${options.output} (${result.mimeType}, ${result.width}x${result.height})`,
-			);
-		}, hostOptions);
-	});
+// The read commands are defined once (read-commands.ts) and shared with the daemon, so both print the same output.
+const inProcessReads: ReadCommandHost = {
+	cwd: process.cwd(),
+	json: isJsonOutput,
+	withComputer: async (action, hostOptions) => await withComputer(action, hostOptions),
+	emit: (result) => {
+		process.stdout.write(result.stdout);
+	},
+};
+
+registerScreenshotCommand(program, inProcessReads);
 
 program
 	.command("click")
@@ -370,25 +353,8 @@ program
 		writeActionOutput("wait", { milliseconds: duration }, `Waited ${duration}ms`);
 	});
 
-program
-	.command("cursor")
-	.description("Get cursor position")
-	.action(async () => {
-		await withComputer(async (computer) => {
-			const position = await computer.getCursorPosition();
-			writeOutput(position, `${position.x},${position.y}`);
-		});
-	});
-
-program
-	.command("screen")
-	.description("Get screen size")
-	.action(async () => {
-		await withComputer(async (computer) => {
-			const size = await computer.getScreenSize();
-			writeOutput(size, `${size.width}x${size.height}`);
-		});
-	});
+registerCursorCommand(program, inProcessReads);
+registerScreenCommand(program, inProcessReads);
 
 const permissionsCommand = program.command("permissions").description("Manage macOS permissions");
 
@@ -426,75 +392,12 @@ windowsCommand
 		writeOutput(activeWindow, formatUnknown(activeWindow));
 	});
 
-windowsCommand
-	.command("list")
-	.description("Print all windows")
-	.action(async () => {
-		const windows = await loadWindows();
-		const windowList = await callFirstMethod(windows, ["list", "listWindows", "all"]);
-		writeOutput(windowList, formatUnknown(windowList));
-	});
+registerWindowsListCommand(windowsCommand, inProcessReads);
 
 const appsCommand = program.command("apps").description("Inspect running apps and their accessibility state");
 
-appsCommand
-	.command("list")
-	.description("Print running apps (name, bundleId, pid)")
-	.action(async () => {
-		await withComputer(async (computer) => {
-			const apps = await computer.listApps();
-			writeOutput(apps, apps.map((app) => `${app.pid}\t${app.bundleId}\t${app.name}`).join("\n"));
-		});
-	});
-
-appsCommand
-	.command("state <app>")
-	.description("Print an app's accessibility (AX) element tree")
-	.option("--screenshot", "Include the base64 screenshot payload (large; omitted by default)")
-	.option("--max-elements <count>", "Cap the accessibility elements walked", (value) => Number.parseInt(value, 10))
-	.option("--window-id <id>", "Observe this WindowServer window id instead of the focused window", (value) =>
-		Number.parseInt(value, 10),
-	)
-	.option("--menu-bar", "Include the application menu bar")
-	.action(
-		async (
-			app: string,
-			options: {
-				screenshot?: boolean;
-				maxElements?: number;
-				windowId?: number;
-				menuBar?: boolean;
-			},
-		) => {
-			await withComputer(async (computer) => {
-				const { getAppStateForApp } = await import("@opencua/core");
-				const state = await getAppStateForApp(computer, app, {
-					...(options.maxElements === undefined ? {} : { maxElements: options.maxElements }),
-					...(options.windowId === undefined ? {} : { windowId: options.windowId }),
-					...(options.menuBar === true ? { includeMenuBar: true } : {}),
-				});
-				// The base64 screenshot dwarfs the AX tree and makes the JSON unusable for
-				// programmatic consumers, so it is dropped unless explicitly requested.
-				const payload = options.screenshot === true ? state : { ...state, screenshotBase64: "" };
-				writeOutput(
-					payload,
-					[
-						`${state.app} (${state.bundleId}) pid=${state.pid} frontmost=${state.frontmost} axAvailable=${state.axAvailable}${state.windowId === undefined ? "" : ` window=${state.windowId}${state.windowTitle === undefined ? "" : ` (${state.windowTitle})`}`}`,
-						...(state.windowCandidates ?? []).map(
-							(candidate) =>
-								`candidate #${candidate.id}\t${candidate.title}\t` +
-								`[${candidate.bounds.x},${candidate.bounds.y},${candidate.bounds.width},${candidate.bounds.height}]`,
-						),
-						...state.elements.map(
-							(element) =>
-								`#${element.id}\t${element.role}\t${element.label ?? ""}\t` +
-								`[${element.frame.x},${element.frame.y},${element.frame.width},${element.frame.height}]`,
-						),
-					].join("\n"),
-				);
-			});
-		},
-	);
+registerAppsListCommand(appsCommand, inProcessReads);
+registerAppsStateCommand(appsCommand, inProcessReads);
 
 appsCommand
 	.command("set-value <app> <elementIndex> <value>")
@@ -604,6 +507,23 @@ program.hook("preAction", (_program, actionCommand) => {
 	}
 });
 
+registerDaemonCommands(program, { entryScript: fileURLToPath(import.meta.url), stateDir: resolveStateDir() });
+
+// A running daemon answers the read commands without this process starting the core, its capture session or the
+// helper relaunch; any failure to reach it falls through to the in-process path below.
+if (process.env[IN_HELPER_ENV] !== "1") {
+	const forwarded = await forwardToDaemon(process.argv.slice(2), {
+		stateDir: resolveStateDir(),
+		cwd: process.cwd(),
+		env: process.env,
+	});
+	if (forwarded !== undefined) {
+		process.stdout.write(forwarded.stdout);
+		process.stderr.write(forwarded.stderr);
+		process.exit(forwarded.exitCode);
+	}
+}
+
 await program.parseAsync().catch(handleError);
 
 /**
@@ -661,10 +581,10 @@ function readPackageJson(): PackageJson {
 	return parsed;
 }
 
-async function withComputer(
-	action: (computer: MacOSHostComputer) => Promise<void>,
+async function withComputer<T>(
+	action: (computer: MacOSHostComputer) => Promise<T>,
 	hostOptions: MacOSHostComputerOptions = {},
-): Promise<void> {
+): Promise<T> {
 	// Commander sets `cursor` to false only when `--no-cursor` is passed; the overlay
 	// is shown by default. When hidden, inject the no-op overlay so no helper spawns.
 	const { MacOSHostComputer, NOOP_POINTER_OVERLAY, agentCursorEnabled } = await import("@opencua/core");
@@ -685,7 +605,7 @@ async function withComputer(
 	try {
 		const targetPid = await resolveTargetPid();
 		computer.setTarget(targetPid);
-		await action(computer);
+		return await action(computer);
 	} finally {
 		await computer.close();
 	}
@@ -795,30 +715,6 @@ function parsePositiveInteger(value: string): number {
 		throw new Error("value must be positive");
 	}
 	return number;
-}
-
-function parseQuality(value: string): number {
-	const quality = parsePositiveInteger(value);
-	if (quality > 100) {
-		throw new Error("quality must be between 1 and 100");
-	}
-	return quality;
-}
-
-function parseRegion(value: string): NonNullable<ScreenshotOptions["region"]> {
-	const parts = value.split(",").map((part) => parseInteger(part.trim(), "region value"));
-	const [x, y, width, height] = parts;
-	if (parts.length !== 4 || x === undefined || y === undefined || width === undefined || height === undefined) {
-		throw new Error("region must be x,y,width,height");
-	}
-	return { x, y, width, height };
-}
-
-function parseScreenshotFormat(value: string): ScreenshotOptions["format"] {
-	if (value === "png" || value === "jpeg") {
-		return value;
-	}
-	throw new Error("format must be png or jpeg");
 }
 
 function parseMouseButton(value: string): MouseButton {

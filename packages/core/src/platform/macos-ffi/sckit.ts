@@ -185,11 +185,54 @@ export function captureWindowViaSck(
 		quality,
 		outLen,
 	);
-	if (bytesPointer === null || outLen[0] <= 0) {
+	return takeWindowBytes(bindings, windowId, bytesPointer, outLen[0]);
+}
+
+/**
+ * captureWindowViaSck on koffi's worker thread: the capture waits on ScreenCaptureKit, so the caller's
+ * thread stays free for work that does not depend on the pixels, such as reading the accessibility tree.
+ */
+export async function captureWindowViaSckAsync(
+	windowId: number,
+	maxWidth: number,
+	maxHeight: number,
+	format: "png" | "jpeg",
+	quality: number,
+): Promise<Buffer | null> {
+	const bindings = tryLoadSckitBindings();
+	if (bindings === null) {
+		return null;
+	}
+	const outLen: [number] = [0];
+	const bytesPointer = await new Promise<Buffer | null>((resolve, reject) => {
+		bindings.captureWindow.async(
+			windowId,
+			maxWidth,
+			maxHeight,
+			format === "jpeg" ? SCK_WINDOW_FORMAT_JPEG : SCK_WINDOW_FORMAT_PNG,
+			quality,
+			outLen,
+			(error: unknown, result: Buffer | null) => {
+				if (error !== null && error !== undefined)
+					reject(error instanceof Error ? error : new Error(String(error)));
+				else resolve(result);
+			},
+		);
+	});
+	return takeWindowBytes(bindings, windowId, bytesPointer, outLen[0]);
+}
+
+function takeWindowBytes(
+	bindings: SckBindings,
+	windowId: number,
+	bytesPointer: Buffer | null,
+	byteLength: number,
+): Buffer {
+	if (bytesPointer === null || byteLength <= 0) {
 		throw new Error(`Native ScreenCaptureKit window capture failed for window ${windowId}`);
 	}
 	try {
-		const decoded: ArrayLike<number> = koffi.decode(bytesPointer, "uint8_t", outLen[0]);
+		const decoded: ArrayLike<number> = koffi.decode(bytesPointer, "uint8_t", byteLength);
 		return Buffer.from(decoded);
 	} finally {
 		bindings.freeBytes(bytesPointer);

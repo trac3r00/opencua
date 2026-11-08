@@ -89,6 +89,9 @@ export interface HelperFacts {
 	readonly inputs?: { readonly built: string; readonly current: string | undefined } | undefined;
 }
 
+const PERMISSION_NAMES = ["accessibility", "screenRecording", "inputMonitoring"] as const;
+export type PermissionErrors = Readonly<Partial<Record<(typeof PERMISSION_NAMES)[number], string>>>;
+
 /** The part of `server.js --doctor` output the doctor reads. */
 export interface SelfCheckReport {
 	readonly permissions: {
@@ -96,6 +99,8 @@ export interface SelfCheckReport {
 		readonly screenRecording: boolean;
 		/** Undefined from a helper that predates the Input Monitoring check. */
 		readonly inputMonitoring?: boolean | undefined;
+		/** Why a permission reads false because its check threw in the helper, not because it was denied. */
+		readonly errors?: PermissionErrors | undefined;
 	};
 	readonly sessionMode: string | undefined;
 	readonly processArch: MachArchitecture | undefined;
@@ -439,6 +444,16 @@ function automationChecks(automation: SelfCheckReport["automation"]): DoctorChec
 }
 
 /** Only the cua-history watcher listens to input, so Input Monitoring is checked once `opencua history start` ran. */
+/** A permission check that threw: whether it is granted is unknown, and granting it again would not help. */
+function unreadPermission(id: string, name: string, error: string): DoctorCheck {
+	return check(
+		id,
+		"fail",
+		`${name} could not be checked in "${HELPER_DISPLAY_NAME}" (${error}), so whether it is granted is unknown`,
+		REBUILD_HELPER,
+	);
+}
+
 function inputMonitoringChecks(facts: DoctorFacts, report: SelfCheckReport): DoctorCheck[] {
 	if (facts.historyInstalled !== true) {
 		return [];
@@ -446,6 +461,10 @@ function inputMonitoringChecks(facts: DoctorFacts, report: SelfCheckReport): Doc
 	const granted = report.permissions.inputMonitoring;
 	if (granted === true) {
 		return [check("permission:input-monitoring", "ok", `Input Monitoring granted to "${HELPER_DISPLAY_NAME}"`)];
+	}
+	const error = report.permissions.errors?.inputMonitoring;
+	if (error !== undefined) {
+		return [unreadPermission("permission:input-monitoring", "Input Monitoring", error)];
 	}
 	if (granted === undefined) {
 		return [
@@ -502,25 +521,30 @@ function selfCheckChecks(facts: DoctorFacts): DoctorCheck[] {
 			),
 		);
 	}
+	const errors = report.permissions.errors;
 	checks.push(
 		report.permissions.accessibility
 			? check("permission:accessibility", "ok", `Accessibility granted to "${HELPER_DISPLAY_NAME}"`)
-			: check(
-					"permission:accessibility",
-					"fail",
-					`Accessibility not granted to "${HELPER_DISPLAY_NAME}" (needed to observe apps and send input)`,
-					permissionFix("Accessibility", "Accessibility"),
-					true,
-				),
+			: errors?.accessibility !== undefined
+				? unreadPermission("permission:accessibility", "Accessibility", errors.accessibility)
+				: check(
+						"permission:accessibility",
+						"fail",
+						`Accessibility not granted to "${HELPER_DISPLAY_NAME}" (needed to observe apps and send input)`,
+						permissionFix("Accessibility", "Accessibility"),
+						true,
+					),
 		report.permissions.screenRecording
 			? check("permission:screen-recording", "ok", `Screen Recording granted to "${HELPER_DISPLAY_NAME}"`)
-			: check(
-					"permission:screen-recording",
-					"fail",
-					`Screen Recording not granted to "${HELPER_DISPLAY_NAME}" (needed for screenshots)`,
-					permissionFix("Screen Recording", "Screen & System Audio Recording"),
-					true,
-				),
+			: errors?.screenRecording !== undefined
+				? unreadPermission("permission:screen-recording", "Screen Recording", errors.screenRecording)
+				: check(
+						"permission:screen-recording",
+						"fail",
+						`Screen Recording not granted to "${HELPER_DISPLAY_NAME}" (needed for screenshots)`,
+						permissionFix("Screen Recording", "Screen & System Audio Recording"),
+						true,
+					),
 		...inputMonitoringChecks(facts, report),
 		...automationChecks(report.automation),
 	);
@@ -770,12 +794,23 @@ export function parseSelfCheckOutput(stdout: string): SelfCheckReport | undefine
 	const processInfo = record["process"] as Record<string, unknown> | undefined;
 	const nativeCapture = record["nativeCapture"] as Record<string, unknown> | undefined;
 	const automation = record["automation"];
+	const rawErrors = permissions["errors"];
+	const errors =
+		typeof rawErrors === "object" && rawErrors !== null
+			? Object.fromEntries(
+					PERMISSION_NAMES.flatMap((name) => {
+						const error: unknown = Reflect.get(rawErrors, name);
+						return typeof error === "string" ? [[name, error]] : [];
+					}),
+				)
+			: {};
 	return {
 		permissions: {
 			accessibility: permissions["accessibility"],
 			screenRecording: permissions["screenRecording"],
 			inputMonitoring:
 				typeof permissions["inputMonitoring"] === "boolean" ? permissions["inputMonitoring"] : undefined,
+			errors: Object.keys(errors).length > 0 ? errors : undefined,
 		},
 		sessionMode: typeof session?.["mode"] === "string" ? session["mode"] : undefined,
 		processArch: typeof processInfo?.["arch"] === "string" ? nodeArchitecture(processInfo["arch"]) : undefined,

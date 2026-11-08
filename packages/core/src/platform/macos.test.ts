@@ -29,6 +29,7 @@ const actualScreenshot = { ...(await import("./macos-ffi/screenshot.js")) };
 vi.mock("./macos-ffi/screenshot.js", () => ({
 	...actualScreenshot,
 	captureWindowImage: sckitMock.captureWindowImage,
+	captureWindowImageAsync: async () => sckitMock.captureWindowImage(),
 }));
 
 const { parseRunningApps } = await import("./app-list.js");

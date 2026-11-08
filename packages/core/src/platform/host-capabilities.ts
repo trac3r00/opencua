@@ -17,6 +17,8 @@ const IOHIDCheckAccess = ioKit.func("IOHIDCheckAccess", "uint32", ["uint32"]) as
 const IOHID_REQUEST_TYPE_LISTEN_EVENT = 1;
 const IOHID_ACCESS_GRANTED = 0;
 
+export type HostPermission = "accessibility" | "screenRecording" | "inputMonitoring";
+
 export interface HostCapabilities {
 	readonly permissions: {
 		readonly accessibility: boolean;
@@ -24,6 +26,8 @@ export interface HostCapabilities {
 		readonly screenRecording: boolean;
 		/** Input Monitoring: only the cua-history watcher needs it, to record keystrokes and clicks. */
 		readonly inputMonitoring?: boolean;
+		/** Why a permission reads false because its check threw (a broken binding) rather than because it was denied. */
+		readonly errors?: Readonly<Partial<Record<HostPermission, string>>>;
 	};
 	readonly session: {
 		readonly screenLocked: boolean;
@@ -45,14 +49,27 @@ function guarded<T>(read: () => T, fallback: T): T {
 }
 
 export function probeHostCapabilities(): HostCapabilities {
+	const errors: Partial<Record<HostPermission, string>> = {};
+	const permission = (name: HostPermission, read: () => boolean): boolean => {
+		try {
+			return read();
+		} catch (error: unknown) {
+			errors[name] = error instanceof Error ? error.message : String(error);
+			return false;
+		}
+	};
+	const accessibility = permission("accessibility", () => AXIsProcessTrusted());
+	const screenRecording = permission("screenRecording", () => screenCaptureAllowed());
+	const inputMonitoring = permission(
+		"inputMonitoring",
+		() => IOHIDCheckAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) === IOHID_ACCESS_GRANTED,
+	);
 	return {
 		permissions: {
-			accessibility: guarded(() => AXIsProcessTrusted(), false),
-			screenRecording: guarded(() => screenCaptureAllowed(), false),
-			inputMonitoring: guarded(
-				() => IOHIDCheckAccess(IOHID_REQUEST_TYPE_LISTEN_EVENT) === IOHID_ACCESS_GRANTED,
-				false,
-			),
+			accessibility,
+			screenRecording,
+			inputMonitoring,
+			...(Object.keys(errors).length > 0 ? { errors } : {}),
 		},
 		session: {
 			screenLocked: isScreenLocked(),

@@ -2,7 +2,13 @@ import type { KoffiFunc } from "koffi";
 import type { Rect } from "../../types/index.js";
 import { type CFTypeRef, cfRelease, toCFString, withCFString } from "./corefoundation.js";
 import { koffi } from "./koffi.js";
-import { captureMainDisplayPngViaSck, captureWindowViaSck, getSckitLoadError, isSckitAvailable } from "./sckit.js";
+import {
+	captureMainDisplayPngViaSck,
+	captureWindowViaSck,
+	captureWindowViaSckAsync,
+	getSckitLoadError,
+	isSckitAvailable,
+} from "./sckit.js";
 
 type CGImageRef = CFTypeRef;
 type CGImageDestinationRef = CFTypeRef;
@@ -152,23 +158,41 @@ export function captureWindowImage(
 	format: "png" | "jpeg",
 	quality: number,
 ): CapturedWindow {
+	assertWindowCaptureArguments(windowId, maxWidth, maxHeight);
+	const data = captureWindowViaSck(windowId, maxWidth, maxHeight, format, clampQuality(quality));
+	if (data === null) {
+		throw new Error(`Native ScreenCaptureKit window capture is unavailable: ${getSckitLoadError()}`);
+	}
+	return { data };
+}
+
+/** captureWindowImage without blocking this thread while ScreenCaptureKit captures. */
+export async function captureWindowImageAsync(
+	windowId: number,
+	maxWidth: number,
+	maxHeight: number,
+	format: "png" | "jpeg",
+	quality: number,
+): Promise<CapturedWindow> {
+	assertWindowCaptureArguments(windowId, maxWidth, maxHeight);
+	const data = await captureWindowViaSckAsync(windowId, maxWidth, maxHeight, format, clampQuality(quality));
+	if (data === null) {
+		throw new Error(`Native ScreenCaptureKit window capture is unavailable: ${getSckitLoadError()}`);
+	}
+	return { data };
+}
+
+function assertWindowCaptureArguments(windowId: number, maxWidth: number, maxHeight: number): void {
 	if (!Number.isSafeInteger(windowId) || windowId <= 0) {
 		throw new Error(`captureWindowImage requires a positive integer windowId, got ${windowId}`);
 	}
 	if (!Number.isSafeInteger(maxWidth) || !Number.isSafeInteger(maxHeight) || maxWidth <= 0 || maxHeight <= 0) {
 		throw new Error(`captureWindowImage requires positive integer dimensions, got ${maxWidth}x${maxHeight}`);
 	}
-	const data = captureWindowViaSck(
-		windowId,
-		maxWidth,
-		maxHeight,
-		format,
-		Math.min(100, Math.max(1, Math.round(quality))),
-	);
-	if (data === null) {
-		throw new Error(`Native ScreenCaptureKit window capture is unavailable: ${getSckitLoadError()}`);
-	}
-	return { data };
+}
+
+function clampQuality(quality: number): number {
+	return Math.min(100, Math.max(1, Math.round(quality)));
 }
 
 export function getMainDisplayId(): number {

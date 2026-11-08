@@ -597,6 +597,11 @@ export function releaseAccessibilitySnapshot(pid: number): void {
 	replaceElementSnapshot(pid, undefined);
 }
 
+/** The pids that currently hold an element snapshot. */
+export function accessibilitySnapshotPids(): readonly number[] {
+	return [...elementSnapshots.keys()];
+}
+
 export function releaseSnapshotsForExitedPids(runningPids: readonly number[]): number {
 	const runningPidSet = new Set(runningPids);
 	let released = 0;

@@ -38,7 +38,7 @@ const fixture = vi.hoisted(() => ({
 		windowTitle: "Other Space",
 		elements: [],
 	})),
-	captureWindowImage: vi.fn(() => ({ data: fakePng(800, 600), width: 800, height: 600 })),
+	captureWindowImage: vi.fn((..._args: unknown[]) => ({ data: fakePng(800, 600), width: 800, height: 600 })),
 }));
 
 vi.mock("./macos-open-windows.js", () => ({
@@ -49,6 +49,7 @@ vi.mock("./macos-window-target-fallback.js", () => ({
 }));
 vi.mock("./macos-ffi/accessibility.js", () => ({
 	currentObservationKey: vi.fn(() => "0:background-space-test"),
+	accessibilitySnapshotPids: vi.fn<() => readonly number[]>(() => []),
 	releaseSnapshotsForExitedPids: vi.fn<() => number>(() => 0),
 	elementFrameByIndex: vi.fn(),
 	extractAccessibilityTree: fixture.extractAccessibilityTree,
@@ -78,6 +79,7 @@ vi.mock("./macos-ffi/screenshot.js", () => ({
 	captureDisplayImage: vi.fn(() => ({ data: fakePng(1440, 900), width: 1440, height: 900 })),
 	captureDisplayRegionImage: vi.fn(),
 	captureWindowImage: fixture.captureWindowImage,
+	captureWindowImageAsync: async (...args: unknown[]) => fixture.captureWindowImage(...args),
 	getMainDisplayId: vi.fn(() => 1),
 	getMainDisplayLogicalSize: vi.fn(() => ({ width: 1440, height: 900 })),
 	getMainDisplayNativePixelSize: vi.fn(() => ({ width: 2880, height: 1800 })),

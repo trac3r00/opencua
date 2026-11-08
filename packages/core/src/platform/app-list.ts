@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import type { AppInfo } from "../accessibility/types.js";
 import { type AppUsage, parseAppUsageBlocks } from "./app-usage.js";
 import { execFileStdout } from "./exec-util.js";
+import { readAppUsage } from "./macos-ffi/workspace-usage.js";
 import {
 	type RunningApplicationIdentifier,
 	type WorkspaceRunningApplication,
@@ -18,10 +19,22 @@ export interface RunningAppInfo extends AppInfo {
 	readonly path: string;
 }
 
+/**
+ * Spotlight usage for each app bundle path, read in-process; the spawned `mdls` (most of a list_apps call) is only
+ * the fallback for a host where the in-process read fails.
+ */
 export async function collectAppUsage(paths: readonly string[]): Promise<Map<string, AppUsage>> {
 	if (paths.length === 0) {
 		return new Map();
 	}
+	try {
+		return readAppUsage(paths);
+	} catch {
+		return await collectAppUsageWithMdls(paths);
+	}
+}
+
+async function collectAppUsageWithMdls(paths: readonly string[]): Promise<Map<string, AppUsage>> {
 	try {
 		const result = await execFileAsync(
 			"mdls",

@@ -116,6 +116,14 @@ async function python(scenario: string): Promise<unknown> {
 }
 
 describe("shipped Python semantic implementation", () => {
+	it("#given the shipped helper source #when parsed with the Python 3.8 grammar #then it has no newer syntax", async () => {
+		const parse = `import ast, sys\nast.parse(sys.stdin.read(), feature_version=(3, 8))\nprint("null")`;
+		const child = execute("python3", ["-c", parse], { timeout: 5000 });
+		child.child.stdin?.end(LINUX_HELPER);
+		const { stdout } = await child;
+		expect(stdout.trim()).toBe("null");
+	}, 30_000);
+
 	it("#given AT-SPI EditableText #when set-value and typing run #then edits the exact accessible without physical commands", async () => {
 		const result = await python(String.raw`
 semantic(dict(ref=ref, action="setValue", value="start"))
