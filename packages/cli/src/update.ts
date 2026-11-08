@@ -110,6 +110,8 @@ export interface UpdateDependencies {
 	readonly runSetup: () => number;
 	/** The helper inputs digest the updated checkout would build; undefined when it cannot be computed. */
 	readonly helperDigest: () => string | undefined;
+	/** Whether setup signs the helper with the checkout's stable identity (.signing), which keeps its permission grants. */
+	readonly stableSigning: boolean;
 	readonly print: (text: string) => void;
 }
 
@@ -194,7 +196,9 @@ export function runUpdate(layout: Pick<Layout, "checkout" | "helperApp">, deps: 
 	const digest = stamp === undefined ? undefined : deps.helperDigest();
 	if (stamp !== undefined && digest !== undefined && stamp !== digest) {
 		print(
-			"warning: this update changes the helper app's launcher or Info.plist, so setup rebuilds it. The rebuild is a new code identity: macOS will ask for Screen Recording and Accessibility again.",
+			deps.stableSigning
+				? "note: this update changes the helper app's launcher, Info.plist or history recorder, so setup rebuilds it with the same signing identity: its permission grants stay. Reconnect each MCP client once (e.g. /mcp reconnect opencua) so running servers move to the new helper."
+				: "warning: this update changes the helper app's launcher, Info.plist or history recorder, so setup rebuilds it. Without a signing identity the rebuild is a new code identity: macOS will ask for Screen Recording and Accessibility again.",
 		);
 	}
 	const setupStatus = deps.runSetup();

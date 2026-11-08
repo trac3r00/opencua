@@ -45,7 +45,14 @@ function publish(version: string, file = "README.md"): void {
 	git(author, "push", "--quiet", "origin", "HEAD:master");
 }
 
-function update(options: { readonly stamp?: string; readonly digest?: string; readonly marker?: InstallMarker } = {}) {
+function update(
+	options: {
+		readonly stamp?: string;
+		readonly digest?: string;
+		readonly marker?: InstallMarker;
+		readonly stableSigning?: boolean;
+	} = {},
+) {
 	const output: string[] = [];
 	let setupRuns = 0;
 	const helperApp = join(root, "opencua-mcp.app");
@@ -62,6 +69,7 @@ function update(options: { readonly stamp?: string; readonly digest?: string; re
 				return 0;
 			},
 			helperDigest: () => options.digest,
+			stableSigning: options.stableSigning ?? false,
 			print: (text) => {
 				output.push(text);
 			},
@@ -195,6 +203,14 @@ describe("#given a clean checkout behind its upstream #when it is updated #then 
 
 		expect(changed.output).toContain("macOS will ask for Screen Recording and Accessibility again");
 		expect(same.output).not.toContain("ask for Screen Recording");
+	});
+
+	it("tells a stably signed install that the rebuilt helper keeps its grants", () => {
+		publish("0.1.3");
+		const result = update({ stamp: "built-from", digest: "now", stableSigning: true });
+
+		expect(result.output).toContain("its permission grants stay");
+		expect(result.output).not.toContain("ask for Screen Recording");
 	});
 });
 

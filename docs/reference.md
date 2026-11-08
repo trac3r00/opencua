@@ -757,7 +757,8 @@ macOS keys screen capture and input synthesis to the identity of the process tha
 
 1. **The MCP server through the signed helper** (what setup builds and `opencua config --register` configures): grant
    **Screen Recording** and **Accessibility** to **opencua-mcp** in System Settings → Privacy & Security. One grant
-   serves every MCP client and survives setup and `opencua update`; only a helper rebuild asks again.
+   serves every MCP client and survives setup and `opencua update`; only a helper rebuild without the stable signing
+   identity in `.signing` asks again.
 2. **The CLI, or `node packages/mcp/dist/server.js` run directly**: grant both to the terminal or IDE that launches
    it. Permission is per binary: switching from iTerm2 to Ghostty means granting again.
 3. **Apple Events / Automation**: the helper asks once per app it controls (System Events, Finder, approved browsers);
@@ -858,6 +859,25 @@ pnpm --filter @opencua/core build:native
 # Is this Mac ready? (exit 0 when it is)
 pnpm doctor
 ```
+
+Edit without reinstalling: `opencua dev link` points every registered MCP client at a developer checkout's server,
+still launched through the installed, already-permitted helper. With `pnpm dev` (a watch build of core, browser, agent,
+mcp and cli) running there, the helper's supervisor restarts the server behind the same connection after each rebuild,
+so a saved edit reaches the agent without setup, `opencua update`, a helper rebuild or a reconnect. Linking changes
+the registration once, so reconnect each client once after `link` and after `unlink`.
+
+```bash
+opencua dev link .     # once, from the developer checkout (needs pnpm install and one build there)
+pnpm dev               # keep running while you edit
+opencua dev status     # which checkout's server the clients run
+opencua dev unlink     # back to the installed checkout
+```
+
+Native sources (`packages/core/native/*.m`) still need `pnpm --filter @opencua/core build:native`. A helper rebuild
+keeps its permission grants as long as it is signed with the stable identity in `.signing`; when that keychain no
+longer unlocks, the build stops before touching the working helper and names the repair:
+`./scripts/create-signing-identity.sh --repair`, which rebuilds the keychain from the certificate and key kept beside
+it, so the identity does not change.
 
 Per-package builds:
 

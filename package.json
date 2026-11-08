@@ -12,6 +12,7 @@
 	},
 	"scripts": {
 		"build": "pnpm -r build",
+		"dev": "pnpm --filter @opencua/core --filter @opencua/browser --filter @opencua/agent --filter @opencua/mcp --filter @opencua/cli --parallel exec tsgo -p tsconfig.build.json --watch",
 		"typecheck": "pnpm -r typecheck",
 		"typecheck:tests": "tsgo --noEmit -p tsconfig.test.json",
 		"lint": "biome check .",
