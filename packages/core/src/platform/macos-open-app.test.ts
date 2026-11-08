@@ -227,6 +227,29 @@ describe("#given a background open #when the opened app takes the foreground any
 	it("reports an honest false when the previous app refuses to come back", async () => {
 		const lister = new FakeLister();
 		const editor = { ...app("Editor", "com.example.editor", 10), isFrontmost: true };
+		lister.apps = [editor];
+		lister.onCall = (call) => {
+			if (call >= 2) {
+				lister.apps = [
+					{ ...editor, isFrontmost: false },
+					{ ...app("Safari", "com.apple.Safari", 20), isFrontmost: true },
+				];
+			}
+		};
+		const restored: number[] = [];
+
+		const result = await openApplication(lister, "Safari", {
+			launcher: frontLauncher(restored, false),
+			pollIntervalMs: 1,
+		});
+
+		expect(result.frontmostRestored).toBe(false);
+		expect(result.launched).toBe(true);
+	});
+
+	it("leaves the front app alone when the target was already running, because nothing was launched", async () => {
+		const lister = new FakeLister();
+		const editor = { ...app("Editor", "com.example.editor", 10), isFrontmost: true };
 		lister.apps = [editor, app("Safari", "com.apple.Safari", 20)];
 		lister.onCall = (call) => {
 			if (call >= 2) {
@@ -238,9 +261,9 @@ describe("#given a background open #when the opened app takes the foreground any
 		};
 		const restored: number[] = [];
 
-		const result = await openApplication(lister, "Safari", { launcher: frontLauncher(restored, false) });
+		const result = await openApplication(lister, "Safari", { launcher: frontLauncher(restored) });
 
-		expect(result.frontmostRestored).toBe(false);
-		expect(result.launched).toBe(false);
+		expect(result.frontmostRestored).toBeUndefined();
+		expect(restored).toEqual([]);
 	});
 });

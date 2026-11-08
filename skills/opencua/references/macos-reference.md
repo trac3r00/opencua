@@ -305,8 +305,8 @@ The MCP server does not contain an LLM scheduler or spawn agents. Background
 delivery remains invisible. Virtual cursor identities and positions are isolated, not independent
 operating-system mice. Sessions may reuse worker names but cannot own the same app process.
 Release workers only after their runs finish, or release all idle workers with `op: "release_session"`.
-Assignment and refresh observations default to text-only tables; request `include_screenshot: true`
-for visual decisions and use `diff_only: true` for compact refreshes.
+Assignment observations default to text-only tables; for refreshes request `element_format: "table"`.
+Request `include_screenshot: true` for visual decisions and use `diff_only: true` for compact refreshes.
 
 Use `manage_workers` with `op: "observe"` and the assigned `session_id` and `worker_id` to refresh
 that worker's context after a stale token or changed window. Do not use an

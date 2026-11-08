@@ -17,7 +17,8 @@ This package is the engine the other surfaces wrap. It provides:
 
 Default keyboard targeting never raises a window or selects it through the Window menu. If another
 document owns the app's keyboard focus, input is refused rather than bringing the target over the user's work.
-Background delivery remains process/window-addressed and emits no cursor overlay.
+Background delivery remains process/window-addressed; it shows background cursor cues unless
+`OPENCUA_CURSOR_BACKGROUND_CUES=off`.
 
 ```bash
 pnpm --filter @opencua/core build

@@ -106,14 +106,13 @@ export async function openApplication(
 		if (launcher.background !== true) {
 			await launcher.launch(running.bundleId);
 		}
-		const restored = await restoreIfStolen(running.pid);
+		// Nothing was launched in the background, so a front app seen now is the person's own choice, not a theft.
 		return {
 			name: running.name,
 			bundleId: running.bundleId,
 			pid: running.pid,
 			launched: false,
 			activated: launcher.background !== true,
-			...(restored === undefined ? {} : { frontmostRestored: restored }),
 		};
 	}
 	await launcher.launch(name);

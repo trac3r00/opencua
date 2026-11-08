@@ -278,8 +278,9 @@ setting updates every client's registration.
 
 The full MCP toolset accepts `session_id` on `manage_workers` and `run_worker`, so independent
 coordinators sharing one server can reuse worker names while keeping tokens, status, and virtual cursors separate.
-Sessions own disjoint app processes; their step chains run concurrently, with ordered steps inside
-each app. Worker observations use text-only tables by default, with optional screenshots and diff-only
+Sessions own disjoint app processes (an OpenCUA-owned surface is the exception: workers share it by disjoint
+regions). Under background delivery their step chains run concurrently, with ordered steps inside each app; attended
+delivery runs them one after another. Worker observations use text-only tables by default, with optional screenshots and diff-only
 refreshes. See [worker session usage](packages/mcp/README.md#concurrent-worker-sessions).
 
 ### How OpenCUA compares

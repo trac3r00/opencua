@@ -145,16 +145,19 @@ export function registerWorkerTools(
 						return objectResult({ released_session: session ?? "default" });
 					case "pause":
 						return objectResult({
+							session_id: session ?? "default",
 							worker_id: request.worker_id,
 							control: coordinator.pause(request.worker_id, session),
 						});
 					case "stop":
 						return objectResult({
+							session_id: session ?? "default",
 							worker_id: request.worker_id,
 							control: coordinator.stop(request.worker_id, session),
 						});
 					case "resume":
 						return objectResult({
+							session_id: session ?? "default",
 							worker_id: request.worker_id,
 							control: coordinator.resume(request.worker_id, session),
 						});

@@ -691,7 +691,12 @@ const workerAssignmentsSchema = z
 	.max(6);
 
 const workerSessionFields = {
-	session_id: z.string().min(1).max(128).optional(),
+	session_id: z
+		.string()
+		.min(1)
+		.max(128)
+		.regex(/^[^\u0000-\u001f\u007f]+$/, "session_id must not contain control characters")
+		.optional(),
 };
 const workerObservationFields = {
 	include_screenshot: includeScreenshotSchema,

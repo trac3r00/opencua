@@ -84,6 +84,7 @@ export function registerParallelTools(
 	session: GuardedSession,
 	computer: GuardedComputerInterface,
 ): void {
+	// One cursor identity per app process, kept for the most recent processes only.
 	const cursors = new Map<number, string>();
 	const cursorFor = (pid: number | undefined): string => {
 		if (pid === undefined) return randomUUID();
@@ -91,8 +92,17 @@ export function registerParallelTools(
 		if (cursor === undefined) {
 			cursor = randomUUID();
 			cursors.set(pid, cursor);
+			if (cursors.size > 64) {
+				const oldest = cursors.keys().next().value;
+				if (oldest !== undefined) cursors.delete(oldest);
+			}
 		}
 		return cursor;
+	};
+	// The session acts on the exact process the cursor was chosen for, not on a name resolved a second time.
+	const resolvedApp = (targets: ReadonlyMap<string, number>, app: string): string => {
+		const pid = targets.get(app);
+		return pid === undefined ? app : String(pid);
 	};
 	server.registerTool(
 		"observe_apps",
@@ -111,7 +121,7 @@ export function registerParallelTools(
 						settle(app, () =>
 							withCursorIdentity(cursorFor(targets.get(app)), () =>
 								session.observe({
-									app,
+									app: resolvedApp(targets, app),
 									diffOnly: input.diff_only === true,
 									includeScreenshot: input.include_screenshot === true,
 									...(input.max_elements === undefined ? {} : { maxElements: input.max_elements }),
@@ -149,7 +159,7 @@ export function registerParallelTools(
 					withCursorIdentity(cursorFor(targets.get(batch.app)), () =>
 						session.runSteps(
 							batch.observation_token,
-							batch.app,
+							resolvedApp(targets, batch.app),
 							batch.steps,
 							expectFromInput(batch.expect),
 							driver,

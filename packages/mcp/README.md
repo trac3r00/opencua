@@ -24,7 +24,8 @@ shared host the last two are refused like every other action.
 The full toolset supports several cooperating sessions on one server. Use `session_id` on
 `manage_workers` and `run_worker`; omitting it selects `default`. Worker names can repeat across
 sessions. App ownership is pinned to the PID and exclusive across all sessions, including app aliases,
-so two sessions cannot race the same app's keyboard focus or invalidate each other's tokens.
+so two sessions cannot race the same app's keyboard focus or invalidate each other's tokens. The exception is an
+OpenCUA-owned surface, which several workers share by disjoint `region`s.
 This is coordination between trusted clients, not authentication or a separate macOS login session.
 
 ```json
@@ -38,7 +39,8 @@ This is coordination between trusted clients, not authentication or a separate m
 ```
 
 Pass the returned token to `run_worker` with the same `session_id` and `worker_id`.
-Run calls for disjoint apps concurrently; steps inside each worker remain ordered.
+Under background delivery, run calls for disjoint apps concurrently; attended delivery serializes them. Steps inside
+each worker remain ordered.
 Every worker has a server-created virtual cursor identity and per-app position. Background cursors
 are invisible and never move the user's pointer. `observe_apps` and `run_parallel` also maintain
 distinct cursor identities per app; `run_parallel` validates every step before dispatch.

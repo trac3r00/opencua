@@ -153,10 +153,24 @@ describe("worker sessions #given independent tasks #when sessions share worker n
 				arguments: { op: "status", session_id: "two" },
 			});
 			expect(JSON.parse(jsonText(otherStatus))).toEqual([]);
+			const keeper = await harness.client.callTool({
+				name: "manage_workers",
+				arguments: {
+					op: "assign",
+					session_id: "two",
+					assignments: [{ worker_id: "keeper", task: "keep", app: "Other" }],
+				},
+			});
+			expect(keeper.isError).not.toBe(true);
 			await harness.client.callTool({
 				name: "manage_workers",
 				arguments: { op: "release_session", session_id: "one" },
 			});
+			const kept = await harness.client.callTool({
+				name: "manage_workers",
+				arguments: { op: "status", session_id: "two" },
+			});
+			expect(JSON.parse(jsonText(kept))).toMatchObject([{ session_id: "two", worker_id: "keeper" }]);
 			const stale = await harness.client.callTool({
 				name: "run_steps",
 				arguments: {

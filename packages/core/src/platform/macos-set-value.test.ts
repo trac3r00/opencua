@@ -91,8 +91,9 @@ describe("#given background delivery #when AXRaise is requested #then no window 
 	it("refuses before accessibility dispatch or keyboard feedback", async () => {
 		const computer = new MacOSHostComputer();
 		try {
-			// On the shared host every action is refused first; either refusal keeps the window where it is.
-			await expect(computer.performAction(1234, 7, "AXRaise")).rejects.toThrow(/foreground|human desktop/);
+			await expect(computer.performAction(1234, 7, "AXRaise")).rejects.toThrow(
+				/AXRaise requires foreground delivery/,
+			);
 			expect(accessibilityMock.performActionByIndex).not.toHaveBeenCalled();
 			expect(firstInputController().showKeyboard).not.toHaveBeenCalled();
 		} finally {

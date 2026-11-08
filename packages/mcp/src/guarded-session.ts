@@ -1876,9 +1876,9 @@ export class GuardedSession {
 		const live = this.tokens.get(token);
 		if (live === undefined) return;
 		this.tokens.delete(token);
-		if (this.tokenByPid.get(live.observation.pid) === token) {
-			this.tokenByPid.delete(live.observation.pid);
-			this.reusableReads.delete(live.observation.pid);
+		if (this.tokenByPid.get(live.key) === token) {
+			this.tokenByPid.delete(live.key);
+			this.reusableReads.delete(live.key);
 		}
 	}
 

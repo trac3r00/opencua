@@ -74,9 +74,13 @@ export type WorkerObservationOptions = Omit<ObservationOptions, "includeAccessib
 /** Coordinators sharing one server name their workers per session; omitted means this one. */
 export const DEFAULT_WORKER_SESSION = "default";
 
-/** The default session keeps the bare worker id, so registry entries from other processes still match. */
+/**
+ * The default session keeps the bare worker id, so registry entries from other processes still match. A named session
+ * joins with NUL, which neither part can contain (session ids are validated; worker ids name cursors, which refuse
+ * control characters), so two different pairs never share a key.
+ */
 function workerKey(sessionId: string, workerId: string): string {
-	return sessionId === DEFAULT_WORKER_SESSION ? workerId : `${sessionId}/${workerId}`;
+	return sessionId === DEFAULT_WORKER_SESSION ? workerId : `${sessionId}\u0000${workerId}`;
 }
 
 export type WorkerObservation = {
@@ -780,6 +784,17 @@ export class WorkerCoordinator {
 	/** A worker this process assigned, or one another opencua process assigned that this one now acts for. */
 	private lookup(workerId: string, sessionId = DEFAULT_WORKER_SESSION): WorkerState | undefined {
 		const key = workerKey(sessionId, workerId);
+		const cached = this.workers.get(key);
+		// An adopted worker lives only while its registry entry does: a release in the assigning process ends it here
+		// too, together with any token this process issued for it.
+		if (cached !== undefined && this.adopted.has(key) && this.registry?.find(key) === undefined) {
+			if (cached.assignment.observation_token !== undefined) {
+				this.session.revokeToken(cached.assignment.observation_token);
+			}
+			this.workers.delete(key);
+			this.adopted.delete(key);
+			return undefined;
+		}
 		const local = this.workers.get(key);
 		const shared = local === undefined ? this.registry?.find(key) : undefined;
 		if (shared === undefined) return local;
@@ -793,7 +808,7 @@ export class WorkerCoordinator {
 				...(shared.region === undefined ? {} : { region: shared.region }),
 				cursor_id: randomUUID(),
 				cursor_owner: {
-					agentName: shared.agent_name ?? shared.worker_id,
+					agentName: shared.agent_name ?? workerId,
 					sessionId: this.sessionId,
 					...(shared.parent_agent_name === undefined ? {} : { parentAgentName: shared.parent_agent_name }),
 				},
