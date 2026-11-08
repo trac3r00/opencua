@@ -107,6 +107,15 @@ internal static class Program {
 			!command.TryGetProperty("t", out var type)) {
 			return;
 		}
+		// Agents send points relative to the window, frame included; the page wants CSS pixels of the WebView's
+		// client area, so the frame offset is removed and the DPI scale undone.
+		var form = view.FindForm();
+		if (form != null) {
+			var origin = view.PointToScreen(System.Drawing.Point.Empty);
+			var scale = view.DeviceDpi / 96.0;
+			x = (x - (origin.X - form.Bounds.X)) / scale;
+			y = (y - (origin.Y - form.Bounds.Y)) / scale;
+		}
 		if (type.GetString() == "pointer" && command.TryGetProperty("kind", out var kindValue)) {
 			var (eventType, buttons) = kindValue.GetString() switch {
 				"down" => ("mousePressed", 1),

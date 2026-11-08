@@ -40,6 +40,8 @@ export interface PowerShellTransportOptions {
 	readonly processFactory?: WindowsProcessFactory;
 	/** Run the helper and the apps it starts on this owned Win32 desktop ("OpenCUA-..."), never the person's. */
 	readonly desktop?: string;
+	/** The PowerShell to run; default pwsh, falling back to Windows PowerShell when pwsh is missing. */
+	readonly executable?: "pwsh" | "powershell.exe";
 }
 
 const processFactory: WindowsProcessFactory = (executable, args, onLine, onExit, env) => {
@@ -78,13 +80,14 @@ export class PowerShellTransport implements WindowsTransport {
 	private process: WindowsProcess | undefined;
 	private nextId = 0;
 	private closed = false;
-	private executable = "pwsh";
+	private executable: string;
 	private readonly pending = new Map<
 		number,
 		{ resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; line: string }
 	>();
 
 	constructor(private readonly options: PowerShellTransportOptions = {}) {
+		this.executable = options.executable ?? "pwsh";
 		if (!Number.isFinite(options.timeoutMs ?? 15_000) || (options.timeoutMs ?? 15_000) <= 0) {
 			throw new WindowsHostError("INVALID_ARGUMENT", "timeoutMs must be positive and finite");
 		}

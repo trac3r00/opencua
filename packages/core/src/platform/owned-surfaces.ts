@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { type Socket, connect } from "node:net";
 import { join } from "node:path";
@@ -192,7 +193,7 @@ export function openOwnedSurface(request: OpenSurfaceRequest, options: OwnedSurf
 export function speakOnSurface(pid: number, clip: Buffer, options: OwnedSurfaceOptions = {}): boolean {
 	if (clip.length === 0 || clip.length > 16 * 1024 * 1024) throw new RangeError("clip must be 1 byte to 16 MB");
 	const stateDir = options.stateDir ?? resolveStateDir();
-	const path = join(stateDir, `surface-${pid}-speech-${Date.now()}.audio`);
+	const path = join(stateDir, `surface-${pid}-speech-${randomUUID()}.audio`);
 	if (`S ${path}`.length > 255) throw new RangeError("state directory path is too long for the surface channel");
 	writeFileSync(path, clip, { mode: 0o600 });
 	const socketPath = surfaceSocketPath(pid, options);

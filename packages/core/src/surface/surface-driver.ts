@@ -80,6 +80,8 @@ export class SurfaceDriver {
 export function startSurfaceDriver(options: {
 	readonly socketPath: string;
 	readonly shell: { readonly command: string; readonly args: readonly string[] };
+	/** Called once when the shell cannot start or the socket cannot be served; everything is torn down first. */
+	readonly onError?: (error: Error) => void;
 }): { readonly server: Server; readonly shell: ChildProcessWithoutNullStreams; stop(): void } {
 	const shell = spawn(options.shell.command, [...options.shell.args], { stdio: ["pipe", "pipe", "pipe"] });
 	const driver = new SurfaceDriver((command) => shell.stdin.write(`${JSON.stringify(command)}\n`));
@@ -96,5 +98,16 @@ export function startSurfaceDriver(options: {
 		shell.kill();
 	};
 	shell.on("exit", stop);
+	let failed = false;
+	const fail = (error: Error) => {
+		if (failed) return;
+		failed = true;
+		stop();
+		options.onError?.(error);
+	};
+	shell.on("error", (error) =>
+		fail(new Error(`surface shell ${options.shell.command} could not start: ${error.message}`)),
+	);
+	server.on("error", (error) => fail(error));
 	return { server, shell, stop };
 }

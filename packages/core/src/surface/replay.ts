@@ -84,7 +84,7 @@ export function exportReplayHtml(events: readonly ReplayEvent[], meta: ReplayMet
   stage.width = REPLAY.width * scale; stage.height = REPLAY.height * scale; lanes.width = stage.width;
   document.title = "OpenCUA replay: " + REPLAY.title;
   function state(t) {
-    const out = {};
+    const out = Object.create(null);
     for (const e of REPLAY.events) {
       if (e.t > t) break;
       const s = (out[e.cursor] = out[e.cursor] || { trail: [], down: false, decision: "", peak: 0 });

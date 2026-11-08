@@ -360,7 +360,10 @@ function Dispatch($method,$p) {
    return @{pid=$process.Id;desktop=$env:OPENCUA_DESKTOP}
   }
   'postTarget' {
-   $h=[OpenCuaNative]::Target([IntPtr](Window $p).Current.NativeWindowHandle,[int]$p.x,[int]$p.y)
+   $top=$null
+   if ($null -eq $p.windowId) { foreach ($handle in (Handles $p.pid)) { $b=HandleBounds $handle; if ([int]$p.x -ge $b.x -and [int]$p.x -lt ($b.x+$b.width) -and [int]$p.y -ge $b.y -and [int]$p.y -lt ($b.y+$b.height)) { $top=$handle; break } } }
+   if ($null -eq $top) { $top=[IntPtr](Window $p).Current.NativeWindowHandle }
+   $h=[OpenCuaNative]::Target($top,[int]$p.x,[int]$p.y)
    $o=New-Object OpenCuaNative+POINT; [void][OpenCuaNative]::ScreenToClient($h,[ref]$o)
    return @{hwnd=$h.ToInt64();originX=-$o.X;originY=-$o.Y}
   }

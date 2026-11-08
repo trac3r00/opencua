@@ -34,6 +34,26 @@ export function retargetSamples(samples: readonly MotionSample[], from: number, 
 	});
 }
 
+/**
+ * The rest of a move after `elapsed` seconds, rebased to start at 0: its first sample is where the cursor is now
+ * (interpolated on the bent path), so a playback that needs a t = 0 keyframe starts from the current position.
+ */
+export function remainingSamples(samples: readonly MotionSample[], elapsed: number): MotionSample[] {
+	const later = samples.filter((sample) => sample.t > elapsed);
+	const next = later[0];
+	if (next === undefined) return [];
+	const before = [...samples].reverse().find((sample) => sample.t <= elapsed) ?? next;
+	const span = next.t - before.t;
+	const u = span > 0 ? (elapsed - before.t) / span : 1;
+	const current = {
+		t: 0,
+		x: before.x + (next.x - before.x) * u,
+		y: before.y + (next.y - before.y) * u,
+		heading: next.heading,
+	};
+	return [current, ...later.map((sample) => ({ ...sample, t: sample.t - elapsed }))];
+}
+
 /** How long before arrival the target is looked at again: late enough to see it settle, early enough to steer. */
 export const RETARGET_LOOK_AHEAD_SECONDS = 0.08;
 

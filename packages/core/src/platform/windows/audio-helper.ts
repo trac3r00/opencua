@@ -95,7 +95,7 @@ public static class OpenCuaAudio {
    short channels=2, bits=16; int rate=44100, align=channels*bits/8;
    Marshal.WriteInt16(format,0,1); Marshal.WriteInt16(format,2,channels); Marshal.WriteInt32(format,4,rate);
    Marshal.WriteInt32(format,8,rate*align); Marshal.WriteInt16(format,12,(short)align); Marshal.WriteInt16(format,14,bits); Marshal.WriteInt16(format,16,0);
-   Marshal.ThrowExceptionForHR(client.Initialize(0,0x00020000u|0x80000000u|0x08000000u,2000000,0,format,IntPtr.Zero));
+   Marshal.ThrowExceptionForHR(client.Initialize(0,0x80000000u|0x08000000u,2000000,0,format,IntPtr.Zero));
    Guid captureId=typeof(IAudioCaptureClient).GUID; object captureObject;
    Marshal.ThrowExceptionForHR(client.GetService(ref captureId,out captureObject));
    IAudioCaptureClient capture=(IAudioCaptureClient)captureObject;

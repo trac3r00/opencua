@@ -139,7 +139,10 @@ export class GuardedPlatformComputer implements GuardedComputerInterface {
 
 	private withChanges(full: AppState, options: AppStateOptions, diffOnly: boolean): AppState {
 		if (full.treeSkipped === true) return full;
-		const scope = `${full.windowId ?? 0}|${options.subtreeOf ?? ""}|${options.maxElements ?? ""}`;
+		// Every option that changes which elements or which frames come back is part of the scope, and so is the app
+		// identity, so a diff never spans a different capture or a reused pid.
+		const { probe: _probe, diffOnly: _diffOnly, includeScreenshot: _includeScreenshot, ...shape } = options;
+		const scope = `${full.bundleId}|${full.windowId ?? 0}|${JSON.stringify(shape, Object.keys(shape).sort())}`;
 		const prior = this.priorTrees.get(full.pid);
 		if (options.probe !== true) this.priorTrees.set(full.pid, { elements: full.elements, scope });
 		if (prior === undefined || prior.scope !== scope) return full;

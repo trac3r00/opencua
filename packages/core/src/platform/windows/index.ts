@@ -1,6 +1,6 @@
 import type { AXTreeElement, AppState, WindowInventoryEntry } from "../../accessibility/types.js";
 import type { OcrTextEntry } from "../../accessibility/types.js";
-import type { ComputerInterface, ScreenshotResult } from "../../computer/interface.js";
+import type { ComputerInterface, ScreenshotResult, WindowTextRead } from "../../computer/interface.js";
 import { type ScreenshotViewport, screenRectToScreenshot } from "../../computer/viewport.js";
 import type {
 	AppStateOptions,
@@ -62,6 +62,8 @@ export class WindowsHostComputer implements ComputerInterface {
 	};
 	readonly delivery: "attended" | "background";
 	private readonly transport: WindowsTransport;
+	/** OCR needs Windows PowerShell 5.1 (its WinRT projection), so it gets its own helper unless one was injected. */
+	private ocrTransport: WindowsTransport | undefined;
 	private target: number | undefined;
 	private logicalCursor: Point = { x: 0, y: 0 };
 	private readonly observations = new Map<number, Observation>();
@@ -204,11 +206,48 @@ export class WindowsHostComputer implements ComputerInterface {
 
 	/** Text of the app's window read from its pixels with the built-in Windows OCR, in screen frames. */
 	async readWindowText(pid: number, windowId?: number): Promise<OcrTextEntry[]> {
-		if (this.ocrGeneration !== this.transport.generation) {
-			await this.transport.request("loadOcr", { source: windowsOcrSource });
-			this.ocrGeneration = this.transport.generation;
+		return readWindowsOcr(await this.ocrResponse(pid, windowId));
+	}
+
+	private async ocrResponse(pid: number, windowId?: number): Promise<unknown> {
+		if (this.ocrTransport === undefined) {
+			this.ocrTransport =
+				this.options.transport ?? new PowerShellTransport({ ...this.options, executable: "powershell.exe" });
 		}
-		return readWindowsOcr(await this.transport.request("ocr", { pid: this.pid(pid), windowId }));
+		const transport = this.ocrTransport;
+		if (this.ocrGeneration !== transport.generation) {
+			await transport.request("loadOcr", { source: windowsOcrSource });
+			this.ocrGeneration = transport.generation;
+		}
+		return transport.request("ocr", { pid: this.pid(pid), windowId });
+	}
+
+	/**
+	 * The shared OCR entry point: text of the app's window, optionally only inside `region` (pixels of the window's
+	 * screenshot, like click coordinates). Failures are reported as unavailable, never thrown.
+	 */
+	async recognizeWindowText(targetPid: number, options?: { readonly region?: Rect }): Promise<WindowTextRead> {
+		let response: unknown;
+		try {
+			response = await this.ocrResponse(targetPid);
+		} catch (error) {
+			if (error instanceof WindowsHostError && error.code === "NO_WINDOW") return { unavailable: "no-window" };
+			return { unavailable: "recognition-failed" };
+		}
+		const entries = readWindowsOcr(response);
+		const region = options?.region;
+		if (region === undefined) return { entries };
+		const result = wire.record(response);
+		const bounds = wire.rect(result["bounds"]);
+		const scaleX = wire.number(result["width"]) / bounds.width;
+		const scaleY = wire.number(result["height"]) / bounds.height;
+		return {
+			entries: entries.filter(({ frame }) => {
+				const x = (frame.x + frame.width / 2 - bounds.x) * scaleX;
+				const y = (frame.y + frame.height / 2 - bounds.y) * scaleY;
+				return x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height;
+			}),
+		};
 	}
 
 	private audioGeneration: number | undefined;
@@ -483,6 +522,7 @@ export class WindowsHostComputer implements ComputerInterface {
 	async close(): Promise<void> {
 		this.observations.clear();
 		await this.transport.close();
+		if (this.ocrTransport !== undefined && this.ocrTransport !== this.transport) await this.ocrTransport.close();
 	}
 }
 

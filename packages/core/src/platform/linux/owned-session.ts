@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
 import { spawnLinuxHelper } from "./client.js";
 import { type LinuxHostComputer, createLinuxHostComputer } from "./index.js";
 
@@ -82,7 +83,10 @@ export function readXinputMasters(text: string): XMaster[] {
 	return masters;
 }
 
-/** An agent's master device name: "opencua-" plus the agent name reduced to letters, digits and dashes. */
+/**
+ * An agent's master device name: "opencua-", the agent name reduced to letters, digits and dashes, and a short hash
+ * of the full name, so two agents whose names reduce alike never share a master pointer.
+ */
 export function agentMasterName(agent: string): string {
 	const slug = agent
 		.toLowerCase()
@@ -90,7 +94,17 @@ export function agentMasterName(agent: string): string {
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 40);
 	if (slug.length === 0) throw new RangeError("agent name has no letters or digits");
-	return `opencua-${slug}`;
+	return `opencua-${slug}-${createHash("sha256").update(agent).digest("hex").slice(0, 8)}`;
+}
+
+/** Displays in use: live sockets and the lock files X servers (including crashed ones) leave behind. */
+function takenDisplays(): readonly string[] {
+	const sockets = existsSync("/tmp/.X11-unix") ? readdirSync("/tmp/.X11-unix") : [];
+	const locks = readdirSync("/tmp").flatMap((name) => {
+		const match = /^\.X(\d+)-lock$/.exec(name);
+		return match === null ? [] : [`X${match[1]}`];
+	});
+	return [...sockets, ...locks];
 }
 
 export interface OwnedLinuxSession {
@@ -131,19 +145,36 @@ export async function startOwnedLinuxSession(
 		readonly sockets?: () => readonly string[];
 	} = {},
 ): Promise<OwnedLinuxSession> {
-	const sockets = options.sockets ?? (() => readdirSync("/tmp/.X11-unix"));
-	const plan = ownedDisplayPlan(
-		options.kind ?? "xvfb",
-		freeDisplayNumber(sockets()),
-		options.size ?? { width: 1440, height: 900 },
-	);
-	const server = (options.start ?? startServer)(plan);
-	await server.ready;
-	const env = { DISPLAY: plan.display, WAYLAND_DISPLAY: "", XDG_SESSION_TYPE: "x11" };
+	const sockets = options.sockets ?? takenDisplays;
+	// A display another server took between the check and the start (or one a crashed server left locked) fails to
+	// start; the next free number is tried, up to five times.
+	const tried: string[] = [];
+	let plan: OwnedDisplayPlan | undefined;
+	let server: { readonly ready: Promise<void>; stop(): void } | undefined;
+	for (let attempt = 0; server === undefined; attempt += 1) {
+		const candidate = ownedDisplayPlan(
+			options.kind ?? "xvfb",
+			freeDisplayNumber([...sockets(), ...tried]),
+			options.size ?? { width: 1440, height: 900 },
+		);
+		const started = (options.start ?? startServer)(candidate);
+		try {
+			await started.ready;
+			plan = candidate;
+			server = started;
+		} catch (error) {
+			started.stop();
+			if (attempt >= 4) throw error;
+			tried.push(`X${candidate.display.slice(1)}`);
+		}
+	}
+	if (plan === undefined || server === undefined) throw new Error("no owned display started");
+	const owned = { plan, server };
+	const env = { DISPLAY: owned.plan.display, WAYLAND_DISPLAY: "", XDG_SESSION_TYPE: "x11" };
 	const run = options.run ?? runCommand;
 	const computer = createLinuxHostComputer({ helperFactory: spawnLinuxHelper("python3", env), physical: true });
 	return {
-		display: plan.display,
+		display: owned.plan.display,
 		computer,
 		async addAgentPointer(agent) {
 			const name = agentMasterName(agent);
@@ -161,7 +192,7 @@ export async function startOwnedLinuxSession(
 		},
 		async close() {
 			await computer.close();
-			server.stop();
+			owned.server.stop();
 		},
 	};
 }
@@ -182,6 +213,12 @@ function startServer(plan: OwnedDisplayPlan): { readonly ready: Promise<void>; s
 			clearInterval(check);
 			clearTimeout(timer);
 			reject(new Error(`${plan.command} exited (${code})`));
+		});
+		// A missing or unlaunchable display server is a startup failure, never an unhandled error event.
+		child.on("error", (error) => {
+			clearInterval(check);
+			clearTimeout(timer);
+			reject(new Error(`${plan.command} could not start: ${error.message}`));
 		});
 	});
 	return { ready, stop: () => child.kill() };

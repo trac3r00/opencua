@@ -21,7 +21,7 @@ from gi.repository import GLib, Gtk, WebKit  # noqa: E402
 
 DISPATCH = """
 (function (kind, x, y) {
-  const state = (window.__opencua = window.__opencua || { down: false, target: null });
+  const state = (window.__opencua = window.__opencua || { down: false, target: null, moved: false });
   const target = (kind === "drag" || kind === "up") && state.target ? state.target : document.elementFromPoint(x, y);
   if (!target) return;
   const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, pointerId: 1,
@@ -30,9 +30,9 @@ DISPATCH = """
     target.dispatchEvent(new PointerEvent(pointer, { ...base, buttons }));
     if (mouse) target.dispatchEvent(new MouseEvent(mouse, { ...base, buttons }));
   };
-  if (kind === "down") { state.down = true; state.target = target; fire("pointerdown", "mousedown", 1); }
-  else if (kind === "drag") { fire("pointermove", "mousemove", 1); }
-  else if (kind === "up") { fire("pointerup", "mouseup", 0); if (state.down) target.dispatchEvent(new MouseEvent("click", { ...base, buttons: 0 })); state.down = false; state.target = null; }
+  if (kind === "down") { state.down = true; state.moved = false; state.target = target; fire("pointerdown", "mousedown", 1); }
+  else if (kind === "drag") { state.moved = true; fire("pointermove", "mousemove", 1); }
+  else if (kind === "up") { fire("pointerup", "mouseup", 0); if (state.down && !state.moved) target.dispatchEvent(new MouseEvent("click", { ...base, buttons: 0 })); state.down = false; state.moved = false; state.target = null; }
   else { fire("pointermove", "mousemove", 0); }
 })(%s, %f, %f);
 """

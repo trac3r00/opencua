@@ -55,8 +55,11 @@ describe("#given xinput list output #when masters are read #then only paired mas
 
 describe("#given agent names #when turned into master names #then they are safe xinput names", () => {
 	it("keeps letters, digits and dashes, and refuses names with none", () => {
-		expect(agentMasterName("Explorer #2 (beta)")).toBe("opencua-explorer-2-beta");
-		expect(agentMasterName("검색 agent")).toBe("opencua-agent");
+		expect(agentMasterName("Explorer #2 (beta)")).toMatch(/^opencua-explorer-2-beta-[0-9a-f]{8}$/);
+		expect(agentMasterName("검색 agent")).toMatch(/^opencua-agent-[0-9a-f]{8}$/);
+		// Names that reduce to the same slug still get different masters.
+		expect(agentMasterName("a b")).not.toBe(agentMasterName("a-b"));
+		expect(agentMasterName("Scout")).toBe(agentMasterName("Scout"));
 		expect(() => agentMasterName("검색 ")).toThrow(RangeError);
 		expect(() => agentMasterName("--")).toThrow(RangeError);
 	});
@@ -91,12 +94,13 @@ describe("#given an owned session #when an agent pointer is added #then xinput r
 			run: async (_command, args, env) => {
 				calls.push({ args, display: env["DISPLAY"] });
 				if (args[0] === "create-master") created = true;
-				return created ? XINPUT.split("explorer").join("scout") : XINPUT;
+				return created ? XINPUT.split("opencua-explorer").join(agentMasterName("Scout")) : XINPUT;
 			},
 		});
 		expect(session.display).toBe(":91");
-		expect(await session.addAgentPointer("Scout")).toEqual({ name: "opencua-scout", pointerId: 9, keyboardId: 10 });
-		expect(await session.addAgentPointer("Scout")).toEqual({ name: "opencua-scout", pointerId: 9, keyboardId: 10 });
+		const name = agentMasterName("Scout");
+		expect(await session.addAgentPointer("Scout")).toEqual({ name, pointerId: 9, keyboardId: 10 });
+		expect(await session.addAgentPointer("Scout")).toEqual({ name, pointerId: 9, keyboardId: 10 });
 		expect(calls.filter((call) => call.args[0] === "create-master")).toHaveLength(1);
 		expect(calls.every((call) => call.display === ":91")).toBe(true);
 		await session.close();

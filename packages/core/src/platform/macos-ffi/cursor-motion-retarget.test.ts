@@ -23,7 +23,9 @@ describe("#given a cursor still flying to a target #when the target moves a litt
 		const bent = planCursorMotion({ x: 612, y: 395 }, shown, motion, first.move, halfway);
 		expect(arrival(bent.command)).toBeCloseTo(total / 2, 2);
 		expect(bent.move.samples.at(-1)).toMatchObject({ x: 612, y: 395 });
-		expect(bent.move.samples[0]?.t).toBeGreaterThan(0);
+		// The bent flight starts at t = 0 where the cursor is now, then goes on.
+		expect(bent.move.samples[0]?.t).toBe(0);
+		expect(bent.move.samples[1]?.t).toBeGreaterThan(0);
 
 		const far = planCursorMotion({ x: 600 + RETARGET_RADIUS + 20, y: 400 }, shown, motion, first.move, halfway);
 		expect(far.move.samples[0]?.t).toBe(0);

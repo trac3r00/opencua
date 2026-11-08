@@ -1,6 +1,7 @@
 import type { Socket } from "node:net";
 import { planMove } from "../../../vendor/cua-cursor-motion.js";
-import { type MotionSample, retargetSamples } from "../../computer/retarget.js";
+import { currentCursorIdentity } from "../../computer/cursor-scope.js";
+import { type MotionSample, remainingSamples, retargetSamples } from "../../computer/retarget.js";
 import type { Point } from "../../types/index.js";
 import type { CursorMotionConfig } from "./cursor-motion-config.js";
 
@@ -79,9 +80,7 @@ export function planCursorMotion(
 		const arrival = flying.samples.at(-1)?.t ?? 0;
 		const moved = Math.hypot(point.x - flying.target.x, point.y - flying.target.y);
 		if (elapsed >= 0 && elapsed < arrival && moved > 0 && moved <= RETARGET_RADIUS) {
-			const rest = retargetSamples(flying.samples, elapsed, point)
-				.filter((sample) => sample.t > elapsed)
-				.map((sample) => ({ ...sample, t: sample.t - elapsed }));
+			const rest = remainingSamples(retargetSamples(flying.samples, elapsed, point), elapsed);
 			return { command: packet(motion.style, rest), move: { samples: rest, startedAt: now, target: point } };
 		}
 	}
@@ -102,7 +101,22 @@ export function cursorMotionCommand(point: Point, state: CursorState, motion: Cu
 	return planCursorMotion(point, state, motion, undefined, 0).command;
 }
 
-const flyingByScope = new Map<string, FlyingMove>();
+// In-flight moves per daemon connection and per cursor identity within it, so one cursor never bends another's
+// flight and a reconnect starts clean.
+const flyingBySocket = new WeakMap<Socket, Map<string, FlyingMove>>();
+
+function flyingMoves(socket: Socket): Map<string, FlyingMove> {
+	let moves = flyingBySocket.get(socket);
+	if (moves === undefined) {
+		moves = new Map();
+		flyingBySocket.set(socket, moves);
+	}
+	return moves;
+}
+
+function flyingKey(scope: string): string {
+	return `${scope}|${currentCursorIdentity() ?? ""}`;
+}
 
 /** Query and plan on the same connection, so other clients cannot interleave a move. */
 export async function prepareCursorMotion(
@@ -112,6 +126,8 @@ export async function prepareCursorMotion(
 ): Promise<string> {
 	const match = /^(pid \d+ )?set (-?\d+) (-?\d+)\n$/.exec(command);
 	if (match === null) {
+		// Any other command (track, set-direct, ...) replaces native playback, so no flight is left to bend.
+		flyingMoves(socket).delete(flyingKey(/^(pid \d+ )?/.exec(command)?.[1] ?? ""));
 		return command;
 	}
 	const scope = match[1] ?? "";
@@ -155,9 +171,9 @@ export async function prepareCursorMotion(
 		{ x: Number(match[2]), y: Number(match[3]) },
 		state,
 		motion,
-		flyingByScope.get(scope),
+		flyingMoves(socket).get(flyingKey(scope)),
 		Date.now(),
 	);
-	flyingByScope.set(scope, planned.move);
+	flyingMoves(socket).set(flyingKey(scope), planned.move);
 	return `${scope}${planned.command}`;
 }
