@@ -10,6 +10,10 @@ trap 'printf "BLOCKED: setup failed at line %s (exit %s)\n" "$LINENO" "$?" >&2' 
 mode="${1:-}"
 [[ $# -le 1 && ( -z "$mode" || "$mode" == --prepare ) ]] ||
 	fail "usage: bash scripts/bench-cdb/setup.sh [--prepare]"
+# The OpenCUA arm drives host apps, and OpenCUA now refuses all input on the shared host (it acts only in its
+# own isolated desktop). The arm is kept for the record; preparing the clone still works, running it does not.
+[[ "$mode" == --prepare ]] ||
+	fail "the cc-apple-cua arm needs host input, which OpenCUA refuses on the shared host; see README.md, Status"
 for tool in git node uv npm timeout xcrun codesign; do
 	command -v "$tool" >/dev/null || fail "missing $tool; install the named prerequisite"
 done

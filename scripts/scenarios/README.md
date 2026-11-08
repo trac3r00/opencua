@@ -137,3 +137,16 @@ and refusal classes, sampling coverage, all three type mappings, overlapping
 sessions, lock telemetry, process reaping, and the desktop authorization gate.
 They do not certify GUI behavior. No core fix is justified until a measured
 apple-cua interleaving failure has been observed.
+
+## Known limitations (review of 2026-11-08, not fixed)
+
+- Like the bench-cdb arm, these scenarios drive host apps, which current OpenCUA refuses on the shared host; they
+  are kept for the record.
+- `team-input-isolation.mjs` resolves ffprobe only at `/opt/homebrew/bin` (not Intel Homebrew), and a delayed
+  scheduler can dispatch a burst after the 20 s window.
+- `team-input-native.swift` skips windows whose `AXDocument` is a URL object.
+- `iphone-notes.mjs` does not reap `screencapture` and the MCP server on SIGINT/SIGTERM/SIGHUP, overwrites
+  earlier cohort artifacts on rerun, and records the startup window rather than each repetition's window; its test
+  drops missing tokens before checking uniqueness.
+- The scratch directory is retained when app cleanup fails; the shared-path `grep` checks print errors for absent
+  paths; the documented offline check should use `bun test --isolate`.

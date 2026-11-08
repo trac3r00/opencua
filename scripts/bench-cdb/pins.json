@@ -24,7 +24,7 @@
 		"helper_launcher": "packages/mcp/dist/opencua-mcp.app/Contents/MacOS/opencua-mcp",
 		"node": "packages/mcp/dist/opencua-mcp.app/Contents/Resources/node",
 		"node_version": "v26.7.0",
-		"skill": "skills/apple-cua",
+		"skill": "skills/opencua",
 		"env": {
 			"OPENCUA_DELIVERY": "background",
 			"OPENCUA_TOOLSET": "full",

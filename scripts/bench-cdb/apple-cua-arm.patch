@@ -169,5 +169,5 @@ index 000000000..65798557c
 +    (tmp_path / "apple-cua.json").write_text(json.dumps({"skill": str(skill)}))
 +    with mock.patch.object(ca, "WORK", tmp_path):
 +        cwd = ca.prepare_cwd("cc-apple-cua", tmp_path / "cwd")
-+    assert (cwd / ".claude/skills/apple-cua/SKILL.md").is_file()
++    assert (cwd / ".claude/skills/opencua/SKILL.md").is_file()
 +    assert not (cwd / ".claude/skills/cua-driver").exists()

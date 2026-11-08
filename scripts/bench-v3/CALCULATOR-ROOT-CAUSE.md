@@ -185,3 +185,11 @@ was terminated and independently verified gone. All task scratch was removed.
 The post-setup shared-install check found no `apple-cua-wt` references in
 `~/.local/bin/apple-cua`, `~/.omo/agent/mcp.json`, or
 `~/.apple-cua/bundle/bundle.json`.
+
+## Known limitations (review of 2026-11-08, not fixed)
+
+- The runner paragraph above describes the exploratory, pre-A39 revision; the final A39 runner reads both values
+  and uses the display as the primary outcome.
+- `calculator-run.mjs` creates its scratch directory after taking `.run.lock` and outside the cleanup scope, so a
+  failure there leaves the lock behind.
+- `verify-fresh-calculator.mjs` can accept an A39 artifact without the launch and display-probe provenance.

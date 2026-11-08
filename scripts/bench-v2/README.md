@@ -33,3 +33,13 @@ A **run** is one attempt for each selected scenario and driver; `n` is the numbe
 `text_bytes` includes UTF-8 response text and serialized structured content; `image_base64_bytes` counts the model-facing encoded image characters. `estimated_tokens = text_bytes / 4 + sum(ceil(image_width * image_height / 750))` for PNG/JPEG screenshot blocks. Unknown image dimensions contribute zero image tokens, not an invented estimate. `payload KB` uses `(text_bytes + image_base64_bytes) / 1024`; p50 seconds is the median of run-level summed driver-call seconds, whereas calls, payload, and tokens are mean per attempt. `call_ms` stores each individual tool call's wall-clock latency including failed calls; the dashboard pools calls by driver for p50/p95 (linear percentile interpolation). `disturbed_focus` compares the frontmost application bundle ID before the first and after the last driver call; `disturbed_pointer` compares hardware cursor coordinates at those points (>2 pt Euclidean motion). `Disturbed user` is the percentage of measured attempts with either flag. Fixture setup activations, oracle reads and clipboard restoration are excluded; these endpoint probes do not detect intermediate changes that are undone before the final probe. Legacy records store whole-response `payload_bytes`, not split bytes; their chart bars are approximate and **not directly comparable** to v2 bars. Legacy estimated tokens and classification rates remain `not measured` rather than zero. Summary success rates weight individual attempts; per-commit trends include only v2 evidence with a commit hash. Dirty-tree runs carry `dirty: true` and should not be attributed to the commit alone.
 
 Evidence defaults to `.bench/<ISO>-<shortsha>.json`; the static self-contained dashboard is `.bench/dashboard.html`; `.bench/` is git-ignored. Unit tests run under **node:test**, not Vitest (the repository's Vitest glob covers only `packages/**/*.test.ts`).
+
+## Known limitations (review of 2026-11-08, not fixed)
+
+- Peekaboo failures other than ordinary MCP `isError` responses (missing tools, JSON-RPC rejections, dead
+  servers, timeouts) are classified as `driver-error`, `protocol-error`, `server-exit` or `timeout`, not
+  `tool-error`.
+- A titled menu step observes the requested window but Peekaboo applies the menu to its current key window.
+- The drivers test accepts an escaped Peekaboo title as the literal title; titles with quotes are not covered.
+- The dashboard has no label, color or legend entry for Peekaboo.
+- `--drivers peekaboo` still requires the OpenCUA and Cua Driver artifacts.

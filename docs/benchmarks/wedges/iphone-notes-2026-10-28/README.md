@@ -40,3 +40,8 @@ $ gh search code "iPhone Mirroring" --repo steipete/Peekaboo --json path
 
 Code search is an index lookup, not proof of absence. It shows that neither project publishes a matching
 real-iPhone scenario to run as a control, which is why there is no comparison here.
+
+## Known limitations (review of 2026-11-08, not fixed)
+
+- Both entries in `SHA256SUMS` are stale; checksum verification fails for the recorded artifacts.
+- Without `--out`, the runner writes to a directory derived from the current UTC date, not this one.

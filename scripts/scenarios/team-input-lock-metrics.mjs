@@ -7,7 +7,12 @@ export function instrumentLock(prototype, emit, now = () => performance.now()) {
 	prototype.acquire = async function measuredAcquire(...args) {
 		const started = now();
 		const acquired = await acquire.apply(this, args);
-		emit({ wait_ms: now() - started, acquired });
+		// Telemetry must never fail an acquire that already holds the lock, or the lock is never released.
+		try {
+			emit({ wait_ms: now() - started, acquired });
+		} catch {
+			// The measurement is lost; the lock result stands.
+		}
 		return acquired;
 	};
 }

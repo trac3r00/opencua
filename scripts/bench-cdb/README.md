@@ -1,5 +1,19 @@
 # Cua Driver Bench v2: offline apple-cua arm
 
+## Status: kept for the record, not runnable
+
+This arm was built on 2026-10-26, before OpenCUA stopped acting on the shared host. Current OpenCUA refuses all
+input there and acts only in its own isolated desktop, so `cc-apple-cua` cannot complete the benchmark tasks;
+`setup.sh` refuses everything but `--prepare`. Running it again needs an arm that drives an OpenCUA-owned
+isolated guest. Known limitations found in review and not fixed:
+
+- `pins.json` `apple_cua.commit` does not constrain the helper or server a run uses, and the
+  `OPENCUA_DELIVERY`/`OPENCUA_TOOLSET` pins are not read (the runner hardcodes them).
+- `setup.sh` accepts any macOS 26.x but records the pinned 26.6.2/25G83, and its reuse path accepts unrelated
+  tracked edits in the clone.
+- The copy-paste commands below assume the author's worktree path, and the shared-path `grep` check prints
+  errors on a clean machine.
+
 Pinned upstream: `trycua/cua` at
 `f06d538f7f743f063ee9312035874c489d9e63f6`, resolved from main on 2026-10-28.
 This directory contains an integration patch, not an upstream source copy.
