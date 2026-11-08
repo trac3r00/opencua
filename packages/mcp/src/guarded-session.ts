@@ -2812,9 +2812,12 @@ function previousDouble(value: number): number {
 }
 
 // Rounding in `start + fraction * extent` can reach the exclusive end; an accepted point must stay inside.
+// An empty or sub-ulp extent has no inside, so the point stays on its start rather than moving before it.
 function withinHalfOpen(value: number, start: number, extent: number): number {
 	const end = start + extent;
-	return value < end ? value : previousDouble(end);
+	if (value < end) return value;
+	const last = previousDouble(end);
+	return last >= start ? last : start;
 }
 
 export function observedPointToScreen(observation: InputObservation, point: Point): Point {

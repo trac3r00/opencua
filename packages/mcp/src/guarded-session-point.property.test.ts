@@ -156,6 +156,34 @@ describe("#given an observed viewport #when a click point is validated and mappe
 		expect(landsInsideWindow(bounds, screen)).toBe(true);
 	});
 
+	it(`#given an empty or sub-ulp window #when a point is mapped #then it stays on the window start, never before it (seed ${SEED})`, () => {
+		const next = random(SEED + 3);
+		const extents = [0, Number.MIN_VALUE, 1e-300, 1e-12, 1e-9];
+		const failing: string[] = [];
+		let executed = 0;
+		for (let index = 0; index < CASES; index += 1) {
+			const start = Math.round((next() - 0.5) * 2e7);
+			const extent = extents[Math.floor(next() * extents.length)] ?? 0;
+			const bounds = { x: start, y: start, width: extent, height: extent };
+			const size = 1 + Math.floor(next() * 4000);
+			const point = { x: next() * below(size), y: below(size) };
+			const screen = observedPointToScreen(observation(size, size, bounds), point);
+			executed += 1;
+			const end = start + extent;
+			for (const value of [screen.x, screen.y]) {
+				if (value < start || (end > start && value >= end))
+					failing.push(`start=${start} extent=${extent} -> ${value}`);
+			}
+		}
+		expect(executed).toBe(CASES);
+		expect(failing).toEqual([]);
+	});
+
+	it("#given a zero-width window #when its only point is mapped #then it maps to the window start", () => {
+		const bounds = { x: 500, y: 500, width: 0, height: 0 };
+		expect(observedPointToScreen(observation(10, 10, bounds), { x: 5, y: 5 })).toEqual({ x: 500, y: 500 });
+	});
+
 	it("#given the unclamped mapping and an off-by-one validator #when the oracle checks them #then both defects are detected", () => {
 		const bounds = { x: 1000, y: 0, width: 1, height: 1 };
 		const unclamped = { x: bounds.x + (below(1) / 1) * bounds.width, y: 0 };
