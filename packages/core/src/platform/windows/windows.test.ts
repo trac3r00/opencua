@@ -88,6 +88,10 @@ class FakeTransport implements WindowsTransport {
 				return { x: 900, y: 700 };
 			case "physical":
 				return null;
+			case "postTarget":
+				return { hwnd: 777, originX: 100, originY: 200 };
+			case "post":
+				return true;
 			default:
 				throw new Error(`Unexpected method: ${method}`);
 		}
@@ -213,9 +217,37 @@ describe("Windows ComputerInterface", () => {
 		{ name: "drag", run: (c) => c.drag({ from: { x: 1, y: 2 }, to: { x: 3, y: 4 } }) },
 		{ name: "unmatched click", run: (c) => c.click({ x: 1, y: 2 }) },
 	];
-	it.each(physicalCases)("#given background #when $name #then refuses physical input", async ({ run }) => {
+	it("#given background #when key #then refuses physical input", async () => {
 		const { computer, transport } = await fixture();
-		await expect(run(computer)).rejects.toMatchObject({ code: "PHYSICAL_INPUT_REQUIRED" });
+		await expect(computer.key("enter", { modifiers: ["ctrl"] })).rejects.toMatchObject({
+			code: "PHYSICAL_INPUT_REQUIRED",
+		});
+		expect(transport.requests.map((request) => request.method)).toEqual(["snapshot"]);
+	});
+
+	it.each(physicalCases.filter((entry) => entry.name !== "key"))(
+		"#given background #when $name #then posts window messages and never physical input",
+		async ({ run }) => {
+			const { computer, transport } = await fixture();
+			await run(computer);
+			expect(transport.requests.map((request) => request.method)).toEqual(["snapshot", "postTarget", "post"]);
+			const post = transport.requests.at(-1)?.params;
+			expect(post?.["hwnd"]).toBe(777);
+			const messages = post?.["messages"];
+			expect(Array.isArray(messages) ? messages[0] : undefined).toMatchObject({
+				lParam: ((2 - 200) & 0xffff) * 0x10000 + ((1 - 100) & 0xffff),
+			});
+		},
+	);
+
+	it("#given background #when a modifier the messages cannot carry is held #then refuses before posting", async () => {
+		const { computer, transport } = await fixture();
+		await expect(computer.rightClick({ x: 1, y: 2 }, { modifiers: ["alt"] })).rejects.toMatchObject({
+			code: "UNSUPPORTED",
+		});
+		await expect(computer.drag({ from: { x: 1, y: 2 }, to: { x: 3, y: 4 }, duration: 200 })).rejects.toMatchObject({
+			code: "UNSUPPORTED",
+		});
 		expect(transport.requests.map((request) => request.method)).toEqual(["snapshot"]);
 	});
 

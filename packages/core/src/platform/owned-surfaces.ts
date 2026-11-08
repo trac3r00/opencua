@@ -1,7 +1,9 @@
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { type Socket, connect } from "node:net";
 import { join } from "node:path";
+import { MOUTH_SCRIPT } from "../surface/mouth.js";
 import { resolveStateDir } from "./stop-switch.js";
 
 /**
@@ -36,6 +38,8 @@ export interface OpenSurfaceRequest {
 export const OWNED_SURFACE_BUNDLE_ID = "dev.opencua.surface";
 const REGISTRY = "owned-surfaces.json";
 const CURSOR_NAMES = "surface-cursors.json";
+/** Page script every owned surface injects at document start; the native surface reads it next to the names file. */
+const USER_SCRIPT = "surface-user-script.js";
 const RECHECK_MS = 2_000;
 const CURSOR_COLORS = [
 	"#ff4d4d",
@@ -164,6 +168,8 @@ export function boardPageUrl(): string {
 export function openOwnedSurface(request: OpenSurfaceRequest, options: OwnedSurfaceOptions = {}): OwnedSurface {
 	const stateDir = options.stateDir ?? resolveStateDir();
 	const { x, y, width, height } = request.frame;
+	mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+	writeFileSync(join(stateDir, USER_SCRIPT), MOUTH_SCRIPT, { mode: 0o600 });
 	const child = spawn(
 		surfaceBinaryPath(),
 		[
@@ -178,6 +184,27 @@ export function openOwnedSurface(request: OpenSurfaceRequest, options: OwnedSurf
 	child.unref();
 	if (child.pid === undefined) throw new Error("opencua-surface did not start");
 	return registerOwnedSurface({ pid: child.pid, title: request.title, url: request.url }, { ...options, stateDir });
+}
+
+/**
+ * Plays a clip (WAV or any format WebKit decodes) into the surface page's microphone stream. The clip
+ * is written into the state directory, the only place the surface reads clips from.
+ */
+export function speakOnSurface(pid: number, clip: Buffer, options: OwnedSurfaceOptions = {}): boolean {
+	if (clip.length === 0 || clip.length > 16 * 1024 * 1024) throw new RangeError("clip must be 1 byte to 16 MB");
+	const stateDir = options.stateDir ?? resolveStateDir();
+	const path = join(stateDir, `surface-${pid}-speech-${randomUUID()}.audio`);
+	if (`S ${path}`.length > 255) throw new RangeError("state directory path is too long for the surface channel");
+	writeFileSync(path, clip, { mode: 0o600 });
+	const socketPath = surfaceSocketPath(pid, options);
+	if (!existsSync(socketPath)) {
+		rmSync(path, { force: true });
+		return false;
+	}
+	const socket = connect(socketPath);
+	socket.on("error", () => rmSync(path, { force: true }));
+	socket.end(`S ${path}\n`, () => setTimeout(() => rmSync(path, { force: true }), 30_000).unref());
+	return true;
 }
 
 export function closeOwnedSurface(pid: number, options: OwnedSurfaceOptions = {}): boolean {
@@ -277,25 +304,91 @@ function withNamesLock(path: string, write: () => void): void {
 /** Publishes the agent name for a cursor tag so owned surfaces can label it; written once per tag. */
 export function nameSurfaceCursor(tag: number, name: string, options: OwnedSurfaceOptions = {}): void {
 	if (namedTags.has(tag)) return;
-	const path = join(options.stateDir ?? resolveStateDir(), CURSOR_NAMES);
-	mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
-	withNamesLock(path, () => writeCursorName(path, tag, name));
+	updateCursorNames(options, (names) => {
+		const color = CURSOR_COLORS[Object.keys(names).length % CURSOR_COLORS.length] ?? "#ffffff";
+		names[String(tag)] = { ...entryOf(names, tag), name, color };
+	});
 	namedTags.add(tag);
 }
 
-function writeCursorName(path: string, tag: number, name: string): void {
-	let names: Record<string, unknown> = {};
-	try {
-		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-		if (typeof parsed === "object" && parsed !== null) names = parsed as Record<string, unknown>;
-	} catch {
-		names = {};
+/** A cursor's work region in window points from the top-left corner. */
+export interface SurfaceCursorRegion {
+	readonly x: number;
+	readonly y: number;
+	readonly width: number;
+	readonly height: number;
+}
+
+/** Shows (or, with undefined, hides) the dashed outline of the region a cursor's agent works in. */
+export function setSurfaceCursorRegion(
+	tag: number,
+	region: SurfaceCursorRegion | undefined,
+	options: OwnedSurfaceOptions = {},
+): void {
+	if (region !== undefined) {
+		const values = [region.x, region.y, region.width, region.height];
+		if (!values.every(Number.isFinite) || region.width <= 0 || region.height <= 0) {
+			throw new RangeError("cursor region needs finite x and y and a positive width and height");
+		}
 	}
-	const color = CURSOR_COLORS[Object.keys(names).length % CURSOR_COLORS.length] ?? "#ffffff";
-	names[String(tag)] = { name, color };
-	const temporary = `${path}.${process.pid}.tmp`;
-	writeFileSync(temporary, `${JSON.stringify(names)}\n`, { mode: 0o600 });
-	renameSync(temporary, path);
+	updateCursorNames(options, (names) => {
+		const { region: _previous, ...entry } = entryOf(names, tag);
+		names[String(tag)] =
+			region === undefined
+				? entry
+				: { ...entry, region: { x: region.x, y: region.y, width: region.width, height: region.height } };
+	});
+}
+
+/** What an agent is doing, shown as a badge beside its cursor name on the surface. */
+export const SURFACE_CURSOR_INTENTS = {
+	searching: "🔍",
+	typing: "✍️",
+	listening: "🎧",
+	speaking: "🗣️",
+	waiting: "⏳",
+	dragging: "✋",
+} as const;
+
+export type SurfaceCursorIntent = keyof typeof SURFACE_CURSOR_INTENTS;
+
+/** Shows (or, with undefined, clears) the intent badge of a cursor; surfaces read it from the names file. */
+export function setSurfaceCursorIntent(
+	tag: number,
+	intent: SurfaceCursorIntent | undefined,
+	options: OwnedSurfaceOptions = {},
+): void {
+	if (intent !== undefined && !Object.hasOwn(SURFACE_CURSOR_INTENTS, intent)) {
+		throw new RangeError(`unknown cursor intent ${String(intent)}`);
+	}
+	updateCursorNames(options, (names) => {
+		const { badge: _previous, ...entry } = entryOf(names, tag);
+		names[String(tag)] = intent === undefined ? entry : { ...entry, badge: SURFACE_CURSOR_INTENTS[intent] };
+	});
+}
+
+function entryOf(names: Record<string, unknown>, tag: number): Record<string, unknown> {
+	const entry = names[String(tag)];
+	return typeof entry === "object" && entry !== null ? { ...(entry as Record<string, unknown>) } : {};
+}
+
+function updateCursorNames(options: OwnedSurfaceOptions, change: (names: Record<string, unknown>) => void): void {
+	const path = join(options.stateDir ?? resolveStateDir(), CURSOR_NAMES);
+	mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+	// Every change reads, edits and writes the shared file under one lock, so concurrent agents never drop an entry.
+	withNamesLock(path, () => {
+		let names: Record<string, unknown> = {};
+		try {
+			const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+			if (typeof parsed === "object" && parsed !== null) names = parsed as Record<string, unknown>;
+		} catch {
+			names = {};
+		}
+		change(names);
+		const temporary = `${path}.${process.pid}.tmp`;
+		writeFileSync(temporary, `${JSON.stringify(names)}\n`, { mode: 0o600 });
+		renameSync(temporary, path);
+	});
 }
 
 /** Whether an owned surface's page is playing sound, as WebKit reports it, and when that last changed (epoch ms). */

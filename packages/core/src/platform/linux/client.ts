@@ -37,11 +37,13 @@ export interface LinuxClientOptions {
 	readonly timeoutMs?: number;
 }
 
-export function spawnLinuxHelper(python = "python3"): LinuxHelperFactory {
+/** `env` overrides the helper's environment, e.g. DISPLAY of an owned display. */
+export function spawnLinuxHelper(python = "python3", env?: Readonly<Record<string, string>>): LinuxHelperFactory {
 	return (events) => {
 		const child = spawn(python, ["-u", "-c", LINUX_HELPER], {
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: true,
+			...(env === undefined ? {} : { env: { ...process.env, ...env } }),
 		});
 		const lines = createInterface({ input: child.stdout });
 		let diagnostic = "";

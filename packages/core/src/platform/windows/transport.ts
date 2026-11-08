@@ -1,6 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { gzipSync } from "node:zlib";
+import { DESKTOP_NAME, desktopLauncherScript } from "./desktop-launcher.js";
 import { windowsHelperScript } from "./helper.js";
 
 export class WindowsHostError extends Error {
@@ -29,6 +30,7 @@ export type WindowsProcessFactory = (
 	args: readonly string[],
 	onLine: (line: string) => void,
 	onExit: (reason: string, missing: boolean) => void,
+	env?: Readonly<Record<string, string>>,
 ) => WindowsProcess;
 
 export interface PowerShellTransportOptions {
@@ -36,10 +38,17 @@ export interface PowerShellTransportOptions {
 	readonly allowWmChar?: boolean;
 	readonly timeoutMs?: number;
 	readonly processFactory?: WindowsProcessFactory;
+	/** Run the helper and the apps it starts on this owned Win32 desktop ("OpenCUA-..."), never the person's. */
+	readonly desktop?: string;
+	/** The PowerShell to run; default pwsh, falling back to Windows PowerShell when pwsh is missing. */
+	readonly executable?: "pwsh" | "powershell.exe";
 }
 
-const processFactory: WindowsProcessFactory = (executable, args, onLine, onExit) => {
-	const child: ChildProcessWithoutNullStreams = spawn(executable, [...args], { windowsHide: true });
+const processFactory: WindowsProcessFactory = (executable, args, onLine, onExit, env) => {
+	const child: ChildProcessWithoutNullStreams = spawn(executable, [...args], {
+		windowsHide: true,
+		...(env === undefined ? {} : { env: { ...process.env, ...env } }),
+	});
 	const lines = createInterface({ input: child.stdout });
 	lines.on("line", onLine);
 	let diagnostic = "";
@@ -71,15 +80,19 @@ export class PowerShellTransport implements WindowsTransport {
 	private process: WindowsProcess | undefined;
 	private nextId = 0;
 	private closed = false;
-	private executable = "pwsh";
+	private executable: string;
 	private readonly pending = new Map<
 		number,
 		{ resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout>; line: string }
 	>();
 
 	constructor(private readonly options: PowerShellTransportOptions = {}) {
+		this.executable = options.executable ?? "pwsh";
 		if (!Number.isFinite(options.timeoutMs ?? 15_000) || (options.timeoutMs ?? 15_000) <= 0) {
 			throw new WindowsHostError("INVALID_ARGUMENT", "timeoutMs must be positive and finite");
+		}
+		if (options.desktop !== undefined && !DESKTOP_NAME.test(options.desktop)) {
+			throw new WindowsHostError("INVALID_ARGUMENT", "desktop must look like OpenCUA-<letters, digits, dashes>");
 		}
 	}
 
@@ -107,10 +120,15 @@ export class PowerShellTransport implements WindowsTransport {
 		const packed = gzipSync(Buffer.from(script)).toString("base64");
 		const bootstrap = `$m=[IO.MemoryStream]::new([Convert]::FromBase64String('${packed}')); $z=[IO.Compression.GZipStream]::new($m,[IO.Compression.CompressionMode]::Decompress); $r=[IO.StreamReader]::new($z); try { Invoke-Expression ($r.ReadToEnd()) } finally { $r.Dispose(); $z.Dispose(); $m.Dispose() }`;
 		const encoded = Buffer.from(bootstrap, "utf16le").toString("base64");
+		const desktop = this.options.desktop;
+		const command =
+			desktop === undefined
+				? encoded
+				: Buffer.from(desktopLauncherScript(desktop, this.executable), "utf16le").toString("base64");
 		let missing = false;
 		const process = (this.options.processFactory ?? processFactory)(
 			this.executable,
-			["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+			["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", command],
 			(line) => {
 				if (generation === this.generation) this.receive(line);
 			},
@@ -125,6 +143,7 @@ export class PowerShellTransport implements WindowsTransport {
 				}
 				this.reset(new WindowsHostError("HOST_EXITED", reason));
 			},
+			desktop === undefined ? undefined : { OPENCUA_HELPER: encoded },
 		);
 		if (!missing && generation === this.generation) {
 			this.process = process;

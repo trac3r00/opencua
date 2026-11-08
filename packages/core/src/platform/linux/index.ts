@@ -12,6 +12,7 @@ import type {
 	ScrollOptions,
 	SelectTextOptions,
 } from "../../types/index.js";
+import { type AudioStream, readPactlSinkInputs, readPwDump, streamsOfProcessTree } from "../audio-sessions.js";
 import { LinuxBackendError, type LinuxClientOptions, LinuxHelperClient, record } from "./client.js";
 import { app, array, boolean, element, point, rect, size, text, window } from "./protocol.js";
 
@@ -192,6 +193,34 @@ export class LinuxHostComputer implements ComputerInterface {
 
 	async getScreenSize(): Promise<{ width: number; height: number }> {
 		return size(await this.client.request("screenSize"));
+	}
+
+	/** The audio streams of an app and its child processes, from PipeWire (or PulseAudio). */
+	async getAudioStreams(pid: number): Promise<AudioStream[]> {
+		const report = record(await this.client.request("audio"));
+		const source = text(report["source"]);
+		const output = text(report["text"]);
+		const parents = new Map<number, number>();
+		for (const [child, parent] of Object.entries(record(report["parents"]))) {
+			if (typeof parent === "number") parents.set(Number(child), parent);
+		}
+		const streams = source === "pw-dump" ? readPwDump(output) : readPactlSinkInputs(output);
+		return streamsOfProcessTree(streams, pid, parents);
+	}
+
+	/**
+	 * Records one stream (a `target` from getAudioStreams) for up to 30 seconds as WAV, without
+	 * touching other apps' audio. The helper answers nothing else while it records.
+	 */
+	async recordAudio(target: number, seconds: number): Promise<{ mimeType: "audio/wav"; data: Buffer }> {
+		if (!Number.isSafeInteger(target) || target < 0) {
+			throw new LinuxBackendError("INVALID_ARGUMENT", "target must be a stream node id");
+		}
+		if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 30) {
+			throw new LinuxBackendError("INVALID_ARGUMENT", "seconds must be more than 0 and at most 30");
+		}
+		const response = record(await this.client.request("audioRecord", { target, seconds }, seconds * 1000 + 10_000));
+		return { mimeType: "audio/wav", data: Buffer.from(text(response["data"]), "base64") };
 	}
 
 	async listApps(): Promise<AppInfo[]> {

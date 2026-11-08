@@ -627,6 +627,32 @@ static BOOL ParseAgentLine(const char *line, int64_t *tag, BOOL *context,
   dispatch_resume(source);
 }
 
+// "S <path>": play a clip into the page's microphone stream (the mouth
+// script). The clip is a file in the surface's own state directory, never an
+// arbitrary path, and at most 16 MB.
+static WKWebView *gSurfaceWeb = nil;
+static void SpeakFile(const char *path) {
+  if (gNamesPath == nil || gSurfaceWeb == nil) {
+    return;
+  }
+  NSString *dir = [[gNamesPath stringByDeletingLastPathComponent]
+      stringByResolvingSymlinksInPath];
+  NSString *file = [@(path) stringByResolvingSymlinksInPath];
+  if (![file.stringByDeletingLastPathComponent isEqualToString:dir]) {
+    return;
+  }
+  NSData *clip = [NSData dataWithContentsOfFile:file];
+  if (clip == nil || clip.length == 0 || clip.length > 16 * 1024 * 1024) {
+    return;
+  }
+  NSString *script = [NSString
+      stringWithFormat:@"window.__opencuaSpeak && window.__opencuaSpeak(\"%@\")",
+                       [clip base64EncodedStringWithOptions:0]];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [gSurfaceWeb evaluateJavaScript:script completionHandler:nil];
+  });
+}
+
 - (void)drain:(NSMutableData *)buffer {
   const char *bytes = buffer.bytes;
   NSUInteger start = 0;
@@ -642,7 +668,9 @@ static BOOL ParseAgentLine(const char *line, int64_t *tag, BOOL *context,
     BOOL context = NO;
     MuxKind kind = MuxMove;
     NSPoint point = NSZeroPoint;
-    if (ParseAgentLine(line, &tag, &context, &kind, &point)) {
+    if (strncmp(line, "S ", 2) == 0) {
+      SpeakFile(line + 2);
+    } else if (ParseAgentLine(line, &tag, &context, &kind, &point)) {
       _deliver(tag, context, kind, point);
     }
     start = index + 1;
@@ -765,13 +793,63 @@ static NSColor *ColorFromHex(NSString *hex) {
                          alpha:1];
 }
 
+// The region a cursor's agent works in, from the names file: {"region":
+// {"x","y","width","height"}} in window points from the top-left corner.
+static BOOL RegionOf(NSDictionary *entry, CGFloat viewHeight, NSRect *out) {
+  NSDictionary *region = [entry isKindOfClass:NSDictionary.class]
+                             ? entry[@"region"]
+                             : nil;
+  if (![region isKindOfClass:NSDictionary.class]) {
+    return NO;
+  }
+  NSArray *keys = @[ @"x", @"y", @"width", @"height" ];
+  CGFloat values[4];
+  for (NSUInteger index = 0; index < 4; index += 1) {
+    NSNumber *value = region[keys[index]];
+    if (![value isKindOfClass:NSNumber.class] || !isfinite(value.doubleValue)) {
+      return NO;
+    }
+    values[index] = value.doubleValue;
+  }
+  if (values[2] <= 0 || values[3] <= 0) {
+    return NO;
+  }
+  *out = NSMakeRect(values[0], viewHeight - values[1] - values[3], values[2],
+                    values[3]);
+  return YES;
+}
+
 - (void)drawRect:(NSRect)dirty {
+  for (NSString *key in self.names) {
+    NSDictionary *entry = self.names[key];
+    NSRect region;
+    if (!RegionOf(entry, self.bounds.size.height, &region)) {
+      continue;
+    }
+    NSColor *color = ColorFromHex([entry[@"color"] isKindOfClass:NSString.class]
+                                      ? entry[@"color"]
+                                      : @"#ffffff");
+    NSBezierPath *outline =
+        [NSBezierPath bezierPathWithRect:NSInsetRect(region, 0.5, 0.5)];
+    CGFloat dash[2] = {6, 4};
+    [outline setLineDash:dash count:2 phase:0];
+    outline.lineWidth = 1.5;
+    [[color colorWithAlphaComponent:0.12] setFill];
+    [outline fill];
+    [[color colorWithAlphaComponent:0.7] setStroke];
+    [outline stroke];
+  }
   for (NSNumber *key in self.marks) {
     CursorMark *mark = self.marks[key];
     NSDictionary *entry = self.names[key.stringValue];
     NSString *name = [entry[@"name"] isKindOfClass:NSString.class]
                          ? entry[@"name"]
                          : [NSString stringWithFormat:@"cursor %@", key];
+    // The intent badge (searching, typing, listening...) follows the name.
+    if ([entry[@"badge"] isKindOfClass:NSString.class] &&
+        [entry[@"badge"] length] > 0 && [entry[@"badge"] length] <= 8) {
+      name = [NSString stringWithFormat:@"%@ %@", name, entry[@"badge"]];
+    }
     NSColor *color = ColorFromHex([entry[@"color"] isKindOfClass:NSString.class]
                                       ? entry[@"color"]
                                       : @"#ffffff");
@@ -1223,6 +1301,24 @@ static int SelfTest(void) {
   [mux pump:0.13];
   check(@"queued strokes", @"D0,0 G10,0 U10,0 D100,100 G110,100 U110,100");
 
+  // A stroke that waited for the mouse keeps its timing: its points are not
+  // sent in one burst the page would join with a straight line.
+  reset();
+  at(1, MuxDown, 0, 0, NO, 0.00);
+  at(2, MuxDown, 50, 50, NO, 0.05);
+  at(2, MuxDrag, 60, 55, NO, 0.06);
+  at(2, MuxDrag, 70, 65, NO, 0.07);
+  at(2, MuxUp, 70, 65, NO, 0.08);
+  at(1, MuxDrag, 5, 0, NO, 0.10);
+  at(1, MuxUp, 5, 0, NO, 0.20);
+  [mux pump:0.30];
+  check(@"a waited stroke starts", @"D0,0 G5,0 U5,0 D50,50");
+  [mux pump:0.31];
+  check(@"a waited stroke goes on at its pace", @"G60,55");
+  [mux pump:0.32];
+  [mux pump:0.33];
+  check(@"a waited stroke ends at its pace", @"G70,65 U70,65");
+
   // A stroke is never cut for a waiting cursor; it gets the mouse after.
   reset();
   at(1, MuxDown, 0, 0, NO, 0.00);
@@ -1417,6 +1513,33 @@ static int SelfTest(void) {
     }
   }
 
+  // Regions of the names file, in a 100 point tall view.
+  {
+    NSRect region = NSZeroRect;
+    BOOL parsed = RegionOf(
+        @{@"region" : @{@"x" : @10, @"y" : @20, @"width" : @30, @"height" : @40}},
+        100, &region);
+    if (!parsed || !NSEqualRects(region, NSMakeRect(10, 40, 30, 40))) {
+      failures += 1;
+      fprintf(stderr, "FAIL region\n");
+    }
+    NSArray *bad = @[
+      @{}, @{@"region" : @"x"},
+      @{@"region" : @{@"x" : @1, @"y" : @1, @"width" : @0, @"height" : @5}},
+      @{@"region" : @{@"x" : @1, @"y" : @1, @"width" : @5}},
+      @{@"region" : @{@"x" : @"1", @"y" : @1, @"width" : @5, @"height" : @5}},
+      @{@"region" :
+          @{@"x" : @(NAN), @"y" : @1, @"width" : @5, @"height" : @5}}
+    ];
+    for (NSDictionary *entry in bad) {
+      if (RegionOf(entry, 100, &region)) {
+        failures += 1;
+        fprintf(stderr, "FAIL region accepted %s\n",
+                entry.description.UTF8String);
+      }
+    }
+  }
+
   if (failures == 0) {
     printf("SELF-TEST OK\n");
   }
@@ -1514,10 +1637,53 @@ static NSString *const kAudioTapScript = @"(() => {\n  const Context = window.Au
 
 static AudioStateWriter *gAudioState = nil;
 
+// Replays scripts from stdin through CursorMux for the TypeScript port's
+// conformance test. Lines: "e <tag> <D|G|U|M> <context 0|1> <x> <y> <time>",
+// "p <time>" (pump), "end" (print the merged stream as one line, then reset).
+static int Replay(void) {
+  __block NSMutableArray<NSString *> *out = [NSMutableArray array];
+  CursorMux *mux = [CursorMux new];
+  void (^attach)(CursorMux *) = ^(CursorMux *target) {
+    target.emit = ^(MuxKind kind, NSPoint point) {
+      [out addObject:[NSString stringWithFormat:@"%@%g,%g",
+                                                @[ @"D", @"G", @"U", @"M" ][kind],
+                                                point.x, point.y]];
+    };
+  };
+  attach(mux);
+  char line[256];
+  while (fgets(line, sizeof(line), stdin) != NULL) {
+    long long tag = 0;
+    char kind = 0;
+    int context = 0;
+    double x = 0, y = 0, now = 0;
+    if (sscanf(line, "e %lld %c %d %lf %lf %lf", &tag, &kind, &context, &x,
+               &y, &now) == 6) {
+      MuxKind muxKind = kind == 'D'   ? MuxDown
+                        : kind == 'G' ? MuxDrag
+                        : kind == 'U' ? MuxUp
+                                      : MuxMove;
+      [mux cursor:tag kind:muxKind at:NSMakePoint(x, y) context:context != 0 now:now];
+    } else if (sscanf(line, "p %lf", &now) == 1) {
+      [mux pump:now];
+    } else if (strncmp(line, "end", 3) == 0) {
+      printf("%s\n", [out componentsJoinedByString:@" "].UTF8String);
+      fflush(stdout);
+      out = [NSMutableArray array];
+      mux = [CursorMux new];
+      attach(mux);
+    }
+  }
+  return 0;
+}
+
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
     if (argc == 2 && strcmp(argv[1], "--self-test") == 0) {
       return SelfTest();
+    }
+    if (argc == 2 && strcmp(argv[1], "--replay") == 0) {
+      return Replay();
     }
     BOOL multiPointer = NO;
     if (argc >= 5 && strcmp(argv[argc - 1], "--multi-pointer") == 0) {
@@ -1559,6 +1725,22 @@ int main(int argc, const char *argv[]) {
     root.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = root;
     WKWebViewConfiguration *configuration = [WKWebViewConfiguration new];
+    // Page scripts OpenCUA wrote next to the names file (the mouth script) run
+    // before the page's own scripts in every page this surface loads.
+    if (gNamesPath != nil) {
+      NSString *scriptPath = [[gNamesPath stringByDeletingLastPathComponent]
+          stringByAppendingPathComponent:@"surface-user-script.js"];
+      NSString *source = [NSString stringWithContentsOfFile:scriptPath
+                                                   encoding:NSUTF8StringEncoding
+                                                      error:nil];
+      if (source.length > 0) {
+        [configuration.userContentController
+            addUserScript:[[WKUserScript alloc]
+                              initWithSource:source
+                               injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                            forMainFrameOnly:YES]];
+      }
+    }
     PageAck *ack = [PageAck new];
     [configuration.userContentController
         addUserScript:
@@ -1587,6 +1769,7 @@ int main(int argc, const char *argv[]) {
     window.paced = YES;
     window.multiPointer = multiPointer;
     window.web = web;
+    gSurfaceWeb = web;
     web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     // WebKit stops painting a window it believes is covered; the surface sits
     // behind the person's windows on purpose, so keep it rendering or agents
