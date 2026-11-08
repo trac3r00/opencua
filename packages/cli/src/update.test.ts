@@ -50,7 +50,7 @@ function update(
 		readonly stamp?: string;
 		readonly digest?: string;
 		readonly marker?: InstallMarker;
-		readonly stableSigning?: boolean;
+		readonly rebuildKeepsGrants?: boolean;
 	} = {},
 ) {
 	const output: string[] = [];
@@ -69,7 +69,7 @@ function update(
 				return 0;
 			},
 			helperDigest: () => options.digest,
-			stableSigning: options.stableSigning ?? false,
+			rebuildKeepsGrants: options.rebuildKeepsGrants ?? false,
 			print: (text) => {
 				output.push(text);
 			},
@@ -207,7 +207,7 @@ describe("#given a clean checkout behind its upstream #when it is updated #then 
 
 	it("tells a stably signed install that the rebuilt helper keeps its grants", () => {
 		publish("0.1.3");
-		const result = update({ stamp: "built-from", digest: "now", stableSigning: true });
+		const result = update({ stamp: "built-from", digest: "now", rebuildKeepsGrants: true });
 
 		expect(result.output).toContain("its permission grants stay");
 		expect(result.output).not.toContain("ask for Screen Recording");

@@ -138,7 +138,10 @@ export function displayPath(path: string, home: string): string {
 	return path;
 }
 
-/** The checkout recorded in dev-link.json; undefined when there is no link or it cannot be read. */
+/**
+ * The checkout recorded in dev-link.json; undefined when there is no link, it cannot be read, or the checkout is gone
+ * (moved or deleted), so the registrations fall back to the installed server instead of a missing one.
+ */
 export function readDevLink(path: string): string | undefined {
 	let parsed: unknown;
 	try {
@@ -149,7 +152,11 @@ export function readDevLink(path: string): string | undefined {
 	if (typeof parsed !== "object" || parsed === null || !("checkout" in parsed)) {
 		return undefined;
 	}
-	return typeof parsed.checkout === "string" && parsed.checkout !== "" ? canonicalPath(parsed.checkout) : undefined;
+	if (typeof parsed.checkout !== "string" || parsed.checkout === "") {
+		return undefined;
+	}
+	const checkout = canonicalPath(parsed.checkout);
+	return existsSync(join(checkout, "packages/mcp/package.json")) ? checkout : undefined;
 }
 
 export function readInstallMarker(path: string): InstallMarker | undefined {

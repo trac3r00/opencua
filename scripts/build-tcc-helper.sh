@@ -54,7 +54,7 @@ fi
 sign_identity="${OPENCUA_SIGN_IDENTITY:--}"
 keychain_args=()
 if [[ "$sign_identity" == "$stable_identity" && -f "$signing_keychain" ]]; then
-	if ! security unlock-keychain -p "$keychain_password" "$signing_keychain" 2>/dev/null; then
+	if ! security unlock-keychain -p "$keychain_password" "$signing_keychain"; then
 		echo "$signing_keychain does not unlock, so the helper cannot be signed as \"$stable_identity\" and the working helper was left as it is. Repair the keychain, keeping the same identity and its permission grants: $repo/scripts/create-signing-identity.sh --repair" >&2
 		exit 1
 	fi
@@ -256,7 +256,11 @@ codesign --force --sign "$sign_identity" ${keychain_args[@]+"${keychain_args[@]}
 codesign --verify --deep --strict "$build"
 retired="$out_dir/.opencua-mcp.app.old-$$"
 if [[ -d "$app" ]]; then mv "$app" "$retired"; fi
-mv "$build" "$app"
+if ! mv "$build" "$app"; then
+	if [[ -d "$retired" ]]; then mv "$retired" "$app"; fi
+	echo "could not move the new helper into $app; the previous helper is back in place" >&2
+	exit 1
+fi
 rm -rf "$retired"
 "$lsregister" -f "$app" ||
 	echo "warning: LaunchServices did not register $app, so System Settings may not list it" >&2

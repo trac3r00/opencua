@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -842,7 +842,8 @@ async function runPermissionsGrantCommand(
 
 // --- doctor --------------------------------------------------------------------------------------------------------
 
-function reapplyRegistrations(layout: Layout, say: Say): boolean {
+/** `includePrinted` prints the json client's block again, for a change of what it runs (opencua dev link). */
+function reapplyRegistrations(layout: Layout, say: Say, includePrinted = false): boolean {
 	let settings: Settings;
 	try {
 		settings = loadSettings(layout.configPath).settings;
@@ -859,7 +860,7 @@ function reapplyRegistrations(layout: Layout, say: Say): boolean {
 		return false;
 	}
 	const outcome = applyToClients(
-		settings.clients.filter((client) => client !== "json"),
+		settings.clients.filter((client) => includePrinted || client !== "json"),
 		desired,
 		clientContext(layout),
 	);
@@ -942,6 +943,23 @@ async function runDoctorCommand(
 
 // --- update and uninstall ------------------------------------------------------------------------------------------
 
+/** See UpdateDependencies.rebuildKeepsGrants: a signing keychain in the checkout and an unchanged bundle id. */
+function rebuildKeepsGrants(layout: Layout): boolean {
+	const signed = ["opencua", "apple-cua"].some((name) =>
+		existsSync(join(layout.checkout, `.signing/${name}-signing.keychain-db`)),
+	);
+	let current: string | undefined;
+	try {
+		current = /<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/.exec(
+			readFileSync(join(layout.helperApp, "Contents/Info.plist"), "utf8"),
+		)?.[1];
+	} catch {
+		return false;
+	}
+	const wanted = process.env["OPENCUA_BUNDLE_ID"] ?? current;
+	return signed && current !== undefined && current !== "dev.applecua.mcp" && wanted === current;
+}
+
 function runUpdateCommand(): number {
 	const layout = resolveLayout();
 	return runUpdate(layout, {
@@ -952,9 +970,7 @@ function runUpdateCommand(): number {
 			const result = spawnSync("/bin/bash", [layout.helperBuildScript, "--inputs-digest"], { encoding: "utf8" });
 			return result.status === 0 ? result.stdout.trim() || undefined : undefined;
 		},
-		stableSigning: ["opencua", "apple-cua"].some((name) =>
-			existsSync(join(layout.checkout, `.signing/${name}-signing.keychain-db`)),
-		),
+		rebuildKeepsGrants: rebuildKeepsGrants(layout),
 		print,
 	});
 }
@@ -1053,24 +1069,40 @@ export function registerLifecycleCommands(program: Command, options: LifecycleCo
 				return;
 			}
 			const linked = resolveLayout();
-			print(`MCP clients now run ${linked.server} through ${layout.helperExecutable}.`);
-			const applied = reapplyRegistrations(linked, print);
+			if (!reapplyRegistrations(linked, print, true)) {
+				print(
+					"Linked, but some registrations were not rewritten (above); fix that, then run opencua dev link again.",
+				);
+				process.exitCode = 1;
+				return;
+			}
 			print(
-				`Reconnect each client once (e.g. /mcp reconnect opencua). Then keep \`pnpm -C "${outcome.checkout}" dev\` running: each rebuild restarts the server behind the same connection. opencua dev unlink returns to ${layout.checkout}.`,
+				`MCP clients now run ${linked.server} through ${layout.helperExecutable}. Reconnect each client once (e.g. /mcp reconnect opencua). Then keep \`pnpm -C "${outcome.checkout}" dev\` running: each rebuild restarts the server behind the same connection. opencua dev unlink returns to ${layout.checkout}.`,
 			);
-			process.exitCode = applied ? 0 : 1;
 		});
 	dev.command("unlink")
 		.description("point the registered MCP clients back at the installed checkout's server")
 		.action(() => {
 			const layout = resolveLayout();
-			if (!unlinkDevCheckout(layout)) {
+			if (!existsSync(layout.devLinkPath)) {
 				print(`Not linked: MCP clients run ${layout.server}.`);
 				return;
 			}
-			const installed = resolveLayout();
+			const installed: Layout = {
+				...layout,
+				server: join(layout.checkout, "packages/mcp/dist/server.js"),
+				devCheckout: undefined,
+			};
+			// The link stays until every registration is back, so a failed rewrite can be retried.
+			if (!reapplyRegistrations(installed, print, true)) {
+				print(
+					"Still linked: some registrations were not rewritten (above); fix that, then run opencua dev unlink again.",
+				);
+				process.exitCode = 1;
+				return;
+			}
+			unlinkDevCheckout(layout);
 			print(`MCP clients run ${installed.server} again; reconnect each client once.`);
-			process.exitCode = reapplyRegistrations(installed, print) ? 0 : 1;
 		});
 	dev.command("status")
 		.description("show which checkout's server the registered MCP clients run")

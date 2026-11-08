@@ -88,6 +88,19 @@ describe("#given a checkout that cannot run yet #when it is linked #then the lin
 	});
 });
 
+describe("#given a linked checkout that was deleted #when the layout resolves #then the installed server is used", () => {
+	it("falls back instead of pointing clients at a missing server", () => {
+		makeCheckout(developer, { modules: true, server: true });
+		expect(linkDevCheckout(layout(), developer).ok).toBe(true);
+
+		rmSync(developer, { recursive: true, force: true });
+
+		expect(layout().devCheckout).toBeUndefined();
+		expect(layout().server).toBe(join(installed, "packages/mcp/dist/server.js"));
+		expect(existsSync(layout().devLinkPath)).toBe(true);
+	});
+});
+
 describe("#given an unreadable dev-link.json #when the layout resolves #then the installed server is used", () => {
 	it.each(["not json", "[]", '{"checkout":""}', '{"checkout":7}'])("ignores %s", (content) => {
 		mkdirSync(join(root, "home"), { recursive: true });
