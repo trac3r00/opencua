@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -75,7 +75,54 @@ describe("#given the lease file", () => {
 			JSON.stringify({ version: 2, leases: [lease()] }),
 		]) {
 			expect(parseLeaseFile(text)).toEqual([]);
+			writeFileSync(join(stateDir, LEASE_FILE), text);
+			expect(readLeases(stateDir)).toEqual([]);
 		}
+	});
+
+	it.skipIf(process.getuid?.() === 0)(
+		"#when a read file is made unreadable #then the cached grants are dropped",
+		() => {
+			writeLeases(stateDir, [lease()]);
+			expect(readLeases(stateDir)).toHaveLength(1);
+			chmodSync(join(stateDir, LEASE_FILE), 0o000);
+			expect(readLeases(stateDir)).toEqual([]);
+		},
+	);
+
+	it("#when leases are read #then neither the list nor a lease can be widened in place", () => {
+		writeLeases(stateDir, [lease()]);
+		const leases = readLeases(stateDir);
+		const first = leases[0];
+		expect(first).toBeDefined();
+		if (first === undefined) return;
+		expect([leases, first, first.target, first.tools].every((value) => Object.isFrozen(value))).toBe(true);
+		expect(Reflect.set(first.tools, "1", "drag")).toBe(false);
+		expect(readLeases(stateDir)[0]?.tools).toEqual(["click", "type"]);
+	});
+
+	it("#when a timestamp is not canonical UTC ISO 8601 #then the lease is dropped", () => {
+		for (const grantedAt of ["Nov 8 2026 05:00:00 GMT", "2026-11-08 05:00:00Z", "2026-11-08T05:00:00+09:00"]) {
+			expect(parseLeaseFile(JSON.stringify({ version: 1, leases: [lease({ grantedAt })] }))).toEqual([]);
+		}
+	});
+
+	it("#when the state directory and files already exist with loose modes #then writes tighten them", () => {
+		chmodSync(stateDir, 0o755);
+		const stale = `${join(stateDir, LEASE_FILE)}.${process.pid}.tmp`;
+		writeFileSync(stale, "old", { mode: 0o644 });
+		chmodSync(stale, 0o644);
+		writeLeases(stateDir, [lease()]);
+		expect(statSync(stateDir).mode & 0o777).toBe(0o700);
+		expect(statSync(join(stateDir, LEASE_FILE)).mode & 0o777).toBe(0o600);
+		const at = new Date("2026-11-08T05:00:00.000Z");
+		mkdirSync(join(stateDir, "audit"), { mode: 0o755 });
+		chmodSync(join(stateDir, "audit"), 0o755);
+		writeFileSync(leaseAuditPath(stateDir, at), "", { mode: 0o644 });
+		chmodSync(leaseAuditPath(stateDir, at), 0o644);
+		appendLeaseAudit(stateDir, { event: "grant", by: "cli" }, at);
+		expect(statSync(join(stateDir, "audit")).mode & 0o777).toBe(0o700);
+		expect(statSync(leaseAuditPath(stateDir, at)).mode & 0o777).toBe(0o600);
 	});
 
 	it("#when the file is rewritten #then the next read sees the new contents", () => {

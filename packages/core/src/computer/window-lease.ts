@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Rect } from "../types/index.js";
 
@@ -91,8 +91,11 @@ function isLeaseTool(value: unknown): value is LeaseTool {
 	return typeof value === "string" && (LEASE_TOOLS as readonly string[]).includes(value);
 }
 
+const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+/** Only canonical UTC ISO 8601, so a hand-edited lease cannot carry a locale-dependent time. */
 function timestamp(value: unknown): number | undefined {
-	if (typeof value !== "string") return undefined;
+	if (typeof value !== "string" || !ISO_UTC.test(value)) return undefined;
 	const ms = Date.parse(value);
 	return Number.isFinite(ms) ? ms : undefined;
 }
@@ -126,28 +129,28 @@ function parseLease(value: unknown): WindowLease | undefined {
 	}
 	const region = target["region"] as Rect | undefined;
 	const note = value["note"] as string | undefined;
-	return {
+	return Object.freeze({
 		id: value["id"],
 		holder: value["holder"],
-		target: {
+		target: Object.freeze({
 			bundleId: target["bundleId"],
 			pid: target["pid"],
 			startedAt: target["startedAt"],
 			windowId: target["windowId"],
 			...(region === undefined
 				? {}
-				: { region: { x: region.x, y: region.y, width: region.width, height: region.height } }),
-		},
-		tools: [...new Set(tools)],
+				: { region: Object.freeze({ x: region.x, y: region.y, width: region.width, height: region.height }) }),
+		}),
+		tools: Object.freeze([...new Set(tools)]),
 		grantedAt: value["grantedAt"] as string,
 		expiresAt: value["expiresAt"] as string,
 		grantedBy: value["grantedBy"],
 		...(note === undefined ? {} : { note }),
-	};
+	});
 }
 
-/** A file that is not exactly version 1 with a lease array yields no leases: fail closed. */
-export function parseLeaseFile(text: string): WindowLease[] {
+/** A file that is not exactly version 1 with a lease array yields no leases: fail closed. The result is frozen. */
+export function parseLeaseFile(text: string): readonly WindowLease[] {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
@@ -163,32 +166,38 @@ export function parseLeaseFile(text: string): WindowLease[] {
 		seen.add(lease.id);
 		leases.push(lease);
 	}
-	return leases;
+	return Object.freeze(leases);
 }
 
 function leasePath(stateDir: string): string {
 	return join(stateDir, LEASE_FILE);
 }
 
-let cached: { readonly path: string; readonly mtimeMs: number; readonly leases: WindowLease[] } | undefined;
+let cached: { readonly path: string; readonly stamp: string; readonly leases: readonly WindowLease[] } | undefined;
 
-/** The leases on disk, re-read only when the file's mtime changes. A missing or unreadable file means none. */
-export function readLeases(stateDir: string): WindowLease[] {
+/**
+ * The leases on disk, re-read whenever the file's inode, size, mtime or ctime changes (ctime catches a chmod that
+ * makes it unreadable). A missing or unreadable file means none.
+ */
+export function readLeases(stateDir: string): readonly WindowLease[] {
 	const path = leasePath(stateDir);
-	let mtimeMs: number;
+	let stamp: string;
 	try {
-		mtimeMs = statSync(path).mtimeMs;
+		const stat = statSync(path);
+		stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
 	} catch {
+		cached = undefined;
 		return [];
 	}
-	if (cached?.path !== path || cached.mtimeMs !== mtimeMs) {
+	if (cached?.path !== path || cached.stamp !== stamp) {
 		let text: string;
 		try {
 			text = readFileSync(path, "utf8");
 		} catch {
+			cached = undefined;
 			return [];
 		}
-		cached = { path, mtimeMs, leases: parseLeaseFile(text) };
+		cached = { path, stamp, leases: parseLeaseFile(text) };
 	}
 	return cached.leases;
 }
@@ -197,10 +206,13 @@ export function readLeases(stateDir: string): WindowLease[] {
 export function writeLeases(stateDir: string, leases: readonly WindowLease[]): void {
 	const path = leasePath(stateDir);
 	mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+	chmodSync(stateDir, 0o700);
 	const temporary = `${path}.${process.pid}.tmp`;
 	writeFileSync(temporary, `${JSON.stringify({ version: LEASE_FILE_VERSION, leases }, null, "\t")}\n`, {
 		mode: 0o600,
 	});
+	// `mode` applies only when the file is created; a stale temp file keeps its old mode unless reset.
+	chmodSync(temporary, 0o600);
 	renameSync(temporary, path);
 	cached = undefined;
 }
@@ -308,7 +320,10 @@ export function appendLeaseAudit(stateDir: string, entry: LeaseAuditEntry, at: D
 		throw new RangeError(`lease audit line is ${Buffer.byteLength(line, "utf8")} bytes, over the limit`);
 	}
 	const path = leaseAuditPath(stateDir, at);
-	mkdirSync(join(stateDir, "audit"), { recursive: true, mode: 0o700 });
+	const directory = join(stateDir, "audit");
+	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	chmodSync(directory, 0o700);
 	appendFileSync(path, line, { mode: 0o600 });
+	chmodSync(path, 0o600);
 	return path;
 }

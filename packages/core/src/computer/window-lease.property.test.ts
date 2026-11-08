@@ -128,7 +128,44 @@ const MUTATIONS: readonly Mutation[] = [
 			}),
 	},
 	{ name: "note not a string", keep: false, apply: (entry) => Object.assign(entry, { note: 5 }) },
+	{
+		name: "non-ISO timestamp",
+		keep: false,
+		apply: (entry, next) =>
+			Object.assign(entry, {
+				[pick(next, ["grantedAt", "expiresAt"])]: pick(next, [
+					"Nov 8 2026 05:00:30 GMT",
+					"2026-11-08 05:00:30Z",
+					"2026-11-08T05:00:30+09:00",
+					"2026-11-08T05:00:30",
+				]),
+			}),
+	},
 ];
+
+/** The specification of a kept lease, written independently of the parser: known fields only, tools deduplicated. */
+function expectedLease(entry: Json): Json {
+	const source = target(entry);
+	const region = source["region"] as Json | undefined;
+	return {
+		id: entry["id"],
+		holder: entry["holder"],
+		target: {
+			bundleId: source["bundleId"],
+			pid: source["pid"],
+			startedAt: source["startedAt"],
+			windowId: source["windowId"],
+			...(region === undefined
+				? {}
+				: { region: { x: region["x"], y: region["y"], width: region["width"], height: region["height"] } }),
+		},
+		tools: [...new Set(entry["tools"] as string[])],
+		grantedAt: entry["grantedAt"],
+		expiresAt: entry["expiresAt"],
+		grantedBy: entry["grantedBy"],
+		...(entry["note"] === undefined ? {} : { note: entry["note"] }),
+	};
+}
 
 describe("#given generated lease entries #when the file is parsed #then exactly the specified-valid entries survive, unweakened", () => {
 	it(`holds for ${CASES} generated files (seed ${SEED})`, () => {
@@ -138,14 +175,14 @@ describe("#given generated lease entries #when the file is parsed #then exactly 
 		for (let index = 0; index < CASES; index += 1) {
 			const count = 1 + Math.floor(next() * 4);
 			const entries: Json[] = [];
-			const expectedIds: string[] = [];
+			const expected: Json[] = [];
 			for (let slot = 0; slot < count; slot += 1) {
 				const entry = structuredClone(valid(index * 10 + slot));
 				const mutation = pick(next, MUTATIONS);
 				mutation.apply(entry, next);
 				entries.push(entry);
 				executed.set(mutation.name, (executed.get(mutation.name) ?? 0) + 1);
-				if (mutation.keep) expectedIds.push(entry["id"] as string);
+				if (mutation.keep) expected.push(expectedLease(entry));
 			}
 			let parsed: ReturnType<typeof parseLeaseFile>;
 			try {
@@ -154,18 +191,8 @@ describe("#given generated lease entries #when the file is parsed #then exactly 
 				failing.push(`threw ${String(error)} on ${JSON.stringify(entries)}`);
 				continue;
 			}
-			const ids = parsed.map((lease) => lease.id);
-			if (JSON.stringify(ids) !== JSON.stringify(expectedIds)) {
-				failing.push(
-					`kept ${JSON.stringify(ids)} expected ${JSON.stringify(expectedIds)} from ${JSON.stringify(entries)}`,
-				);
-			}
-			for (const lease of parsed) {
-				if (lease.tools.length === 0 || new Set(lease.tools).size !== lease.tools.length)
-					failing.push(`weak tools ${lease.id}`);
-				if (Date.parse(lease.expiresAt) - Date.parse(lease.grantedAt) > MAX_LEASE_MS)
-					failing.push(`long ${lease.id}`);
-				if ("extra" in lease) failing.push(`unknown field leaked into ${lease.id}`);
+			if (!Bun.deepEquals(parsed, expected, true)) {
+				failing.push(`kept ${JSON.stringify(parsed)} expected ${JSON.stringify(expected)}`);
 			}
 		}
 		expect(
