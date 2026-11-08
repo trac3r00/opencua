@@ -203,7 +203,8 @@ function startServer(plan: OwnedDisplayPlan): { readonly ready: Promise<void>; s
 		const timer = setTimeout(() => reject(new Error(`${plan.command} did not start within 10 s`)), 10_000);
 		const socket = `X${plan.display.slice(1)}`;
 		const check = setInterval(() => {
-			if (readdirSync("/tmp/.X11-unix").includes(socket)) {
+			// The socket directory appears with the first X server; until then the server is simply not ready.
+			if (existsSync("/tmp/.X11-unix") && readdirSync("/tmp/.X11-unix").includes(socket)) {
 				clearInterval(check);
 				clearTimeout(timer);
 				resolve();

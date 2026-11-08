@@ -11,7 +11,7 @@ using Microsoft.Web.WebView2.WinForms;
 
 internal static class Program {
 	private const string MarkLayer = """
-		(function (marks, names) {
+		(function (marks, names, ox, oy, scale) {
 		  let layer = document.getElementById("__opencua_layer");
 		  if (!layer) {
 		    layer = document.createElement("div");
@@ -24,7 +24,9 @@ internal static class Program {
 		    const r = entry && entry.region;
 		    if (!r || !(r.width > 0) || !(r.height > 0)) continue;
 		    const box = document.createElement("div");
-		    box.style.cssText = `position:fixed;left:${r.x}px;top:${r.y}px;width:${r.width}px;height:${r.height}px;` +
+		    // Regions are in window points like agent input; the same frame offset and DPI scale apply.
+		    box.style.cssText = `position:fixed;left:${(r.x - ox) / scale}px;top:${(r.y - oy) / scale}px;` +
+		      `width:${r.width / scale}px;height:${r.height / scale}px;` +
 		      `border:1.5px dashed ${entry.color || "#fff"};background:${entry.color || "#fff"}1f;box-sizing:border-box`;
 		    layer.appendChild(box);
 		  }
@@ -109,12 +111,15 @@ internal static class Program {
 		}
 		// Agents send points relative to the window, frame included; the page wants CSS pixels of the WebView's
 		// client area, so the frame offset is removed and the DPI scale undone.
+		double offsetX = 0, offsetY = 0, scale = 1;
 		var form = view.FindForm();
 		if (form != null) {
 			var origin = view.PointToScreen(System.Drawing.Point.Empty);
-			var scale = view.DeviceDpi / 96.0;
-			x = (x - (origin.X - form.Bounds.X)) / scale;
-			y = (y - (origin.Y - form.Bounds.Y)) / scale;
+			offsetX = origin.X - form.Bounds.X;
+			offsetY = origin.Y - form.Bounds.Y;
+			scale = view.DeviceDpi / 96.0;
+			x = (x - offsetX) / scale;
+			y = (y - offsetY) / scale;
 		}
 		if (type.GetString() == "pointer" && command.TryGetProperty("kind", out var kindValue)) {
 			var (eventType, buttons) = kindValue.GetString() switch {
@@ -133,7 +138,7 @@ internal static class Program {
 		} else if (type.GetString() == "mark" && command.TryGetProperty("tag", out var tagValue) && tagValue.TryGetInt64(out var tag)) {
 			var down = command.TryGetProperty("down", out var downValue) && downValue.ValueKind == JsonValueKind.True;
 			marks[tag.ToString()] = new { x, y, down };
-			var script = $"{MarkLayer}({JsonSerializer.Serialize(marks)}, {Names(namesPath)})";
+			var script = $"{MarkLayer}({JsonSerializer.Serialize(marks)}, {Names(namesPath)}, {JsonSerializer.Serialize(offsetX)}, {JsonSerializer.Serialize(offsetY)}, {JsonSerializer.Serialize(scale)})";
 			await view.CoreWebView2.ExecuteScriptAsync(script);
 		}
 	}

@@ -2,8 +2,9 @@
 
 Status on 2026-11-08: merged for the record, not wired. The macOS paths are the supported ones.
 
-The Windows and Linux pieces added in this change build and are unit tested on macOS CI, but no OpenCUA launch
-path starts them yet, and none of them has been run end to end on Windows or Linux:
+The TypeScript parts of the Windows and Linux pieces are typechecked and unit tested on macOS CI; the native shells
+(the C# projects and the GTK script) are not built there. No OpenCUA launch path starts them yet, and none of them
+has been run end to end on Windows or Linux:
 
 - `packages/core/native/windows/OpenCuaSurface` and `OpenCuaCapture` are not built or packaged; `openOwnedSurface`
   still launches the macOS `native/opencua-surface`, and the package excludes `native/windows/**`.
@@ -45,7 +46,8 @@ Windows:
 Shared surface code:
 
 - The drag bridge proceeds when the source cancels `dragstart` and fires `dragend` before the destination's `drop`.
-- The `stop()` that `startSurfaceDriver` returns closes only the listener, so a connected agent can keep the driver alive after the shell exits;
+- The `stop()` that `startSurfaceDriver` returns clears the timer, closes the listener and kills the shell, but leaves
+  existing agent sockets open, so a connected agent can keep the driver alive after the shell exits;
   the driver wakes every 8 ms even when idle; `parseAgentLine` rejects a leading `+` the native parser accepts.
 - The corpus recorder can write a corpus from the wrong number of outputs.
 - The replay page opens at its end (the first Play does nothing), rebuilds all history on every frame, and its

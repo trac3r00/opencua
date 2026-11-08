@@ -227,27 +227,27 @@ export class WindowsHostComputer implements ComputerInterface {
 	 * screenshot, like click coordinates). Failures are reported as unavailable, never thrown.
 	 */
 	async recognizeWindowText(targetPid: number, options?: { readonly region?: Rect }): Promise<WindowTextRead> {
-		let response: unknown;
 		try {
-			response = await this.ocrResponse(targetPid);
+			// The observed window, so a multi-window app is read from the window the caller looked at.
+			const response = await this.ocrResponse(targetPid, this.observations.get(targetPid)?.state.windowId);
+			const entries = readWindowsOcr(response);
+			const region = options?.region;
+			if (region === undefined) return { entries };
+			const result = wire.record(response);
+			const bounds = wire.rect(result["bounds"]);
+			const scaleX = wire.number(result["width"]) / bounds.width;
+			const scaleY = wire.number(result["height"]) / bounds.height;
+			return {
+				entries: entries.filter(({ frame }) => {
+					const x = (frame.x + frame.width / 2 - bounds.x) * scaleX;
+					const y = (frame.y + frame.height / 2 - bounds.y) * scaleY;
+					return x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height;
+				}),
+			};
 		} catch (error) {
 			if (error instanceof WindowsHostError && error.code === "NO_WINDOW") return { unavailable: "no-window" };
 			return { unavailable: "recognition-failed" };
 		}
-		const entries = readWindowsOcr(response);
-		const region = options?.region;
-		if (region === undefined) return { entries };
-		const result = wire.record(response);
-		const bounds = wire.rect(result["bounds"]);
-		const scaleX = wire.number(result["width"]) / bounds.width;
-		const scaleY = wire.number(result["height"]) / bounds.height;
-		return {
-			entries: entries.filter(({ frame }) => {
-				const x = (frame.x + frame.width / 2 - bounds.x) * scaleX;
-				const y = (frame.y + frame.height / 2 - bounds.y) * scaleY;
-				return x >= region.x && x < region.x + region.width && y >= region.y && y < region.y + region.height;
-			}),
-		};
 	}
 
 	private audioGeneration: number | undefined;

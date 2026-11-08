@@ -705,9 +705,11 @@ def audio_record(params):
 			try:
 				recorder.wait(timeout=5)
 			except subprocess.TimeoutExpired:
-				# A recorder that ignores SIGTERM is killed, never left recording.
+				# A recorder that ignores SIGTERM is killed, never left recording; its file may lack a finished
+				# WAV header, so the capture is reported as failed rather than returned.
 				recorder.kill()
 				recorder.wait()
+				fail("CAPTURE_FAILED", "pw-record did not stop when asked and was killed; the recording is incomplete")
 		with open(path, "rb") as recording:
 			return dict(mimeType="audio/wav", data=base64.b64encode(recording.read()).decode())
 	finally:
