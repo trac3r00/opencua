@@ -277,6 +277,20 @@ describe("private guest native input", () => {
 		]);
 	});
 
+	it.each([0xffe8, 0xffeb, 0xffec])(
+		"#given Command sent as RFB keysym %s #when chorded with s #then the guest receives Command-S",
+		async (command) => {
+			const f = fixture();
+			await f.input.chord([command, 0x73]);
+			expect(f.events.map(({ code, down, flags }) => [code, down, flags])).toEqual([
+				[55, true, 0x100000],
+				[1, true, 0x100000],
+				[1, false, 0x100000],
+				[55, false, 0],
+			]);
+		},
+	);
+
 	it("#given a failed chord #when dispatch throws #then every pressed key is released", async () => {
 		const f = fixture({ failAt: 2 });
 		await expect(f.input.chord([0xffe7, 0x76])).rejects.toThrow("Injected dispatch failure");

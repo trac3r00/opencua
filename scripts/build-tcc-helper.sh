@@ -32,7 +32,7 @@ esac
 app="$out_dir/opencua-mcp.app"
 executable="opencua-mcp"
 server="$repo/packages/mcp/dist/server.js"
-launcher_source="$repo/scripts/tcc-helper-launcher.c"
+launcher_source="$repo/scripts/tcc-helper-launcher.m"
 icon_source="$repo/packages/mcp/assets/appicon.png"
 node_bin="${OPENCUA_NODE:-}"
 # Default to the stable identity when the dedicated keychain exists: ad-hoc rebuilds reset
@@ -82,6 +82,8 @@ else
 	node_arch=x64
 fi
 launcher_flags=(-O2 -Wall -arch "$host_arch" "-mmacosx-version-min=$minimum_macos")
+# The launcher is also the MCP server's stdio supervisor (JSON framing, FSEvents for rebuilds).
+launcher_link=(-fobjc-arc -framework Foundation -framework CoreServices)
 
 # Info.plist of a helper with version $1.
 info_plist() {
@@ -127,6 +129,7 @@ inputs_digest() {
 	{
 		printf 'launcher %s\n' "$(shasum -a 256 <"$launcher_source" | awk '{ print $1 }')"
 		printf 'launcher-flags %s\n' "${launcher_flags[*]}"
+		printf 'launcher-link %s\n' "${launcher_link[*]}"
 		printf 'history-recorder %s\n' "$(shasum -a 256 <"$repo/packages/core/native/history-recorder.m" 2>/dev/null | awk '{ print $1 }')"
 		info_plist "(any version)"
 	} | shasum -a 256 | awk '{ print $1 }'
@@ -216,7 +219,7 @@ mkdir -p "$build/Contents/MacOS" "$build/Contents/Resources"
 cp -c "$node_bin" "$build/Contents/Resources/node" 2>/dev/null || cp "$node_bin" "$build/Contents/Resources/node"
 chmod 755 "$build/Contents/Resources/node"
 
-cc "${launcher_flags[@]}" -o "$build/Contents/MacOS/$executable" "$launcher_source"
+cc "${launcher_flags[@]}" "${launcher_link[@]}" -o "$build/Contents/MacOS/$executable" "$launcher_source"
 
 # The icon ships as a multi-resolution .icns so Finder, System Settings and the privacy panes
 # render the helper as an app instead of a generic process.

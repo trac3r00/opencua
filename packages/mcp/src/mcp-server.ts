@@ -11,6 +11,7 @@ import {
 	currentSystemPrompts,
 	probeHostCapabilities,
 	readHidModifierFlags,
+	setSessionCursorName,
 	spawnOpenLauncher,
 	startStopChordDetector,
 	startStopMenu,
@@ -189,6 +190,10 @@ export function createMcpServer(
 	installToolTiming(server, toolUsage);
 	// The harness is known only after initialize, so read it on demand rather than at construction.
 	const host = () => detectHost(server.server.getClientVersion(), process.env);
+	// Each server process is one agent or subagent connection; its own cursor carries the client's name.
+	server.server.oninitialized = () => {
+		setSessionCursorName(`${server.server.getClientVersion()?.name ?? "agent"} ${process.pid}`);
+	};
 
 	server.registerTool(
 		"verify_state",

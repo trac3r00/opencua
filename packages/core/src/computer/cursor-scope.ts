@@ -4,6 +4,25 @@ export interface CursorOwner {
 	readonly agentName: string;
 	readonly sessionId: string;
 	readonly parentAgentName?: string;
+	/** What the cursor is doing (a worker's task), shown beside its name where cursors are labeled. */
+	readonly purpose?: string;
+}
+
+/** Longest purpose shown on a cursor label; longer ones end with an ellipsis. */
+const PURPOSE_LABEL_CHARACTERS = 48;
+
+function purposeLabel(purpose: string): string {
+	// Only the start can be shown, so a long task is cut before any work; control and format characters (bidi
+	// overrides, zero-width marks) become spaces so a label cannot disguise which worker it names.
+	const clean = purpose
+		.slice(0, PURPOSE_LABEL_CHARACTERS * 8)
+		.replace(/[\p{Cc}\p{Cf}]/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const characters = Array.from(clean);
+	return characters.length <= PURPOSE_LABEL_CHARACTERS
+		? clean
+		: `${characters.slice(0, PURPOSE_LABEL_CHARACTERS - 1).join("")}…`;
 }
 
 interface CursorContext {
@@ -27,10 +46,12 @@ export function withCursorIdentity<T>(identity: string, callback: () => T, owner
 			);
 		}
 	}
+	const purpose = owner.purpose === undefined ? undefined : purposeLabel(owner.purpose);
 	const snapshot: CursorOwner = Object.freeze({
 		agentName: owner.agentName.trim(),
 		sessionId: owner.sessionId.trim(),
 		...(owner.parentAgentName === undefined ? {} : { parentAgentName: owner.parentAgentName.trim() }),
+		...(purpose === undefined || purpose === "" ? {} : { purpose }),
 	});
 	return cursorIdentity.run({ identity, owner: snapshot }, callback);
 }

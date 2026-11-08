@@ -26,6 +26,11 @@ export interface OpenSurfaceRequest {
 	readonly title: string;
 	/** Top-left screen points. */
 	readonly frame: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+	/**
+	 * "single" (default): the page sees one mouse that the cursors share. "multi": every cursor is its own page pointer,
+	 * so cursors press and drag at the same time; the page must handle pointer events.
+	 */
+	readonly pointers?: "single" | "multi";
 }
 
 export const OWNED_SURFACE_BUNDLE_ID = "dev.opencua.surface";
@@ -150,13 +155,24 @@ export function surfaceBinaryPath(): string {
 	return new URL("../../native/opencua-surface", import.meta.url).pathname;
 }
 
+/** The built-in drawing page where every pointer keeps its own color and brush size. */
+export function boardPageUrl(): string {
+	return new URL("../../native/surface-pages/board.html", import.meta.url).href;
+}
+
 /** Launches an owned surface window showing `url` and records it; the window never takes the person's focus. */
 export function openOwnedSurface(request: OpenSurfaceRequest, options: OwnedSurfaceOptions = {}): OwnedSurface {
 	const stateDir = options.stateDir ?? resolveStateDir();
 	const { x, y, width, height } = request.frame;
 	const child = spawn(
 		surfaceBinaryPath(),
-		[request.url, request.title, `${x},${y},${width},${height}`, join(stateDir, CURSOR_NAMES)],
+		[
+			request.url,
+			request.title,
+			`${x},${y},${width},${height}`,
+			join(stateDir, CURSOR_NAMES),
+			...(request.pointers === "multi" ? ["--multi-pointer"] : []),
+		],
 		{ stdio: "ignore", detached: true },
 	);
 	child.unref();
@@ -183,6 +199,34 @@ export function surfaceCursorTag(identity: string): number {
 	return hash & 0x7fffffff || 1;
 }
 
+/**
+ * Input outside a worker's cursor scope belongs to this process's own session: every MCP server process is one agent
+ * or subagent connection, so each moves its own cursor on a surface instead of all of them sharing one.
+ */
+const SESSION_CURSOR_IDENTITY = `process-${process.pid}`;
+let sessionCursorName: string | undefined;
+
+/** Names this session's own cursor, shown on surfaces for input sent outside any worker's cursor scope. */
+export function setSessionCursorName(name: string): void {
+	sessionCursorName = name;
+}
+
+/**
+ * The surface tag and label for input from `identity` (a worker's cursor) or, without one, this session's cursor.
+ * A worker's label is its name and, when it has one, its purpose: "painter 7: draw row 7".
+ */
+export function surfaceCursorFor(
+	identity: string | undefined,
+	owner: { readonly agentName: string; readonly purpose?: string } | undefined,
+): { readonly tag: number; readonly name: string } {
+	const resolved = identity ?? SESSION_CURSOR_IDENTITY;
+	const name = owner?.agentName ?? (identity === undefined ? sessionCursorName : undefined) ?? resolved;
+	return {
+		tag: surfaceCursorTag(resolved),
+		name: owner?.purpose === undefined ? name : `${name}: ${owner.purpose}`,
+	};
+}
+
 const CONTEXT_CLICK_FLAG = 2 ** 32;
 
 /**
@@ -194,11 +238,52 @@ export function surfaceCursorUserData(tag: number, contextClick: boolean): numbe
 }
 
 const namedTags = new Set<number>();
+const NAMES_LOCK_WAIT_MS = 250;
+const NAMES_LOCK_STALE_MS = 2_000;
+const lockPause = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Many agent processes name their cursors at once when they start on one surface; without this lock each rewrite of
+ * the shared file could drop another process's entry. Labels are cosmetic, so a lock not taken in time is skipped
+ * rather than holding the input that triggered the naming.
+ */
+function withNamesLock(path: string, write: () => void): void {
+	const lock = `${path}.lock`;
+	const started = Date.now();
+	for (;;) {
+		try {
+			mkdirSync(lock);
+			break;
+		} catch {
+			try {
+				if (Date.now() - statSync(lock).mtimeMs > NAMES_LOCK_STALE_MS)
+					rmSync(lock, { recursive: true, force: true });
+			} catch {
+				// The holder released it meanwhile.
+			}
+			// A holder older than the stale limit is removed above, so waiting past that limit means the lock cannot be
+			// taken at all; the name is then left unrecorded rather than written over another process's entry.
+			if (Date.now() - started > NAMES_LOCK_STALE_MS + NAMES_LOCK_WAIT_MS) return;
+			Atomics.wait(lockPause, 0, 0, 2);
+		}
+	}
+	try {
+		write();
+	} finally {
+		rmSync(lock, { recursive: true, force: true });
+	}
+}
 
 /** Publishes the agent name for a cursor tag so owned surfaces can label it; written once per tag. */
 export function nameSurfaceCursor(tag: number, name: string, options: OwnedSurfaceOptions = {}): void {
 	if (namedTags.has(tag)) return;
 	const path = join(options.stateDir ?? resolveStateDir(), CURSOR_NAMES);
+	mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+	withNamesLock(path, () => writeCursorName(path, tag, name));
+	namedTags.add(tag);
+}
+
+function writeCursorName(path: string, tag: number, name: string): void {
 	let names: Record<string, unknown> = {};
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -208,11 +293,9 @@ export function nameSurfaceCursor(tag: number, name: string, options: OwnedSurfa
 	}
 	const color = CURSOR_COLORS[Object.keys(names).length % CURSOR_COLORS.length] ?? "#ffffff";
 	names[String(tag)] = { name, color };
-	mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
 	const temporary = `${path}.${process.pid}.tmp`;
 	writeFileSync(temporary, `${JSON.stringify(names)}\n`, { mode: 0o600 });
 	renameSync(temporary, path);
-	namedTags.add(tag);
 }
 
 /** Whether an owned surface's page is playing sound, as WebKit reports it, and when that last changed (epoch ms). */

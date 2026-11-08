@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
 	type GuardedComputerInterface,
+	boardPageUrl,
 	closeOwnedSurface,
 	listenToSurface,
 	openOwnedSurface,
@@ -20,7 +21,7 @@ export function registerSurfaceTools(server: McpServer, computer: GuardedCompute
 		"surface",
 		{
 			description:
-				"Open (url, frame [x,y,w,h]), close (pid) or listen (pid, duration_ms: audio level) to an opencua-owned web window, kept behind the person's windows and never focused. Use its pid as app.",
+				"Open (url, frame [x,y,w,h]), close (pid) or listen (pid, duration_ms: audio level) to an opencua-owned web window: behind the person's windows, never focused, the only host window taking input; use its pid as app. pointers multi: a page pointer per cursor. url opencua:board: shared board.",
 			inputSchema: z
 				.object({
 					op: z.enum(["open", "close", "listen"]),
@@ -28,6 +29,7 @@ export function registerSurfaceTools(server: McpServer, computer: GuardedCompute
 					frame: z.array(z.number().int()).length(4).optional(),
 					pid: z.number().int().optional(),
 					duration_ms: z.number().int().min(50).max(10_000).optional(),
+					pointers: z.enum(["single", "multi"]).optional(),
 				})
 				.strict(),
 			annotations: { readOnlyHint: false, destructiveHint: false },
@@ -46,7 +48,10 @@ export function registerSurfaceTools(server: McpServer, computer: GuardedCompute
 				);
 			}
 			const [x, y, width, height] = input.frame ?? [];
-			if (input.url === undefined || !/^https?:\/\//.test(input.url)) throw new Error("open needs an http(s) url");
+			const board = input.url === "opencua:board";
+			if (input.url === undefined || (!board && !/^https?:\/\//.test(input.url))) {
+				throw new Error("open needs an http(s) url or opencua:board");
+			}
 			if (
 				x === undefined ||
 				y === undefined ||
@@ -58,9 +63,10 @@ export function registerSurfaceTools(server: McpServer, computer: GuardedCompute
 				throw new Error("open needs frame [x, y, width >= 200, height >= 150]");
 			}
 			const surface = openOwnedSurface({
-				url: input.url,
-				title: "opencua",
+				url: board ? boardPageUrl() : input.url,
+				title: board ? "opencua board" : "opencua",
 				frame: { x, y, width, height },
+				pointers: input.pointers ?? (board ? "multi" : "single"),
 			});
 			const deadline = Date.now() + WINDOW_WAIT_MS;
 			while (Date.now() < deadline) {

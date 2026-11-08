@@ -7,6 +7,7 @@
 #import <ctype.h>
 #import <errno.h>
 #import <fcntl.h>
+#import <libproc.h>
 #import <pthread.h>
 #import <signal.h>
 #import <stdlib.h>
@@ -151,6 +152,8 @@ static NSTimeInterval gTrajStart = 0.0;
 static NSTimeInterval gTrajArrival = 0.0;
 static NSPoint gTrajToOrigin;
 static NSStatusItem *gStatusItem = nil;
+// What the status item shows now; nil after it was removed.
+static NSString *gShownStatus = nil;
 
 static NSWindow *marker_window(NSNumber *key, BOOL create);
 static void apply_marker_set(double x, double y, NSNumber *markerKey);
@@ -279,11 +282,12 @@ static NSArray<NSString *> *status_only_lines(BOOL stopped) {
 // --status-only: a persistent menu bar control for the user, with no cursor.
 static BOOL gStatusOnly = NO;
 
-// opencua shows one menu bar item, however many servers run. Every server
-// starts a status-only helper; only the helper holding stop-menu.lock shows
-// its item, and a waiting helper takes over when the holder exits. While
+// opencua shows one menu bar item, however many servers run, from one helper
+// process. Every server starts a status-only helper; it records its server in
+// stop-menu-parents and exits at once unless it can take stop-menu.lock. The
+// helper holding the lock lives while any recorded server runs. While
 // cua-history holds menubar-history.lock, its own menu carries Stop and
-// Resume, so no helper shows an item at all.
+// Resume, so the helper shows no item at all.
 static int gStopMenuLock = -1;
 
 static int open_state_lock(NSString *name) {
@@ -311,6 +315,60 @@ static BOOL hold_stop_menu_lock(void) {
   }
   gStopMenuLock = fd;
   return YES;
+}
+
+static NSString *stop_menu_parents_dir(void) {
+  return [stop_file_path().stringByDeletingLastPathComponent
+      stringByAppendingPathComponent:@"stop-menu-parents"];
+}
+
+// Start time in microseconds, so a pid reused by another process never counts
+// as the server that registered it. Zero when the process is gone.
+static uint64_t process_start(pid_t pid) {
+  struct proc_bsdinfo info;
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) !=
+      (int)sizeof(info)) {
+    return 0;
+  }
+  return (uint64_t)info.pbi_start_tvsec * 1000000ULL + info.pbi_start_tvusec;
+}
+
+static void register_stop_menu_parent(pid_t pid) {
+  uint64_t start = process_start(pid);
+  if (start == 0) {
+    return;
+  }
+  NSString *dir = stop_menu_parents_dir();
+  [NSFileManager.defaultManager createDirectoryAtPath:dir
+                          withIntermediateDirectories:YES
+                                           attributes:nil
+                                                error:nil];
+  NSString *name =
+      [NSString stringWithFormat:@"%d-%llu", pid, (unsigned long long)start];
+  [NSData.data writeToFile:[dir stringByAppendingPathComponent:name]
+                atomically:NO];
+}
+
+// Whether any server that started a status helper still runs; forgets the
+// servers that exited.
+static BOOL stop_menu_parent_alive(void) {
+  NSString *dir = stop_menu_parents_dir();
+  BOOL alive = NO;
+  for (NSString *name in
+       [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir
+                                                         error:NULL]) {
+    int pid = 0;
+    unsigned long long start = 0;
+    if (sscanf(name.UTF8String, "%d-%llu", &pid, &start) == 2 && pid > 0 &&
+        process_start(pid) == start) {
+      alive = YES;
+      continue;
+    }
+    [NSFileManager.defaultManager
+        removeItemAtPath:[dir stringByAppendingPathComponent:name]
+                   error:NULL];
+  }
+  return alive;
 }
 
 static BOOL history_menu_running(void) {
@@ -348,6 +406,14 @@ static void update_status_item(void) {
                                 : @"pointer";
   NSString *label = [NSString
       stringWithFormat:@"opencua running, mode %@, motion %@", mode, gStyle];
+  // Setting the button's image and title lays the menu bar item out again even
+  // when nothing changed, so only a change is applied.
+  NSString *shown = [NSString
+      stringWithFormat:@"%@|%d|%d", label, stop_engaged(), gStatusOnly];
+  if ([shown isEqualToString:gShownStatus]) {
+    return;
+  }
+  gShownStatus = shown;
   NSStatusBarButton *button = gStatusItem.button;
   NSString *symbol = gMode == 3 ? @"keyboard" : @"cursorarrow";
   NSImage *image = [NSImage imageWithSystemSymbolName:symbol
@@ -395,6 +461,7 @@ static void remove_status_item(void) {
     [gStatusItem.menu cancelTracking];
     [[NSStatusBar systemStatusBar] removeStatusItem:gStatusItem];
     gStatusItem = nil;
+    gShownStatus = nil;
   }
 }
 
@@ -1891,24 +1958,39 @@ int main(int argc, const char *argv[]) {
     }
   }
   signal(SIGPIPE, SIG_IGN);
+  if (gStatusOnly) {
+    if (parent > 0) {
+      register_stop_menu_parent(parent);
+    }
+    // The helper that holds the lock now also watches this server.
+    if (!hold_stop_menu_lock()) {
+      return 0;
+    }
+  }
   @autoreleasepool {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     if (gStatusOnly) {
-      // Lives exactly as long as the opencua server that started it, and
+      // Lives while any opencua server that started a helper runs, and
       // mirrors stops made by the chord or `opencua stop` within a second.
+      // Before exiting it lets go of the lock and looks again, so a server
+      // that registered meanwhile either is seen here or takes the lock.
       refresh_stop_menu();
-      [NSTimer
-          scheduledTimerWithTimeInterval:1.0
-                                 repeats:YES
-                                   block:^(NSTimer *timer) {
-                                     (void)timer;
-                                     if (parent <= 0 || (kill(parent, 0) != 0 &&
-                                                         errno == ESRCH)) {
-                                       [NSApp terminate:nil];
-                                     }
-                                     refresh_stop_menu();
-                                   }];
+      [NSTimer scheduledTimerWithTimeInterval:1.0
+                                      repeats:YES
+                                        block:^(NSTimer *timer) {
+                                          (void)timer;
+                                          if (!stop_menu_parent_alive()) {
+                                            close(gStopMenuLock);
+                                            gStopMenuLock = -1;
+                                            if (!stop_menu_parent_alive() ||
+                                                !hold_stop_menu_lock()) {
+                                              [NSApp terminate:nil];
+                                              return;
+                                            }
+                                          }
+                                          refresh_stop_menu();
+                                        }];
       [NSApp run];
       return 0;
     }

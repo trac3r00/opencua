@@ -9,9 +9,10 @@ const LEAN_BUDGET_BYTES = 10_500;
 // Measured revisions of the 32,000 cap: run_hands + get_tool_usage (34,556 bytes on 2026-10-25), then the named
 // cursor-owner fields on manage_workers (36,097 bytes on 2026-10-31), then the single `surface` tool for opencua-owned
 // windows (36,978 bytes on 2026-11-04), then the click `context` flag for windows several cursors share (37,078 bytes on
-// 2026-11-04), then the per-worker `region` on manage_workers assignments (37,381 bytes on 2026-11-07), then the
-// surface `listen` op (37,459 bytes on 2026-11-07). The full list still omits the repeated per-type step schema.
-const FULL_BUDGET_BYTES = 37_500;
+// 2026-11-04), then the per-worker `region` on manage_workers assignments (37,381 bytes on 2026-11-07), the
+// surface `listen` op (37,459 bytes on 2026-11-07), then `surface` pointers (one page pointer per cursor) and the
+// built-in opencua:board (37,617 bytes on 2026-11-08). The full list still omits the repeated per-type step schema.
+const FULL_BUDGET_BYTES = 37_700;
 
 let closeHarness: (() => Promise<void>) | undefined;
 

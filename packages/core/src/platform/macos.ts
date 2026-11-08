@@ -255,12 +255,12 @@ export class MacOSHostComputer extends HostComputer {
 
 	async move(position: Point): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.move(position));
+		await this.pointerBurst(() => this.input.move(position));
 	}
 
 	async click(position: Point, options?: PointerOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.click(position, "left", options?.modifiers));
+		await this.pointerBurst(() => this.input.click(position, "left", options?.modifiers), options?.modifiers);
 	}
 
 	async rightClick(position: Point, options?: PointerOptions): Promise<void> {
@@ -275,7 +275,7 @@ export class MacOSHostComputer extends HostComputer {
 
 	async doubleClick(position: Point, options?: PointerOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.doubleClick(position, options?.modifiers));
+		await this.pointerBurst(() => this.input.doubleClick(position, options?.modifiers), options?.modifiers);
 	}
 
 	async type(text: string): Promise<void> {
@@ -540,7 +540,22 @@ export class MacOSHostComputer extends HostComputer {
 
 	async drag(options: DragOptions): Promise<void> {
 		this.assertInputAvailable();
-		await this.inputLock.run(() => this.input.drag(options));
+		const burst = () => this.input.drag(options);
+		await ((options.button ?? "left") === "left"
+			? this.pointerBurst(burst, options.modifiers)
+			: this.inputLock.run(burst));
+	}
+
+	/**
+	 * Pointer input to an owned surface goes to that one process (its socket, or events posted to its pid), never to the
+	 * shared event stream, so the cursors of different agents on one surface do not wait for each other's bursts.
+	 * Held modifiers are process-wide flagsChanged events, so a burst that holds any stays under the shared lock, and
+	 * right and middle clicks, which the surface socket does not carry, never leave it.
+	 */
+	private pointerBurst<T>(burst: () => Promise<T>, modifiers?: readonly string[]): Promise<T> {
+		const pid = this.input.currentTargetPid;
+		const ownLane = pid !== undefined && isOwnedSurfacePid(pid) && (modifiers?.length ?? 0) === 0;
+		return ownLane ? burst() : this.inputLock.run(burst);
 	}
 
 	async getCursorPosition(): Promise<Point> {

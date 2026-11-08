@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -120,6 +121,9 @@ describe("#given a server process #when it starts the stop menu #then the helper
 			},
 		};
 
+		const parents = realpathSync(mkdtempSync(join(tmpdir(), "opencua-stop-parents-")));
+		writeFileSync(join(parents, "4242-111"), "");
+		writeFileSync(join(parents, "5151-222"), "");
 		const menu = startStopMenu(
 			(command, args) => {
 				calls.push({ command, args });
@@ -127,11 +131,15 @@ describe("#given a server process #when it starts the stop menu #then the helper
 			},
 			"/fixture/cursor-overlay",
 			4242,
+			parents,
 		);
 		menu?.stop();
 
 		expect(calls).toEqual([{ command: "/fixture/cursor-overlay", args: ["--status-only", "--parent", "4242"] }]);
 		expect(killed).toBe(1);
+		// Only this server's registration goes, so another server's menu stays.
+		expect(readdirSync(parents)).toEqual(["5151-222"]);
+		rmSync(parents, { recursive: true, force: true });
 		expect(startStopMenu(() => child, null)).toBeUndefined();
 	});
 });

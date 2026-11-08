@@ -429,11 +429,13 @@ export { GuardedPlatformComputer } from "./platform/guarded-platform-computer.js
 export { denyHostInteraction, HostInteractionDenied } from "./computer/host-interaction-policy.js";
 export {
 	type OwnedSurface,
+	boardPageUrl,
 	closeOwnedSurface,
 	isOwnedSurfacePid,
 	openOwnedSurface,
 	readOwnedSurfaces,
 	type SurfaceAudioState,
 	surfaceAudioState,
+	setSessionCursorName,
 } from "./platform/owned-surfaces.js";
 export { type SurfaceListening, listenToSurface } from "./platform/surface-listen.js";

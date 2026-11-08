@@ -210,8 +210,9 @@ static void SeedSegmentCounts(NSString *segmentId) {
 static NSString *RollSegment(time_t now) {
   time_t start = WindowStart(now);
   NSString *segmentId = IsoAt(start, YES);
-  // A segment the person deleted (opencua history delete) is started again rather than written into a
-  // directory that no longer exists, so recording continues and its counts restart from what is on disk.
+  // A segment the person deleted (opencua history delete) is started again
+  // rather than written into a directory that no longer exists, so recording
+  // continues and its counts restart from what is on disk.
   if (![segmentId isEqualToString:gCurrentSegmentId] ||
       ![NSFileManager.defaultManager fileExistsAtPath:SegmentDir(segmentId)]) {
     gCurrentSegmentId = segmentId;
@@ -621,6 +622,16 @@ static void InstallEventTap(void) {
                                                  : @"input capture unavailable";
   NSString *label = [NSString stringWithFormat:@"opencua; cua-history %@; %@",
                                                recordingStatus, inputStatus];
+  // Setting the button's image and title lays the status item out again even
+  // when nothing changed; that was most of this process's idle CPU.
+  // A transient tooltip (a copy or launch failure) replaces the label, so the
+  // next tick restores it even when the state did not change.
+  static NSString *shownLabel = nil;
+  if ([label isEqualToString:shownLabel] &&
+      [gStatusItem.button.toolTip isEqualToString:label]) {
+    return;
+  }
+  shownLabel = label;
   NSStatusBarButton *button = gStatusItem.button;
   NSImage *image = [NSImage imageWithSystemSymbolName:@"cursorarrow"
                              accessibilityDescription:@"opencua running"];
@@ -838,7 +849,14 @@ static void InstallEventTap(void) {
 
 - (void)tick:(NSTimer *)timer {
   (void)timer;
-  PruneOldSegments(time(NULL));
+  // Retention is counted in segment windows, so pruning once a minute is
+  // enough; listing the segment directory every tick is not free.
+  static time_t lastPrune = 0;
+  time_t now = time(NULL);
+  if (now - lastPrune >= 60) {
+    lastPrune = now;
+    PruneOldSegments(now);
+  }
   BOOL wasPaused = gPaused;
   LoadState();
   LoadSettings();

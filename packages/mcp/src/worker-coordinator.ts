@@ -571,7 +571,8 @@ export class WorkerCoordinator {
 						// The input layer refuses any event or keystroke outside the region right before posting it.
 						return await withInputRegion(screenRegion, runAll);
 					},
-					worker.assignment.cursor_owner,
+					// The cursor shows what this worker is for next to its name.
+					{ ...worker.assignment.cursor_owner, purpose: worker.assignment.task },
 				);
 			const pending = this.computer.delivery === "background" ? dispatch() : this.attendedTail.then(dispatch);
 			if (this.computer.delivery !== "background") {

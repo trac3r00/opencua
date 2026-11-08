@@ -637,6 +637,10 @@ else
 			break
 		fi
 	done
+	# guest-axdump runs inside the arm64 guest, so it is checked for presence, not for this Mac's slice.
+	if [[ -z "$native_reason" && ! -f "$native_dir/guest-axdump" ]]; then
+		native_reason="guest-axdump is missing"
+	fi
 	if [[ -z "$native_reason" ]] && ! (cd "$native_dir" && shasum -a 256 -c --status build-inputs.sha256 >/dev/null 2>&1); then
 		native_reason="their sources changed since they were built (build-inputs.sha256 does not match)"
 	fi
@@ -645,7 +649,7 @@ if [[ -n "$native_reason" ]]; then
 	info "building because $native_reason"
 	"$native_dir/build.sh"
 fi
-ok "libsckit.dylib ($(lipo -archs "$native_dir/libsckit.dylib")), cursor-overlay ($(lipo -archs "$native_dir/cursor-overlay")), history-recorder ($(lipo -archs "$native_dir/history-recorder")), opencua-surface${native_reason:+, rebuilt}"
+ok "libsckit.dylib ($(lipo -archs "$native_dir/libsckit.dylib")), cursor-overlay ($(lipo -archs "$native_dir/cursor-overlay")), history-recorder ($(lipo -archs "$native_dir/history-recorder")), opencua-surface, guest-axdump${native_reason:+, rebuilt}"
 else
 	ok "skipped macOS native binaries on Linux"
 fi

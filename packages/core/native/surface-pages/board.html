@@ -1,0 +1,180 @@
+<!doctype html>
+<!--
+  opencua board: a drawing page for many agent cursors at once. Every pointer (every cursor of a
+  --multi-pointer surface, and the person's own mouse) keeps its own color and brush size, so cursors
+  pick and draw at the same time without changing each other's tools.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>opencua board</title>
+<style>
+	html, body { margin: 0; height: 100%; overflow: hidden; font: 12px -apple-system, sans-serif; background: #fff; }
+	#bar { position: absolute; left: 0; right: 0; top: 0; height: 40px; display: flex; align-items: center;
+		gap: 3px; padding: 0 6px; background: #eee; border-bottom: 1px solid #ccc; touch-action: none; }
+	.swatch, .size { flex: none; box-sizing: border-box; width: 22px; height: 22px; border: 1px solid #555;
+		border-radius: 3px; }
+	.size { display: flex; align-items: center; justify-content: center; background: #fff; }
+	.size span { background: #000; border-radius: 50%; }
+	#status { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	#paper { position: absolute; left: 0; top: 41px; touch-action: none; }
+</style>
+</head>
+<body>
+<div id="bar" role="toolbar" aria-label="Colors and brush sizes"></div>
+<canvas id="paper" aria-label="Drawing canvas"></canvas>
+<script>
+"use strict";
+const COLORS = ["#000000", "#e6194b", "#3cb44b", "#ffe119", "#4363d8", "#f58231", "#911eb4", "#46f0f0",
+	"#f032e6", "#bcf60c", "#fabebe", "#008080", "#9a6324", "#800000", "#808080"];
+const SIZES = [2, 6, 14];
+const bar = document.getElementById("bar");
+const paper = document.getElementById("paper");
+const context = paper.getContext("2d");
+const pointers = new Map();
+const down = new Set();
+let maxDown = 0;
+let strokes = 0;
+
+for (const color of COLORS) {
+	const swatch = document.createElement("div");
+	swatch.className = "swatch";
+	swatch.style.background = color;
+	swatch.dataset.color = color;
+	swatch.setAttribute("role", "button");
+	swatch.tabIndex = 0;
+	swatch.setAttribute("aria-label", `color ${color}`);
+	bar.append(swatch);
+}
+for (const size of SIZES) {
+	const button = document.createElement("div");
+	button.className = "size";
+	button.dataset.size = String(size);
+	button.setAttribute("role", "button");
+	button.tabIndex = 0;
+	button.setAttribute("aria-label", `brush ${size}`);
+	const dot = document.createElement("span");
+	dot.style.width = dot.style.height = `${Math.min(size, 16)}px`;
+	button.append(dot);
+	bar.append(button);
+}
+const status = document.createElement("div");
+status.id = "status";
+status.setAttribute("role", "status");
+bar.append(status);
+
+function resize() {
+	const ratio = window.devicePixelRatio || 1;
+	const width = window.innerWidth;
+	const height = Math.max(0, window.innerHeight - 41);
+	// The drawing is kept at its CSS size, so a move to a display with another pixel ratio resamples it in place.
+	const previous = { width: parseFloat(paper.style.width) || 0, height: parseFloat(paper.style.height) || 0 };
+	let saved = null;
+	if (paper.width > 0 && paper.height > 0) {
+		saved = document.createElement("canvas");
+		saved.width = paper.width;
+		saved.height = paper.height;
+		saved.getContext("2d").drawImage(paper, 0, 0);
+	}
+	paper.width = Math.round(width * ratio);
+	paper.height = Math.round(height * ratio);
+	paper.style.width = `${width}px`;
+	paper.style.height = `${height}px`;
+	context.setTransform(ratio, 0, 0, ratio, 0, 0);
+	context.lineCap = "round";
+	context.lineJoin = "round";
+	if (saved !== null) context.drawImage(saved, 0, 0, previous.width, previous.height);
+}
+
+function report() {
+	status.textContent = `down ${down.size} | max ${maxDown} | strokes ${strokes}`;
+}
+
+function state(id) {
+	let entry = pointers.get(id);
+	// An agent cursor draws in its label color (set by opencua-surface) until it picks a color itself; other pointers
+	// take the next palette color.
+	const labeled = window.__opencuaPointerColors?.[id];
+	if (entry === undefined) {
+		entry = { color: labeled ?? COLORS[pointers.size % COLORS.length], size: SIZES[1], last: null, picked: false };
+		pointers.set(id, entry);
+	} else if (!entry.picked && labeled !== undefined) {
+		entry.color = labeled;
+	}
+	return entry;
+}
+
+function local(event) {
+	const box = paper.getBoundingClientRect();
+	return { x: event.clientX - box.left, y: event.clientY - box.top };
+}
+
+function segment(entry, from, to) {
+	context.strokeStyle = entry.color;
+	context.fillStyle = entry.color;
+	context.lineWidth = entry.size;
+	context.beginPath();
+	context.moveTo(from.x, from.y);
+	context.lineTo(to.x, to.y);
+	context.stroke();
+}
+
+function choose(entry, pick) {
+	if (pick.dataset.color !== undefined) {
+		entry.color = pick.dataset.color;
+		entry.picked = true;
+	}
+	if (pick.dataset.size !== undefined) entry.size = Number(pick.dataset.size);
+}
+
+// Keyboard picks apply to the person's own pointer, the primary mouse (pointer id 1).
+bar.addEventListener("keydown", (event) => {
+	if (event.key !== "Enter" && event.key !== " ") return;
+	const pick = event.target instanceof Element ? event.target.closest("[data-color],[data-size]") : null;
+	if (pick === null) return;
+	event.preventDefault();
+	choose(state(1), pick);
+});
+
+window.addEventListener("pointerdown", (event) => {
+	const entry = state(event.pointerId);
+	const pick = event.target instanceof Element ? event.target.closest("[data-color],[data-size]") : null;
+	if (pick !== null) {
+		choose(entry, pick);
+		return;
+	}
+	if (event.target !== paper) return;
+	event.preventDefault();
+	const point = local(event);
+	entry.last = point;
+	segment(entry, point, point);
+	down.add(event.pointerId);
+	maxDown = Math.max(maxDown, down.size);
+	strokes += 1;
+	report();
+});
+
+window.addEventListener("pointermove", (event) => {
+	const entry = pointers.get(event.pointerId);
+	if (entry === undefined || entry.last === null) return;
+	const point = local(event);
+	segment(entry, entry.last, point);
+	entry.last = point;
+});
+
+function end(event) {
+	const entry = pointers.get(event.pointerId);
+	if (entry === undefined || entry.last === null) return;
+	segment(entry, entry.last, local(event));
+	entry.last = null;
+	down.delete(event.pointerId);
+	report();
+}
+window.addEventListener("pointerup", end);
+window.addEventListener("pointercancel", end);
+window.addEventListener("resize", resize);
+resize();
+report();
+</script>
+</body>
+</html>

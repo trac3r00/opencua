@@ -19,6 +19,16 @@
   <a href="docs/reference.md">Full reference</a>
 </p>
 
+<p align="center">
+  <img src="./docs/assets/architecture.svg" alt="Eyes (ScreenCaptureKit, Accessibility tree, Vision text) feed Hands (CGEvent posted to the app's pid in the background), which drive a shared surface where each agent has its own labeled cursor" width="100%" />
+</p>
+
+**Many agents, one window, your Mac untouched.** Agents see apps through ScreenCaptureKit and the Accessibility
+tree, and act through input aimed at the app itself (events posted to its process, or an opencua surface's own
+input socket), so your cursor and front app stay where you left them.
+On a surface window opencua launches, several agents and subagents work at once, each with its own named, colored
+cursor; their strokes are merged so none is cut and a cursor that waited still draws its curves.
+
 ---
 
 **OpenCUA** (formerly apple-cua) lets AI agents see and operate apps through each OS's native accessibility APIs: the

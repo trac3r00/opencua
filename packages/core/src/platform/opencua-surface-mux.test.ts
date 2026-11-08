@@ -10,7 +10,9 @@ describe("#given the committed opencua-surface binary #when its cursor multiplex
 			new Response(run.stderr).text(),
 		]);
 		expect(stderr).toBe("");
-		expect(stdout.trim()).toBe("SELF-TEST OK");
+		const lines = stdout.trim().split("\n");
+		expect(lines.at(-1)).toBe("SELF-TEST OK");
+		expect(lines.slice(0, -1)).toEqual(["waypoint replay: 500 attempted, 500 executed, 0 discarded, 0 failing"]);
 		expect(code).toBe(0);
 	});
 });

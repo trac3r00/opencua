@@ -1,15 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
+	boardPageUrl,
 	isOwnedSurfacePid,
 	readOwnedSurfaces,
 	registerOwnedSurface,
 	sendSurfacePointer,
+	setSessionCursorName,
 	surfaceAudioState,
 	surfaceAudioStatePath,
+	surfaceCursorFor,
 	surfaceCursorTag,
 	surfaceCursorUserData,
 	surfaceSocketPath,
@@ -81,6 +85,67 @@ describe("#given cursor identities #when tagged #then each gets a stable nonzero
 		const marked = surfaceCursorUserData(tag, true);
 		expect(marked % 2 ** 32).toBe(tag);
 		expect(Math.floor(marked / 2 ** 32)).toBe(1);
+	});
+});
+
+describe("#given input with or without a worker's cursor #when its surface cursor is resolved #then every session has its own", () => {
+	it("gives input outside any worker scope this process's own tag and the session's name, never the shared tag 1", () => {
+		setSessionCursorName("claude-code 4242");
+
+		const session = surfaceCursorFor(undefined, undefined);
+
+		expect(session.tag).toBe(surfaceCursorTag(`process-${process.pid}`));
+		expect(session.tag).not.toBe(1);
+		expect(session.name).toBe("claude-code 4242");
+	});
+
+	it("keeps a worker's own cursor and name inside its scope", () => {
+		setSessionCursorName("claude-code 4242");
+
+		expect(surfaceCursorFor("worker-7", { agentName: "painter 7" })).toEqual({
+			tag: surfaceCursorTag("worker-7"),
+			name: "painter 7",
+		});
+		expect(surfaceCursorFor("worker-7", undefined).name).toBe("worker-7");
+	});
+
+	it("labels a worker's cursor with its name and purpose", () => {
+		expect(surfaceCursorFor("worker-7", { agentName: "painter 7", purpose: "draw row 7" }).name).toBe(
+			"painter 7: draw row 7",
+		);
+	});
+});
+
+describe("#given many agent processes starting on one surface #when each names its cursor at once #then no name is lost", () => {
+	it("keeps every process's entry in the shared names file", async () => {
+		const modulePath = fileURLToPath(new URL("./owned-surfaces.ts", import.meta.url));
+		const processes = Array.from({ length: 8 }, (_, index) =>
+			Bun.spawn(
+				[
+					process.execPath,
+					"-e",
+					`const m = await import(${JSON.stringify(modulePath)}); m.nameSurfaceCursor(${100 + index}, "agent ${index}", { stateDir: ${JSON.stringify(stateDir)} });`,
+				],
+				{ stdout: "ignore", stderr: "pipe" },
+			),
+		);
+		const codes = await Promise.all(processes.map((child) => child.exited));
+
+		expect(codes).toEqual(Array.from({ length: 8 }, () => 0));
+		const names: unknown = JSON.parse(await Bun.file(join(stateDir, "surface-cursors.json")).text());
+		expect(Object.keys(names as Record<string, unknown>).sort()).toEqual(
+			Array.from({ length: 8 }, (_, index) => String(100 + index)).sort(),
+		);
+		expect(existsSync(join(stateDir, "surface-cursors.json.lock"))).toBe(false);
+	});
+});
+
+describe("#given the built-in board #when its url is resolved #then it names the shipped page", () => {
+	it("points at an existing file next to the native helpers", () => {
+		const url = boardPageUrl();
+
+		expect(url.startsWith("file://")).toBe(true);
+		expect(existsSync(fileURLToPath(url))).toBe(true);
 	});
 });
 
