@@ -2802,12 +2802,35 @@ export function validatePoint(observation: InputObservation, point: Point): void
 	}
 }
 
+function previousDouble(value: number): number {
+	if (value === 0) return -Number.MIN_VALUE;
+	const view = new DataView(new ArrayBuffer(8));
+	view.setFloat64(0, value);
+	const bits = view.getBigUint64(0);
+	view.setBigUint64(0, value > 0 ? bits - 1n : bits + 1n);
+	return view.getFloat64(0);
+}
+
+// Rounding in `start + fraction * extent` can reach the exclusive end; an accepted point must stay inside.
+function withinHalfOpen(value: number, start: number, extent: number): number {
+	const end = start + extent;
+	return value < end ? value : previousDouble(end);
+}
+
 export function observedPointToScreen(observation: InputObservation, point: Point): Point {
 	validatePoint(observation, point);
 	const viewport = observation.screenshotViewport;
 	return {
-		x: viewport.bounds.x + (point.x / viewport.width) * viewport.bounds.width,
-		y: viewport.bounds.y + (point.y / viewport.height) * viewport.bounds.height,
+		x: withinHalfOpen(
+			viewport.bounds.x + (point.x / viewport.width) * viewport.bounds.width,
+			viewport.bounds.x,
+			viewport.bounds.width,
+		),
+		y: withinHalfOpen(
+			viewport.bounds.y + (point.y / viewport.height) * viewport.bounds.height,
+			viewport.bounds.y,
+			viewport.bounds.height,
+		),
 	};
 }
 
