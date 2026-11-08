@@ -42,6 +42,13 @@ public static class OpenCuaNative {
  }
  [DllImport("user32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
  public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+ [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr h,POINT p,uint f);
+ [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr h,ref POINT p);
+ public static IntPtr Target(IntPtr h,int x,int y) {
+  for(int i=0;i<32;i++) { POINT p; p.X=x; p.Y=y; ScreenToClient(h,ref p);
+   IntPtr c=ChildWindowFromPointEx(h,p,5); if(c==IntPtr.Zero||c==h) return h; h=c; }
+  return h;
+ }
  [StructLayout(LayoutKind.Sequential)] public struct MOUSE {
   public int X,Y; public uint Data,Flags,Time; public UIntPtr Extra;
  }
@@ -346,6 +353,41 @@ function Dispatch($method,$p) {
   'cursor' { $point=New-Object OpenCuaNative+POINT; [void][OpenCuaNative]::GetCursorPos([ref]$point); return @{x=$point.X;y=$point.Y} }
   'screen' { return @{width=[OpenCuaNative]::GetSystemMetrics(0);height=[OpenCuaNative]::GetSystemMetrics(1)} }
   'physical' { Physical $p; return $null }
+  'launch' {
+   if (-not $env:OPENCUA_DESKTOP) { Fail 'ISOLATED_SESSION_REQUIRED' 'Apps start only on an owned OpenCUA desktop' }
+   $list=@($p.args | Where-Object { $_ -is [string] })
+   $process=if ($list.Count) { Start-Process -FilePath $p.path -ArgumentList $list -PassThru } else { Start-Process -FilePath $p.path -PassThru }
+   return @{pid=$process.Id;desktop=$env:OPENCUA_DESKTOP}
+  }
+  'postTarget' {
+   $h=[OpenCuaNative]::Target([IntPtr](Window $p).Current.NativeWindowHandle,[int]$p.x,[int]$p.y)
+   $o=New-Object OpenCuaNative+POINT; [void][OpenCuaNative]::ScreenToClient($h,[ref]$o)
+   return @{hwnd=$h.ToInt64();originX=-$o.X;originY=-$o.Y}
+  }
+  'post' {
+   foreach ($m in $p.messages) {
+    if (-not [OpenCuaNative]::PostMessage([IntPtr][long]$p.hwnd,[uint32]$m.message,[IntPtr][long]$m.wParam,[IntPtr][long]$m.lParam)) { Fail 'POST_FAILED' 'PostMessage failed (possibly UIPI)' }
+   }
+   return $true
+  }
+  'loadOcr' { if ($null -eq (Get-Command OpenCuaOcr -ErrorAction SilentlyContinue)) { . ([scriptblock]::Create($p.source)) }; return $true }
+  'ocr' {
+   if ($null -eq (Get-Command OpenCuaOcr -ErrorAction SilentlyContinue)) { Fail 'OCR_NOT_LOADED' 'Send loadOcr first' }
+   $w=Window $p; $image=Capture $w @{format='png'}
+   return @{width=$image.width;height=$image.height;bounds=(WindowBounds $w);lines=(OpenCuaOcr @{png=$image.data})}
+  }
+  'loadAudio' { if (-not ('OpenCuaAudio' -as [type])) { Add-Type -TypeDefinition $p.source }; return $true }
+  'audio' {
+   if (-not ('OpenCuaAudio' -as [type])) { Fail 'AUDIO_NOT_LOADED' 'Send loadAudio first' }
+   $parents=@{}
+   Get-CimInstance Win32_Process | ForEach-Object { $parents[[string]$_.ProcessId]=[int]$_.ParentProcessId }
+   return @{sessions=@([OpenCuaAudio]::Sessions() | ForEach-Object { @{pid=$_['pid'];peak=$_['peak'];state=$_['state']} });parents=$parents}
+  }
+  'audioRecord' {
+   if (-not ('OpenCuaAudio' -as [type])) { Fail 'AUDIO_NOT_LOADED' 'Send loadAudio first' }
+   if (-not ($p.pid -is [int] -or $p.pid -is [long]) -or $p.pid -le 0 -or -not ($p.seconds -gt 0 -and $p.seconds -le 10)) { Fail 'INVALID_ARGUMENT' 'audioRecord needs a pid and 0 < seconds <= 10' }
+   return @{mimeType='audio/wav';data=[Convert]::ToBase64String([OpenCuaAudio]::Record([int]$p.pid,[double]$p.seconds))}
+  }
   default { Fail 'UNSUPPORTED' ('Unknown method: '+$method) }
  }
 }

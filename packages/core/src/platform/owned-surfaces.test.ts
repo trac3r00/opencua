@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	readdirSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,10 +16,14 @@ import { fileURLToPath } from "node:url";
 import {
 	boardPageUrl,
 	isOwnedSurfacePid,
+	nameSurfaceCursor,
 	readOwnedSurfaces,
 	registerOwnedSurface,
 	sendSurfacePointer,
 	setSessionCursorName,
+	setSurfaceCursorIntent,
+	setSurfaceCursorRegion,
+	speakOnSurface,
 	surfaceAudioState,
 	surfaceAudioStatePath,
 	surfaceCursorFor,
@@ -66,6 +79,50 @@ describe("#given the owned-surface registry #when a pid is checked #then only op
 
 		expect(readOwnedSurfaces({ stateDir })).toEqual([]);
 		expect(isOwnedSurfacePid(4242, { stateDir, startTime }, 20_000)).toBe(false);
+	});
+});
+
+describe("#given a named surface cursor #when its region is set or cleared #then the surface reads it from the names file", () => {
+	const names = () => JSON.parse(readFileSync(join(stateDir, "surface-cursors.json"), "utf8"));
+
+	it("keeps the name and color beside the region and drops only the region when cleared", () => {
+		nameSurfaceCursor(9_001, "explorer", { stateDir });
+		const named = names()["9001"];
+		setSurfaceCursorRegion(9_001, { x: 10, y: 20, width: 300, height: 200 }, { stateDir });
+		expect(names()["9001"]).toEqual({ ...named, region: { x: 10, y: 20, width: 300, height: 200 } });
+		setSurfaceCursorRegion(9_001, undefined, { stateDir });
+		expect(names()["9001"]).toEqual(named);
+	});
+
+	it("sets and clears an intent badge beside the name and refuses unknown intents", () => {
+		nameSurfaceCursor(9_003, "scout", { stateDir });
+		setSurfaceCursorIntent(9_003, "listening", { stateDir });
+		expect(names()["9003"]).toMatchObject({ name: "scout", badge: "🎧" });
+		setSurfaceCursorIntent(9_003, undefined, { stateDir });
+		expect(names()["9003"].badge).toBeUndefined();
+		const fromWire: Parameters<typeof setSurfaceCursorIntent>[1] = JSON.parse('"__proto__"');
+		expect(() => setSurfaceCursorIntent(9_003, fromWire, { stateDir })).toThrow(RangeError);
+	});
+
+	it("speaks only to a running surface, leaves no clip behind when there is none, and refuses empty or huge clips", () => {
+		expect(speakOnSurface(424242, Buffer.from("RIFF"), { stateDir })).toBe(false);
+		expect(readdirSync(stateDir).filter((name) => name.endsWith(".audio"))).toEqual([]);
+		expect(() => speakOnSurface(1, Buffer.alloc(0), { stateDir })).toThrow(RangeError);
+		expect(() => speakOnSurface(1, Buffer.alloc(16 * 1024 * 1024 + 1), { stateDir })).toThrow(RangeError);
+	});
+
+	it("rejects regions the surface would not draw and leaves the file untouched", () => {
+		setSurfaceCursorRegion(9_002, { x: 0, y: 0, width: 5, height: 5 }, { stateDir });
+		const before = readFileSync(join(stateDir, "surface-cursors.json"), "utf8");
+		for (const region of [
+			{ x: 0, y: 0, width: 0, height: 5 },
+			{ x: 0, y: 0, width: 5, height: -1 },
+			{ x: Number.NaN, y: 0, width: 5, height: 5 },
+			{ x: 0, y: Number.POSITIVE_INFINITY, width: 5, height: 5 },
+		]) {
+			expect(() => setSurfaceCursorRegion(9_002, region, { stateDir })).toThrow(RangeError);
+		}
+		expect(readFileSync(join(stateDir, "surface-cursors.json"), "utf8")).toBe(before);
 	});
 });
 

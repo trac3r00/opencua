@@ -380,6 +380,94 @@ def portal_image():
 			GLib.source_remove(timer)
 
 
+def xrgb_to_rgb(data, width, height, stride, little_endian):
+	# 32-bit ZPixmap rows (stride bytes each) to packed RGB; byte order B,G,R,X when little-endian.
+	if width <= 0 or height <= 0 or stride < width * 4 or len(data) < stride * height:
+		fail("CAPTURE_UNAVAILABLE", "Window image has an unexpected layout")
+	blue, green, red = (0, 1, 2) if little_endian else (3, 2, 1)
+	out = bytearray(width * height * 3)
+	for row in range(height):
+		line = data[row * stride:row * stride + width * 4]
+		base = row * width * 3
+		out[base:base + width * 3:3] = line[red::4]
+		out[base + 1:base + width * 3:3] = line[green::4]
+		out[base + 2:base + width * 3:3] = line[blue::4]
+	return bytes(out)
+
+
+class XImage(ctypes.Structure):
+	_fields_ = [("width", ctypes.c_int), ("height", ctypes.c_int), ("xoffset", ctypes.c_int),
+		("format", ctypes.c_int), ("data", ctypes.c_void_p), ("byte_order", ctypes.c_int),
+		("bitmap_unit", ctypes.c_int), ("bitmap_bit_order", ctypes.c_int), ("bitmap_pad", ctypes.c_int),
+		("depth", ctypes.c_int), ("bytes_per_line", ctypes.c_int), ("bits_per_pixel", ctypes.c_int)]
+
+
+class XWindowAttributes(ctypes.Structure):
+	_fields_ = [("x", ctypes.c_int), ("y", ctypes.c_int), ("width", ctypes.c_int), ("height", ctypes.c_int),
+		("border_width", ctypes.c_int), ("depth", ctypes.c_int), ("_rest", ctypes.c_char * 256)]
+
+
+def composite_window_image(window_id):
+	# The window's own composited pixmap: correct when other windows cover it, no subprocess.
+	# Returns None when Xcomposite is unavailable so the caller falls back to import.
+	x11_name = ctypes.util.find_library("X11")
+	composite_name = ctypes.util.find_library("Xcomposite")
+	if not x11_name or not composite_name:
+		return None
+	x11 = ctypes.CDLL(x11_name)
+	composite = ctypes.CDLL(composite_name)
+	x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+	x11.XOpenDisplay.restype = ctypes.c_void_p
+	x11.XGetWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(XWindowAttributes)]
+	x11.XGetImage.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+		ctypes.c_uint, ctypes.c_ulong, ctypes.c_int]
+	x11.XGetImage.restype = ctypes.POINTER(XImage)
+	x11.XDestroyImage.argtypes = [ctypes.POINTER(XImage)]
+	x11.XFreePixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+	x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+	composite.XCompositeNameWindowPixmap.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+	composite.XCompositeNameWindowPixmap.restype = ctypes.c_ulong
+	x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+	display = x11.XOpenDisplay(None)
+	if not display:
+		return None
+	# Xlib's default error handler exits the process; an unredirected window answers BadMatch.
+	errors = []
+	handler_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+	handler = handler_type(lambda _display, _event: errors.append(1) or 0)
+	x11.XSetErrorHandler.argtypes = [handler_type]
+	x11.XSetErrorHandler.restype = ctypes.c_void_p
+	previous = x11.XSetErrorHandler(handler)
+	try:
+		attributes = XWindowAttributes()
+		if not x11.XGetWindowAttributes(display, window_id, ctypes.byref(attributes)) or attributes.depth not in (24, 32):
+			return None
+		pixmap = composite.XCompositeNameWindowPixmap(display, window_id)
+		x11.XSync(display, 0)
+		if not pixmap or errors:
+			return None
+		try:
+			image = x11.XGetImage(display, pixmap, 0, 0, attributes.width, attributes.height, 0xFFFFFFFF, 2)
+			x11.XSync(display, 0)
+			if not image or errors:
+				return None
+			try:
+				frame = image.contents
+				if frame.bits_per_pixel != 32:
+					return None
+				raw = ctypes.string_at(frame.data, frame.bytes_per_line * frame.height)
+				return (xrgb_to_rgb(raw, frame.width, frame.height, frame.bytes_per_line, frame.byte_order == 0),
+					frame.width, frame.height)
+			finally:
+				x11.XDestroyImage(image)
+		finally:
+			x11.XFreePixmap(display, pixmap)
+	finally:
+		x11.XSync(display, 0)
+		x11.XSetErrorHandler(ctypes.cast(previous, handler_type) if previous else handler_type())
+		x11.XCloseDisplay(display)
+
+
 def capture(params):
 	global last_screen_size
 	options = params.get("options", {})
@@ -390,17 +478,25 @@ def capture(params):
 		data = run(["grim", "-"]) if shutil.which("grim") else portal_image()
 		scope = "screen"
 	else:
-		data = run(["import", "-window", str(window_id) if window_id is not None else "root", "png:-"])
+		data = None
 		scope = "window" if window_id is not None else "screen"
 	try:
 		gi.require_version("GdkPixbuf", "2.0")
 		from gi.repository import GdkPixbuf
 	except (ImportError, ValueError) as error:
 		fail("MISSING_DEPENDENCY", "GdkPixbuf is required to decode captures: " + str(error))
-	loader = GdkPixbuf.PixbufLoader.new()
-	loader.write(data)
-	loader.close()
-	pixels = loader.get_pixbuf()
+	composited = composite_window_image(int(window_id)) if data is None and window_id is not None else None
+	if composited:
+		rgb, width, height = composited
+		pixels = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(rgb), GdkPixbuf.Colorspace.RGB, False, 8,
+			width, height, width * 3)
+	else:
+		if data is None:
+			data = run(["import", "-window", str(window_id) if window_id is not None else "root", "png:-"])
+		loader = GdkPixbuf.PixbufLoader.new()
+		loader.write(data)
+		loader.close()
+		pixels = loader.get_pixbuf()
 	if not pixels:
 		fail("CAPTURE_UNAVAILABLE", "Capture did not contain an image")
 	if scope == "screen":
@@ -564,7 +660,61 @@ def cursor_position():
 		x11.XCloseDisplay(display)
 
 
+def process_parents():
+	parents = {}
+	for entry in os.listdir("/proc"):
+		if not entry.isdigit():
+			continue
+		try:
+			with open("/proc/" + entry + "/stat") as stat:
+				fields = stat.read().rsplit(")", 1)[1].split()
+			parents[entry] = int(fields[1])
+		except (OSError, IndexError, ValueError):
+			continue
+	return parents
+
+
+def audio_report():
+	if shutil.which("pw-dump"):
+		report = dict(source="pw-dump", text=run(["pw-dump"]).decode())
+	elif shutil.which("pactl"):
+		report = dict(source="pactl", text=run(["pactl", "--format=json", "list", "sink-inputs"]).decode())
+	else:
+		fail("MISSING_DEPENDENCY", "Neither pw-dump nor pactl is installed")
+	report["parents"] = process_parents()
+	return report
+
+
+def audio_record(params):
+	target = params["target"]
+	seconds = params["seconds"]
+	if (isinstance(target, bool) or not isinstance(target, int) or target < 0
+			or isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 0 < seconds <= 30):
+		fail("INVALID_ARGUMENT", "audioRecord needs a node target and 0 < seconds <= 30")
+	if not shutil.which("pw-record"):
+		fail("MISSING_DEPENDENCY", "pw-record is not installed")
+	path = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "opencua-audio-" + uuid.uuid4().hex + ".wav")
+	try:
+		recorder = subprocess.Popen(["pw-record", "--target", str(target), path],
+			stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+		try:
+			recorder.wait(timeout=seconds)
+			fail("CAPTURE_FAILED", "pw-record stopped early: " + recorder.stderr.read().decode(errors="replace")[:200])
+		except subprocess.TimeoutExpired:
+			recorder.terminate()
+			recorder.wait(timeout=5)
+		with open(path, "rb") as recording:
+			return dict(mimeType="audio/wav", data=base64.b64encode(recording.read()).decode())
+	finally:
+		if os.path.exists(path):
+			os.remove(path)
+
+
 def dispatch(method, params):
+	if method == "audio":
+		return audio_report()
+	if method == "audioRecord":
+		return audio_record(params)
 	if dependency_error:
 		fail("MISSING_DEPENDENCY", "Python GI/AT-SPI unavailable: " + dependency_error)
 	match method:

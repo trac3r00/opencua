@@ -1,4 +1,5 @@
 import type { AXTreeElement, AppState, WindowInventoryEntry } from "../../accessibility/types.js";
+import type { OcrTextEntry } from "../../accessibility/types.js";
 import type { ComputerInterface, ScreenshotResult } from "../../computer/interface.js";
 import { type ScreenshotViewport, screenRectToScreenshot } from "../../computer/viewport.js";
 import type {
@@ -12,6 +13,18 @@ import type {
 	ScrollOptions,
 	SelectTextOptions,
 } from "../../types/index.js";
+import { type AudioStream, readWasapiSessions, streamsOfProcessTree } from "../audio-sessions.js";
+import { windowsAudioSource } from "./audio-helper.js";
+import { type GpuCaptureRunner, readGpuCapture } from "./gpu-capture.js";
+import {
+	type MessageClick,
+	type MessageModifier,
+	type WindowMessage,
+	clickMessages,
+	dragMessages,
+} from "./messages.js";
+import { windowsOcrSource } from "./ocr-helper.js";
+import { readWindowsOcr } from "./ocr.js";
 import {
 	PowerShellTransport,
 	type PowerShellTransportOptions,
@@ -20,11 +33,16 @@ import {
 } from "./transport.js";
 import * as wire from "./wire.js";
 
+/** Longest recording: the helper's 15 s request timeout must cover activation plus the recording. */
+const MAX_RECORD_SECONDS = 10;
+
 export { WindowsHostError } from "./transport.js";
 export type { WindowsProcess, WindowsProcessFactory, WindowsTransport } from "./transport.js";
 
 export interface WindowsHostComputerOptions extends PowerShellTransportOptions {
 	readonly transport?: WindowsTransport;
+	/** OpenCuaCapture runner: GPU window capture (Windows.Graphics.Capture) before PrintWindow. */
+	readonly gpuCapture?: GpuCaptureRunner;
 }
 
 interface Observation {
@@ -174,6 +192,63 @@ export class WindowsHostComputer implements ComputerInterface {
 		return observation ? this.viewport(observation.state) : undefined;
 	}
 
+	/** Starts an app on the helper's owned desktop (transport option `desktop`); refused on the person's desktop. */
+	async launchApp(path: string, args: readonly string[] = []): Promise<number> {
+		if (path.length === 0 || path.includes("\0") || args.some((arg) => arg.includes("\0"))) {
+			throw new WindowsHostError("INVALID_ARGUMENT", "path and args must be nonempty strings without NUL");
+		}
+		return wire.number(wire.record(await this.transport.request("launch", { path, args }))["pid"]);
+	}
+
+	private ocrGeneration: number | undefined;
+
+	/** Text of the app's window read from its pixels with the built-in Windows OCR, in screen frames. */
+	async readWindowText(pid: number, windowId?: number): Promise<OcrTextEntry[]> {
+		if (this.ocrGeneration !== this.transport.generation) {
+			await this.transport.request("loadOcr", { source: windowsOcrSource });
+			this.ocrGeneration = this.transport.generation;
+		}
+		return readWindowsOcr(await this.transport.request("ocr", { pid: this.pid(pid), windowId }));
+	}
+
+	private audioGeneration: number | undefined;
+
+	/** A restarted helper has a new generation and has not compiled the audio code yet. */
+	private async loadAudio(): Promise<void> {
+		if (this.audioGeneration === this.transport.generation) return;
+		await this.transport.request("loadAudio", { source: windowsAudioSource });
+		this.audioGeneration = this.transport.generation;
+	}
+
+	/** WASAPI sessions (default output device) of an app and its child processes, with meter peaks. */
+	async getAudioStreams(pid: number): Promise<AudioStream[]> {
+		await this.loadAudio();
+		const report = wire.record(await this.transport.request("audio"));
+		const parents = new Map<number, number>();
+		for (const [child, parent] of Object.entries(wire.record(report["parents"]))) {
+			if (typeof parent === "number") parents.set(Number(child), parent);
+		}
+		const streams = readWasapiSessions(JSON.stringify(wire.array(report["sessions"])));
+		return streamsOfProcessTree(streams, pid, parents);
+	}
+
+	/** Process-loopback recording of an app and its child processes (Windows 10 20348+ / 11), as WAV. */
+	async recordAudio(pid: number, seconds: number): Promise<{ mimeType: "audio/wav"; data: Buffer }> {
+		if (!Number.isSafeInteger(pid) || pid <= 0)
+			throw new WindowsHostError("INVALID_ARGUMENT", "pid must be a process id");
+		if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_RECORD_SECONDS) {
+			throw new WindowsHostError(
+				"INVALID_ARGUMENT",
+				`seconds must be more than 0 and at most ${MAX_RECORD_SECONDS}`,
+			);
+		}
+		await this.loadAudio();
+		const response = wire.record(await this.transport.request("audioRecord", { pid, seconds }));
+		const data = response["data"];
+		if (typeof data !== "string") throw new WindowsHostError("PROTOCOL", "audioRecord returned no data");
+		return { mimeType: "audio/wav", data: Buffer.from(data, "base64") };
+	}
+
 	async listApps() {
 		return wire.array(await this.transport.request("listApps")).map(wire.app);
 	}
@@ -191,6 +266,18 @@ export class WindowsHostComputer implements ComputerInterface {
 			throw new WindowsHostError("UNSUPPORTED", "Window capture does not support region or quality");
 		}
 		const pid = this.pid();
+		const windowId = this.observations.get(pid)?.state.windowId;
+		const gpu = this.options.gpuCapture;
+		if (
+			gpu !== undefined &&
+			windowId !== undefined &&
+			options.targetSize === undefined &&
+			options.format !== "jpeg"
+		) {
+			const { exitCode, stdout } = await gpu(windowId);
+			const captured = readGpuCapture(exitCode, stdout);
+			if (captured !== "fallback") return captured;
+		}
 		const result = wire.record(
 			await this.transport.request("screenshot", {
 				...options,
@@ -237,36 +324,90 @@ export class WindowsHostComputer implements ComputerInterface {
 		}
 	}
 
+	/** Background modifiers: window messages carry Shift and Ctrl in wParam; other keys need real key state. */
+	private messageModifiers(options?: PointerOptions): MessageModifier[] {
+		const modifiers: MessageModifier[] = [];
+		for (const modifier of options?.modifiers ?? []) {
+			if (modifier === "shift") modifiers.push("shift");
+			else if (modifier === "ctrl" || modifier === "control") modifiers.push("ctrl");
+			else throw new WindowsHostError("UNSUPPORTED", `Background pointer input cannot hold ${modifier}`);
+		}
+		return modifiers;
+	}
+
+	/**
+	 * Posts pointer messages to the deepest child window under the first screen point, in that
+	 * window's client coordinates. The person's mouse and focus stay where they are.
+	 */
+	private async postPointer(points: readonly Point[], build: (client: Point[]) => WindowMessage[]): Promise<void> {
+		const first = points[0];
+		if (first === undefined) throw new WindowsHostError("INVALID_ARGUMENT", "No pointer position");
+		const target = wire.record(
+			await this.transport.request("postTarget", { pid: this.pid(), x: first.x, y: first.y }),
+		);
+		const originX = wire.number(target["originX"]);
+		const originY = wire.number(target["originY"]);
+		const client = points.map((point) => ({ x: point.x - originX, y: point.y - originY }));
+		let messages: WindowMessage[];
+		try {
+			messages = build(client);
+		} catch (error) {
+			throw new WindowsHostError("INVALID_ARGUMENT", error instanceof Error ? error.message : String(error));
+		}
+		await this.transport.request("post", { hwnd: wire.number(target["hwnd"]), messages });
+	}
+
+	private async pointer(kind: MessageClick, position: Point, options?: PointerOptions): Promise<void> {
+		if (this.options.physical) {
+			this.checkModifiers(options);
+			const button = kind === "right" || kind === "middle" ? { button: kind } : {};
+			await this.physical(kind === "double" ? "doubleClick" : "click", position, button);
+			return;
+		}
+		const modifiers = this.messageModifiers(options);
+		await this.postPointer([position], ([client]) => (client ? clickMessages(kind, client, modifiers) : []));
+		this.logicalCursor = { ...position };
+	}
+
 	async click(position: Point, options?: PointerOptions): Promise<void> {
-		this.checkModifiers(options);
 		const pid = this.pid();
-		const element = this.hit(pid, position, "press");
+		const element = options?.modifiers?.length ? undefined : this.hit(pid, position, "press");
 		if (element) {
 			await this.action(pid, element.id, "press");
-		} else await this.physical("click", position);
+		} else await this.pointer("left", position, options);
 	}
 
 	async rightClick(position: Point, options?: PointerOptions): Promise<void> {
-		this.checkModifiers(options);
-		await this.physical("click", position, { button: "right" });
+		await this.pointer("right", position, options);
 	}
 
 	async middleClick(position: Point, options?: PointerOptions): Promise<void> {
-		this.checkModifiers(options);
-		await this.physical("click", position, { button: "middle" });
+		await this.pointer("middle", position, options);
 	}
 
 	async doubleClick(position: Point, options?: PointerOptions): Promise<void> {
-		this.checkModifiers(options);
-		await this.physical("doubleClick", position);
+		await this.pointer("double", position, options);
 	}
 
 	async drag(options: DragOptions): Promise<void> {
-		this.checkModifiers(options);
-		if (options.waypoints?.length || options.duration !== undefined) {
-			throw new WindowsHostError("UNSUPPORTED", "Timed drags and waypoints are not supported");
+		if (this.options.physical) {
+			this.checkModifiers(options);
+			if (options.waypoints?.length || options.duration !== undefined) {
+				throw new WindowsHostError("UNSUPPORTED", "Timed drags and waypoints are not supported");
+			}
+			await this.physical("drag", options.from, { to: options.to, button: options.button });
+			return;
 		}
-		await this.physical("drag", options.from, { to: options.to, button: options.button });
+		if (options.duration !== undefined) {
+			throw new WindowsHostError("UNSUPPORTED", "Background drags are posted at once; duration is not supported");
+		}
+		if (options.button !== undefined && options.button !== "left") {
+			throw new WindowsHostError("UNSUPPORTED", "Background drags use the left button");
+		}
+		const modifiers = this.messageModifiers(options);
+		const path = [options.from, ...(options.waypoints ?? []), options.to];
+		await this.postPointer(path, (client) => dragMessages(client, modifiers));
+		this.logicalCursor = { ...options.to };
 	}
 
 	private async physical(kind: string, position: Point, params: Record<string, unknown> = {}): Promise<void> {
