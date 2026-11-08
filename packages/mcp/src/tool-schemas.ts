@@ -695,7 +695,11 @@ const workerSessionFields = {
 		.string()
 		.min(1)
 		.max(128)
-		.regex(/^[^\u0000-\u001f\u007f]+$/, "session_id must not contain control characters")
+		.refine(
+			(value) =>
+				!Array.from(value).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127),
+			"session_id must not contain control characters",
+		)
 		.optional(),
 };
 const workerObservationFields = {
