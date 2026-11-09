@@ -1346,7 +1346,9 @@ export class MacOSHostComputer extends HostComputer {
 
 		let targetWindow: Awaited<ReturnType<typeof queryVisibleTargetWindow>>;
 		try {
-			targetWindow = await queryVisibleTargetWindow(expected.pid, expected.windowId, this.delivery === "background");
+			// Off-Space windows stay legal targets in both modes: attended input brings the app forward first, and another
+			// app's activation (a parallel batch) can move an observed window off the current Space.
+			targetWindow = await queryVisibleTargetWindow(expected.pid, expected.windowId, true);
 		} catch (error) {
 			if (error instanceof Error) {
 				return { ok: false, reason: "window-missing" };
@@ -1361,7 +1363,7 @@ export class MacOSHostComputer extends HostComputer {
 			return { ok: false, reason: "app-not-approved" };
 		}
 		if (targetWindow === undefined) {
-			const otherWindows = await queryVisibleWindowsForPid(expected.pid, this.delivery === "background");
+			const otherWindows = await queryVisibleWindowsForPid(expected.pid, true);
 			return { ok: false, reason: otherWindows.length > 0 ? "window-changed" : "window-missing" };
 		}
 		if (targetWindow.id !== expected.windowId) {

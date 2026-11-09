@@ -283,6 +283,23 @@ describe("#given attended delivery #when the host computer is built #then it que
 	});
 });
 
+describe("#given attended delivery #when an observed window leaves the current Space #then input is still allowed", () => {
+	it("approves the observed window that another app's activation moved off the current Space", async () => {
+		const computer = approvedBackgroundComputer("attended");
+		try {
+			await computer.getAppState(PID, { settleMs: 0, requireWindow: true, windowId: 10 });
+			const observation = computer.getInputObservation(PID) ?? failObservation();
+			fixture.currentWindows = [];
+			setOnscreenWindowIdsSourceForTesting(() => []);
+
+			expect(await computer.preflightInput(observation)).toEqual({ ok: true });
+		} finally {
+			setAttendedHostDelivery(false);
+			await computer.close();
+		}
+	});
+});
+
 function failObservation(): never {
 	throw new Error("expected a captured off-Space input observation");
 }
