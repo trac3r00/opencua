@@ -38,6 +38,9 @@ const WINDOW_CONTENT_UNAVAILABLE_NOTE =
 const SCREENSHOT_UNAVAILABLE_NOTE =
 	"no image: the process running opencua lacks macOS Screen Recording permission, so no capture was attempted (it would raise a permission prompt over the person's screen). Elements and ids are complete and actions work. If pixels are needed, ask the user to grant Screen Recording to the app that launches this server and restart it.";
 
+const WINDOW_CAPTURE_FAILED_NOTE =
+	"no image: the window capture failed twice (ScreenCaptureKit refused or timed out), although Screen Recording is granted. Elements and ids are complete and actions work. Retry the observation; if it keeps failing, ask the user to turn Screen Recording off and on again for the app that launches this server.";
+
 export const SYSTEM_PROMPT_NOTE =
 	"a macOS system dialog is on screen (see systemPrompts): it belongs to no app you are driving, only the person at the Mac can answer it, and it can block input or capture until they do. Never click or type into it; call ask_user to hand it over, naming what it asks for.";
 
@@ -787,7 +790,10 @@ function stateToolResult(
 		payload["windowContentNote"] = WINDOW_CONTENT_UNAVAILABLE_NOTE;
 	}
 	if (state.screenshotUnavailable !== undefined) {
-		payload["screenshotNote"] = SCREENSHOT_UNAVAILABLE_NOTE;
+		payload["screenshotNote"] =
+			state.screenshotUnavailable === "window-capture-failed"
+				? WINDOW_CAPTURE_FAILED_NOTE
+				: SCREENSHOT_UNAVAILABLE_NOTE;
 	}
 	if (state.systemPrompts !== undefined && state.systemPrompts.length > 0) {
 		payload["systemPrompts"] = state.systemPrompts.map(describeSystemPrompt);

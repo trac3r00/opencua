@@ -275,16 +275,28 @@ export function captureDisplayImage(
 
 	// The ScreenCaptureKit helper encodes PNG only, so a JPEG request takes the CoreGraphics
 	// path below. Both paths return the dimensions they actually produced.
+	let sckFailure: string | undefined;
 	if (format === "png" && displayId === CGMainDisplayID() && isSckitAvailable()) {
 		try {
 			const captured = captureMainDisplayPngViaSck(targetWidth, targetHeight);
 			if (captured !== null) {
 				return captured;
 			}
-		} catch {}
+		} catch (error: unknown) {
+			sckFailure = error instanceof Error ? error.message : String(error);
+		}
 	}
 
-	const sourceImage = openDisplayImage(displayId);
+	let sourceImage: CGImageRef;
+	try {
+		sourceImage = openDisplayImage(displayId);
+	} catch (error: unknown) {
+		// The CoreGraphics fallback cannot capture on current macOS, so its error alone hides why ScreenCaptureKit failed.
+		if (sckFailure !== undefined && error instanceof Error) {
+			throw new Error(`${sckFailure}; CoreGraphics fallback: ${error.message}`);
+		}
+		throw error;
+	}
 	try {
 		const sourceWidth = CGImageGetWidth(sourceImage);
 		const sourceHeight = CGImageGetHeight(sourceImage);
