@@ -6,18 +6,20 @@ type ExecFileCallback = (error: Error | null, stdout: string | Buffer, stderr: s
 const TARGET_PID = 42729;
 const WINDOW_ID = 8337;
 const SHOWN = { x: 740, y: 400, width: 230, height: 408 };
-/** Where the live WindowServer reported Calculator while another app was in front: off the only (2560-wide) display. */
-const PARKED = { x: 3361, y: 400, width: 230, height: 408 };
 
 /**
- * The desktop as attended observation sees it: activating the app alone leaves the person on the covering app's
- * Space, while raising the app's window switches to the window's Space and puts it on screen.
+ * The desktop as attended delivery sees it. Activating the app alone leaves the person on the covering app's Space,
+ * while raising the app's window switches to the window's Space and lists it on screen. While a Space switch slides,
+ * the WindowServer lists the window shifted along x; `slidingReads` counts the listings still taken mid-slide.
  */
 const desktop = vi.hoisted(() => ({
 	activated: false,
 	raised: false,
-	/** The window is listed on screen but parked off every display until its app comes forward. */
-	parked: false,
+	/** The window is on the current Space from the start. */
+	listed: false,
+	slidingReads: 0,
+	/** Where the window really is once no slide is in progress. */
+	settled: { x: 740, y: 400, width: 230, height: 408 },
 }));
 
 const childProcessMock = vi.hoisted(() => ({
@@ -31,10 +33,10 @@ const childProcessMock = vi.hoisted(() => ({
 }));
 const windowMock = vi.hoisted(() => ({
 	openWindows: vi.fn(async () => {
-		const shown = { x: 740, y: 400, width: 230, height: 408 };
-		const parked = { x: 3361, y: 400, width: 230, height: 408 };
-		if (!desktop.parked && !desktop.raised) return [];
-		const bounds = desktop.parked && !desktop.raised ? parked : shown;
+		if (!desktop.listed && !desktop.raised) return [];
+		const sliding = desktop.slidingReads > 0;
+		if (sliding) desktop.slidingReads -= 1;
+		const bounds = sliding ? { x: 1556, y: 400, width: 230, height: 408 } : desktop.settled;
 		return [{ id: 8337, title: "Calculator", owner: { processId: 42729 }, bounds }];
 	}),
 }));
@@ -99,6 +101,7 @@ vi.mock("./macos-ffi/workspace.js", () => ({
 }));
 
 const { setAttendedHostDelivery } = await import("../computer/host-interaction-policy.js");
+const { AppApprovalStore } = await import("../permission/app-approval.js");
 const { setRunningApplicationLookupForTesting } = await import("./app-list.js");
 const { NOOP_POINTER_OVERLAY } = await import("./macos-ffi/cursor-overlay.js");
 const { setFocusedFrameSourceForTesting, setOnscreenWindowIdsSourceForTesting } = await import("./macos-input.js");
@@ -106,11 +109,23 @@ const { setOpenWindowsSourceForTesting } = await import("./macos-open-windows.js
 const { MacOSHostComputer } = await import("./macos.js");
 const { setSystemPromptWindowSourceForTesting } = await import("./system-prompts.js");
 
+type Delivery = "attended" | "background";
+
+function computerFor(delivery: Delivery): InstanceType<typeof MacOSHostComputer> {
+	return new MacOSHostComputer({
+		delivery,
+		overlay: NOOP_POINTER_OVERLAY,
+		appApproval: new AppApprovalStore(["com.apple.calculator"]),
+	});
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	desktop.activated = false;
 	desktop.raised = false;
-	desktop.parked = false;
+	desktop.listed = false;
+	desktop.slidingReads = 0;
+	desktop.settled = SHOWN;
 	// The in-process WindowServer listings are pinned away so the get-windows fixture stays authoritative.
 	setOpenWindowsSourceForTesting(
 		() => undefined,
@@ -125,7 +140,7 @@ beforeEach(() => {
 			throw new Error("native application lookup is unavailable in this test");
 		},
 	});
-	setOnscreenWindowIdsSourceForTesting(() => (desktop.raised || desktop.parked ? [WINDOW_ID] : []));
+	setOnscreenWindowIdsSourceForTesting(() => (desktop.raised || desktop.listed ? [WINDOW_ID] : []));
 	setFocusedFrameSourceForTesting(() => undefined);
 });
 
@@ -135,7 +150,7 @@ afterEach(() => {
 
 describe("#given attended delivery and an app whose window sits on a Space activation alone does not switch to #when it is observed #then its window is raised and observed", () => {
 	it("raises the app's focused window after activating it, as attended input does", async () => {
-		const computer = new MacOSHostComputer({ delivery: "attended", overlay: NOOP_POINTER_OVERLAY });
+		const computer = computerFor("attended");
 
 		const state = await computer.getAppState(TARGET_PID, {
 			settleMs: 0,
@@ -150,10 +165,11 @@ describe("#given attended delivery and an app whose window sits on a Space activ
 	});
 });
 
-describe("#given attended delivery and a window parked off every display while its app is not in front #when it is observed #then the observation records where input will find it", () => {
-	it("brings the window forward and records its on-display bounds, not the parked ones", async () => {
-		desktop.parked = true;
-		const computer = new MacOSHostComputer({ delivery: "attended", overlay: NOOP_POINTER_OVERLAY });
+describe("#given attended delivery and a Space switch still sliding the window #when it is observed #then the observation records where the window comes to rest", () => {
+	it("records the settled bounds, not the mid-slide listing", async () => {
+		desktop.listed = true;
+		desktop.slidingReads = 1;
+		const computer = computerFor("attended");
 
 		const state = await computer.getAppState(TARGET_PID, {
 			settleMs: 0,
@@ -163,25 +179,40 @@ describe("#given attended delivery and a window parked off every display while i
 
 		expect(state.windowBounds).toEqual(SHOWN);
 		expect(computer.getInputObservation(TARGET_PID)?.windowBounds).toEqual(SHOWN);
-		expect(foregroundMock.raiseWindowInApp).toHaveBeenCalledWith(TARGET_PID, WINDOW_ID);
 		await computer.close();
 	});
 });
 
-describe("#given background delivery and a parked window #when it is observed #then the app is never brought forward", () => {
-	it("observes the window where it is listed without activating or raising it", async () => {
-		desktop.parked = true;
-		const computer = new MacOSHostComputer({ delivery: "background", overlay: NOOP_POINTER_OVERLAY });
+describe("#given an observed window and a Space switch sliding it when input is checked #when the window guard runs #then attended waits out the slide and background stays strict", () => {
+	async function observedThenSliding(delivery: Delivery) {
+		desktop.listed = true;
+		const computer = computerFor(delivery);
+		await computer.getAppState(TARGET_PID, { settleMs: 0, requireWindow: true, includeScreenshot: false });
+		const observation = computer.getInputObservation(TARGET_PID);
+		if (observation === undefined) throw new Error("expected an input observation");
+		desktop.slidingReads = 1;
+		return { computer, observation };
+	}
 
-		const state = await computer.getAppState(TARGET_PID, {
-			settleMs: 0,
-			requireWindow: true,
-			includeScreenshot: false,
-		});
+	it("attended: allows the same window once the slide puts it back at the observed bounds", async () => {
+		const { computer, observation } = await observedThenSliding("attended");
 
-		expect(state.windowBounds).toEqual(PARKED);
-		expect(foregroundMock.activateApplication).not.toHaveBeenCalled();
-		expect(foregroundMock.raiseWindowInApp).not.toHaveBeenCalled();
+		expect(await computer.preflightInput(observation)).toEqual({ ok: true });
+		await computer.close();
+	});
+
+	it("attended: still refuses a window that really moved", async () => {
+		const { computer, observation } = await observedThenSliding("attended");
+		desktop.settled = { ...SHOWN, x: 900 };
+
+		expect(await computer.preflightInput(observation)).toEqual({ ok: false, reason: "window-bounds-changed" });
+		await computer.close();
+	});
+
+	it("background: refuses the mid-slide bounds as before", async () => {
+		const { computer, observation } = await observedThenSliding("background");
+
+		expect(await computer.preflightInput(observation)).toEqual({ ok: false, reason: "window-bounds-changed" });
 		await computer.close();
 	});
 });

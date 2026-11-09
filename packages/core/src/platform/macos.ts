@@ -121,6 +121,8 @@ const SCREENSHOT_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 const DEFAULT_APP_STATE_SETTLE_MILLISECONDS = 300;
 const WINDOW_APPEAR_WAIT_MILLISECONDS = 3_000;
 const WINDOW_APPEAR_POLL_MILLISECONDS = 150;
+const SPACE_SLIDE_POLL_MILLISECONDS = 50;
+const SPACE_SLIDE_WAIT_MILLISECONDS = 1_000;
 /** How long an Edit command waits for the focused field of an app just told it is active: 10 x 30 ms. */
 const EDIT_FOCUS_POLLS = 10;
 const EDIT_FOCUS_POLL_MILLISECONDS = 30;
@@ -689,19 +691,12 @@ export class MacOSHostComputer extends HostComputer {
 		await this.assertBrowserUrlAllowed(app, options?.requireWindow === true);
 		let windows = await openWindowsForTargeting();
 		let targetWindow = await this.resolveObservationWindow(app.pid, options?.windowId, windows);
-		// Attended input brings a window forward before it acts, and a window macOS parked off every display while its app
-		// was not in front comes back elsewhere: observing it where it was parked records bounds the window guard then
-		// refuses (window-bounds-changed) once the first step brings it forward. Attended observation brings it forward first.
-		const bringsForward = options?.requireWindow === true && this.delivery === "attended";
-		const awaitsWindow = (window: SkyLightTargetWindow | undefined): boolean =>
-			window === undefined || (bringsForward && parkedOffDisplays(window.bounds, onlineDisplayInfo()));
-		if (bringsForward && awaitsWindow(targetWindow)) {
+		if (options?.requireWindow === true && targetWindow === undefined && this.delivery === "attended") {
 			// Attended delivery drives the app like a person: an app whose windows are hidden, behind its own
 			// Space or on another display is brought forward, which puts a window on screen for the wait below. As attended
 			// input does, the window is raised too: activation alone can leave the person on a covering app's Space.
 			activateApplication(app.pid);
-			const hiddenWindowId =
-				targetWindow?.id ?? options.windowId ?? focusedWindowIdsForObservationPid(app.pid).focusedWindowId;
+			const hiddenWindowId = options.windowId ?? focusedWindowIdsForObservationPid(app.pid).focusedWindowId;
 			if (hiddenWindowId !== undefined) {
 				raiseWindowInApp(app.pid, hiddenWindowId);
 			}
@@ -709,13 +704,26 @@ export class MacOSHostComputer extends HostComputer {
 		// A window that was just opened (open_app, a new document, a reopened app) can take a moment to
 		// reach the window server. Wait a bounded time for it instead of failing the first observation.
 		const windowDeadline = Date.now() + WINDOW_APPEAR_WAIT_MILLISECONDS;
-		while (options?.requireWindow === true && awaitsWindow(targetWindow) && Date.now() < windowDeadline) {
+		while (options?.requireWindow === true && targetWindow === undefined && Date.now() < windowDeadline) {
 			await new Promise((resolve) => setTimeout(resolve, WINDOW_APPEAR_POLL_MILLISECONDS));
 			windows = await openWindowsForTargeting();
 			targetWindow = await this.resolveObservationWindow(app.pid, options?.windowId, windows);
 		}
 		if (options?.requireWindow === true && targetWindow === undefined) {
 			throw new Error(`No visible target window available for pid ${app.pid}`);
+		}
+		const recorded = this.lastViewportByPid.get(app.pid)?.windowBounds;
+		if (
+			this.delivery === "attended" &&
+			targetWindow !== undefined &&
+			(recorded === undefined || !sameRect(recorded, targetWindow.bounds))
+		) {
+			// Attended input switches Spaces, and the bounds read mid-slide are not where the window comes to rest.
+			const listed = targetWindow;
+			const bounds = await settledWindowBounds(
+				async () => (await this.resolveObservationWindow(app.pid, listed.id))?.bounds,
+			);
+			targetWindow = bounds === undefined ? listed : { ...listed, bounds };
 		}
 		const windowInventory = await this.describeWindowsForPid(app.pid, windows);
 		const listedTargetTitle = windowInventory.find((entry) => entry.id === targetWindow?.id)?.title;
@@ -1383,7 +1391,17 @@ export class MacOSHostComputer extends HostComputer {
 			return { ok: false, reason: "window-changed" };
 		}
 		if (options?.requireSameBounds !== false && !sameRect(targetWindow.bounds, expected.windowBounds)) {
-			return { ok: false, reason: "window-bounds-changed" };
+			// A Space switch (attended input brings windows forward) lists the same window shifted until its slide ends;
+			// attended input waits that out, and a window that really moved is still refused. Background stays strict.
+			const settled =
+				this.delivery === "attended"
+					? await settledWindowBounds(
+							async () => (await queryVisibleTargetWindow(expected.pid, expected.windowId, true))?.bounds,
+						)
+					: undefined;
+			if (settled === undefined || !sameRect(settled, expected.windowBounds)) {
+				return { ok: false, reason: "window-bounds-changed" };
+			}
 		}
 		return { ok: true };
 	}
@@ -1773,9 +1791,24 @@ function resolveDisplayInfo(id: number): DisplayInfo {
 	return { ...metadata, id, isMain: true, x: 0, y: 0 };
 }
 
-/** A window the WindowServer reports entirely off every online display: where macOS parks it while its app is not in front. */
-function parkedOffDisplays(bounds: Rect, displays: ReturnType<typeof onlineDisplayInfo>): boolean {
-	return displays !== undefined && displays.length > 0 && displaysForWindow(bounds, displays).length === 0;
+/**
+ * A window's bounds once any Space switch has finished sliding it. While macOS animates a Space change, the
+ * WindowServer lists every window of the incoming Space shifted along x by the slide's progress (a live probe read
+ * TextEdit 309 -> 1288 and Calculator 740 -> 1719 in the same listing, both back about 100 ms later, while their AX
+ * frames never moved). Two equal reads one poll apart mean no slide is in progress; the wait is bounded.
+ */
+async function settledWindowBounds(read: () => Promise<Rect | undefined>): Promise<Rect | undefined> {
+	let previous = await read();
+	const deadline = Date.now() + SPACE_SLIDE_WAIT_MILLISECONDS;
+	while (previous !== undefined && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, SPACE_SLIDE_POLL_MILLISECONDS));
+		const next = await read();
+		if (next === undefined || sameRect(previous, next)) {
+			return next;
+		}
+		previous = next;
+	}
+	return previous;
 }
 
 function displaysForWindow(
