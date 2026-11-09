@@ -513,28 +513,40 @@ export function raiseWindowInApp(pid: number, windowId: number): boolean {
 	}
 }
 
-/** Returns the AXMinimized state for a reachable window, or undefined when unavailable. */
-export function windowMinimizedForPid(pid: number, windowId: number): boolean | undefined {
+/**
+ * The app's AX window for an exact WindowServer id, retained for the caller to release, or null when the app
+ * exposes no window with that id. AXWindows omits a window on another Space while the app is inactive, but its
+ * focused window stays readable, so the focused window is the fallback, and only for the exact id.
+ */
+export function copyWindowElementForPid(pid: number, windowId: number): AXUIElementRef | null {
 	if (!isRunning(pid) || AXUIElementGetWindowSpi === null) {
-		return undefined;
+		return null;
 	}
-	let root: AXUIElementRef | null = null;
+	const root = createApplicationElement(pid);
 	let windows: CFTypeRef | null = null;
-	let minimized: CFTypeRef | null = null;
-	let matchedWindow: AXUIElementRef | null = null;
 	try {
-		root = createApplicationElement(pid);
 		windows = copyOptionalAttributeValue(root, "AXWindows");
 		if (windows !== null && isCFArray(windows)) {
 			for (let index = 0; index < cfArrayLength(windows); index++) {
 				const window = cfArrayValueAt(windows, index);
 				if (window !== null && windowIdOf(window) === windowId) {
-					matchedWindow = cfRetain(window);
-					break;
+					return cfRetain(window);
 				}
 			}
 		}
-		matchedWindow ??= copyFocusedWindowForId(root, windowId);
+		return copyFocusedWindowForId(root, windowId);
+	} finally {
+		cfRelease(windows);
+		releaseAXElement(root);
+	}
+}
+
+/** Returns the AXMinimized state for a reachable window, or undefined when unavailable. */
+export function windowMinimizedForPid(pid: number, windowId: number): boolean | undefined {
+	let minimized: CFTypeRef | null = null;
+	let matchedWindow: AXUIElementRef | null = null;
+	try {
+		matchedWindow = copyWindowElementForPid(pid, windowId);
 		if (matchedWindow === null) {
 			return undefined;
 		}
@@ -545,10 +557,6 @@ export function windowMinimizedForPid(pid: number, windowId: number): boolean | 
 	} finally {
 		cfRelease(minimized);
 		cfRelease(matchedWindow);
-		cfRelease(windows);
-		if (root !== null) {
-			releaseAXElement(root);
-		}
 	}
 }
 

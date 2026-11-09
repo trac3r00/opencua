@@ -3,12 +3,11 @@ import type { KoffiFunc } from "koffi";
 import type { Rect } from "../types/index.js";
 import {
 	type AXUIElementRef,
-	copyAttributeValue,
-	createApplicationElement,
+	copyWindowElementForPid,
 	releaseAXElement,
 	setAttributeValue,
 } from "./macos-ffi/accessibility.js";
-import { type CFTypeRef, cfArrayLength, cfArrayValueAt, cfRelease, cfRetain } from "./macos-ffi/corefoundation.js";
+import { type CFTypeRef, cfRelease } from "./macos-ffi/corefoundation.js";
 import { koffi } from "./macos-ffi/koffi.js";
 import { openWindowsForTargeting } from "./macos-open-windows.js";
 
@@ -19,15 +18,10 @@ const AX_VALUE_CG_POINT = 1;
 const AX_VALUE_CG_SIZE = 2;
 
 const applicationServices = koffi.load("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices");
-const AX_UI_ELEMENT_REF = koffi.pointer("AXUIElementRefForWindowFrame", koffi.opaque());
 const AX_VALUE_REF = koffi.pointer("AXValueRefForWindowFrame", koffi.opaque());
 const AXValueCreate = applicationServices.func("AXValueCreate", AX_VALUE_REF, ["int32_t", "void *"]) as KoffiFunc<
 	(type: number, value: Buffer) => CFTypeRef | null
 >;
-const AXUIElementGetWindow = applicationServices.func("_AXUIElementGetWindow", "int32_t", [
-	AX_UI_ELEMENT_REF,
-	"_Out_ uint32_t *",
-]) as KoffiFunc<(element: AXUIElementRef, windowId: Uint32Array) => number>;
 
 export interface WindowFrameDependencies {
 	findWindowElement(pid: number, windowId: number): AXUIElementRef | null;
@@ -136,39 +130,6 @@ function sizeApproximatelyEqual(expected: Rect, observed: Rect, tolerance: numbe
 	);
 }
 
-function findNativeWindowElement(pid: number, windowId: number): AXUIElementRef | null {
-	const application = createApplicationElement(pid);
-	try {
-		let windowsValue: CFTypeRef | null;
-		try {
-			windowsValue = copyAttributeValue(application, "AXWindows");
-		} catch {
-			return null;
-		}
-		if (windowsValue === null) {
-			return null;
-		}
-		try {
-			for (let index = 0; index < cfArrayLength(windowsValue); index += 1) {
-				const window = cfArrayValueAt(windowsValue, index);
-				if (window !== null && nativeWindowId(window) === windowId) {
-					return cfRetain(window);
-				}
-			}
-			return null;
-		} finally {
-			cfRelease(windowsValue);
-		}
-	} finally {
-		releaseAXElement(application);
-	}
-}
-
-function nativeWindowId(element: AXUIElementRef): number | null {
-	const output = new Uint32Array(1);
-	return AXUIElementGetWindow(element, output) === 0 ? (output[0] ?? null) : null;
-}
-
 function setNativePair(
 	element: AXUIElementRef,
 	attribute: "AXPosition" | "AXSize",
@@ -191,7 +152,7 @@ function setNativePair(
 }
 
 const nativeWindowFrameDependencies: WindowFrameDependencies = {
-	findWindowElement: findNativeWindowElement,
+	findWindowElement: copyWindowElementForPid,
 	setPosition: (element, x, y) => setNativePair(element, "AXPosition", AX_VALUE_CG_POINT, x, y),
 	setSize: (element, width, height) => setNativePair(element, "AXSize", AX_VALUE_CG_SIZE, width, height),
 	release: releaseAXElement,
