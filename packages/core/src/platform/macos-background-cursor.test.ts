@@ -11,10 +11,10 @@ const bindings = vi.hoisted(() => ({
 }));
 const skyLight = vi.hoisted(() => ({
 	postSkyLightEventToPid: vi.fn(),
-	postAuthenticatedSkyLightEventToPid: vi.fn(() => true),
+	postAuthenticatedSkyLightEventToPid: vi.fn((_pid: number, ..._rest: unknown[]) => true),
 	postCoreGraphicsEventToWindowOwner: vi.fn(() => true),
 	postBackgroundEventRecordToWindowOwner: vi.fn(() => true),
-	setProcessAppActive: vi.fn(() => true),
+	setProcessAppActive: vi.fn((_psn: unknown, _windowId: unknown, _active: unknown) => true),
 }));
 
 // The real coregraphics.ts runs on top of these: only the native bindings underneath it are fakes.
@@ -102,6 +102,38 @@ describe("#given background delivery #when the agent clicks, drags and scrolls a
 		expect(bindings.warpCursorPosition).not.toHaveBeenCalled();
 		expect(bindings.postToHidEventTap).not.toHaveBeenCalled();
 		expect(skyLight.postSkyLightEventToPid.mock.calls.length).toBeGreaterThan(5);
+		expect(skyLight.postSkyLightEventToPid.mock.calls.every(([pid]) => pid === PID)).toBe(true);
+	});
+});
+
+describe("#given background delivery #when the agent only types into a target app #then the app is told it is active before any key", () => {
+	it("tells the app its window is active, posts keys to the process, and never raises, warps or posts to the HID tap", async () => {
+		const order: string[] = [];
+		skyLight.setProcessAppActive.mockImplementation((_psn: unknown, windowId: unknown, active: unknown) => {
+			order.push(`active:${String(windowId)}:${String(active)}`);
+			return true;
+		});
+		skyLight.postSkyLightEventToPid.mockImplementation(() => {
+			order.push("key");
+		});
+		skyLight.postAuthenticatedSkyLightEventToPid.mockImplementation(() => {
+			order.push("key");
+			return true;
+		});
+		const controller = new MacOSInputController(PID, undefined, () => false, undefined, "background", true, true);
+		try {
+			await runInInputScope({ target: { pid: PID, windowId: 31 } }, async () => {
+				await controller.typeText("hi");
+			});
+		} finally {
+			controller.close();
+		}
+
+		expect(order[0]).toBe("active:31:true");
+		expect(order.filter((entry) => entry === "key").length).toBeGreaterThan(0);
+		expect(bindings.warpCursorPosition).not.toHaveBeenCalled();
+		expect(bindings.postToHidEventTap).not.toHaveBeenCalled();
+		expect(skyLight.postAuthenticatedSkyLightEventToPid.mock.calls.every(([pid]) => pid === PID)).toBe(true);
 		expect(skyLight.postSkyLightEventToPid.mock.calls.every(([pid]) => pid === PID)).toBe(true);
 	});
 });

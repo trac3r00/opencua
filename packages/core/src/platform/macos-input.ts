@@ -1396,6 +1396,11 @@ export class MacOSInputController {
 			if (call.windowId !== undefined && focusedWindowIdForPid(pid) !== targetWindow.id) {
 				throw new Error("observed keyboard target is not the verified focused window; input refused");
 			}
+			// Web and WebView content drops keys unless its app believes it is active with this window key, so the app
+			// is told so (without a raise or a primer click) for as long as input keeps reaching it, as for clicks.
+			if (await this.activateBehind(pid, targetWindow, false)) {
+				this.scheduleActivationRelease(pid);
+			}
 		}
 		await this.bringForward(pid, targetWindow);
 		return targetWindow;
