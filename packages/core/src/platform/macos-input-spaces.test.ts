@@ -25,6 +25,7 @@ const native = vi.hoisted(() => ({
 	getCurrentCursorPosition: vi.fn(() => ({ x: 1, y: 2 })),
 	raiseWindowInApp: vi.fn(() => true),
 	setProcessAppActive: vi.fn(() => true),
+	focusGuardFor: vi.fn<() => { readonly previousPsn: Buffer; readonly targetPsn: Buffer } | null>(() => null),
 	watchFocusSteal: vi.fn(),
 	listedWindows: [] as Array<{
 		id: number;
@@ -79,7 +80,7 @@ vi.mock("./macos-ffi/coregraphics.js", () => ({
 }));
 vi.mock("./macos-ffi/lock-screen.js", () => ({ isScreenLocked: () => false }));
 vi.mock("./macos-ffi/skylight.js", () => ({
-	focusGuardFor: vi.fn(() => null),
+	focusGuardFor: native.focusGuardFor,
 	frontProcessSerialNumber: vi.fn(() => null),
 	setProcessAppActive: native.setProcessAppActive,
 }));
@@ -245,21 +246,25 @@ describe("#given an explicitly observed window on another Space", () => {
 		}
 	});
 
-	it("#when a window command targets an off-Space document #then never raises or primes it", async () => {
+	it("#when a window command targets an off-Space document #then the app is told it is active, never raised or primed, and told so no longer on release", async () => {
 		native.focusedWindowIdForPid.mockReturnValue(TARGET.id);
+		const targetPsn = Buffer.alloc(8, 2);
+		native.focusGuardFor.mockReturnValue({ previousPsn: Buffer.alloc(8, 1), targetPsn });
 		const controller = await makeController();
 		const command = vi.fn(async (held: boolean) => {
 			expect(native.watchFocusSteal).toHaveBeenCalledWith(expect.objectContaining({ id: TARGET.id }));
+			expect(native.setProcessAppActive).toHaveBeenLastCalledWith(targetPsn, TARGET.id, true);
 			return held;
 		});
 		try {
-			await expect(controller.withWindowCommand(1234, TARGET, () => true, command)).resolves.toBe(false);
-			expect(command).toHaveBeenCalledWith(false);
-			expect(native.setProcessAppActive).not.toHaveBeenCalled();
+			await expect(controller.withWindowCommand(1234, TARGET, () => true, command)).resolves.toBe(true);
 			expect(native.raiseWindowInApp).not.toHaveBeenCalled();
+			expect(native.postMouseEvent).not.toHaveBeenCalled();
 		} finally {
 			controller.close();
 		}
+		expect(native.setProcessAppActive).toHaveBeenLastCalledWith(targetPsn, TARGET.id, false);
+		native.focusGuardFor.mockReturnValue(null);
 	});
 
 	it("#when an off-Space command target is not focused #then refuses without calling the command", async () => {

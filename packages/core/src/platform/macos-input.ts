@@ -474,7 +474,7 @@ export class MacOSInputController {
 	 * background activation turned off (OPENCUA_BACKGROUND_ACTIVATION=off), which avoids the release's autosave (see
 	 * releaseActivation) at the cost of the clicks and window commands above.
 	 */
-	private async activateBehind(pid: number, window: SkyLightTargetWindow): Promise<boolean> {
+	private async activateBehind(pid: number, window: SkyLightTargetWindow, primer = true): Promise<boolean> {
 		// Notification hosts are nonactivating accessory apps, not document windows.
 		// Priming and later deactivating them can dismiss the hosted banner.
 		// An owned surface takes the first click without activation, and activating it would touch the person's focus.
@@ -494,11 +494,14 @@ export class MacOSInputController {
 		this.activations.set(pid, { window, psn: guard.targetPsn });
 		this.syncExitHook();
 		focusStealWatcher(window);
-		const primer = primerPosition(screenLayoutSource());
-		if (primer === undefined) {
+		if (!primer) {
+			return true;
+		}
+		const primerPoint = primerPosition(screenLayoutSource());
+		if (primerPoint === undefined) {
 			process.stderr.write(PRIMER_SKIPPED_MESSAGE);
 		} else {
-			await postActivationPrimer(this.mousePostFor(pid), window, primer);
+			await postActivationPrimer(this.mousePostFor(pid), window, primerPoint);
 		}
 		return true;
 	}
@@ -596,7 +599,17 @@ export class MacOSInputController {
 				throw new Error("off-Space command target is unavailable or is not the app's verified focused window");
 			}
 			focusStealWatcher(target);
-			return await command(false);
+			// Window commands of an app behind the person's read disabled until it is told it is active. The window is
+			// not on screen, so no click follows that a primer would absorb: the app is only told, never raised.
+			const offscreenHeld =
+				(this.activations.has(pid) || wantsActivation()) && (await this.activateBehind(pid, target, false));
+			try {
+				return await command(offscreenHeld);
+			} finally {
+				if (offscreenHeld) {
+					this.scheduleActivationRelease(pid);
+				}
+			}
 		}
 		await keyboardWindowFocuser(pid, window.id);
 		if (currentInputScope()?.target?.windowId !== undefined && focusedWindowIdForPid(pid) !== window.id) {

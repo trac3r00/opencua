@@ -142,11 +142,12 @@ describe("#given an approved observed window #when analyze_screen samples it #th
 });
 
 describe("#given visual sampling is unavailable #when analyze_screen runs #then original observation is retained", () => {
-	it("returns a direct fallback without sampling when unsupported", async () => {
+	it("succeeds with the observation, its image and token, and says no analysis was added, when sampling is unsupported", async () => {
 		const harness = await createHarness();
 		closeHarness = harness.close;
 		const result = await harness.client.callTool({ name: "analyze_screen", arguments: { app: "Finder" } });
-		expect(result.isError).toBe(true);
+		expect(result.isError).not.toBe(true);
+		expect(Array.isArray(result.content) && result.content.some((item) => item.type === "image")).toBe(true);
 		expect(jsonPayload(result)["visualAnalysisUnavailable"]).toContain("sampling unsupported");
 		expect(jsonPayload(result)["observation_token"]).toEqual(expect.any(String));
 	});

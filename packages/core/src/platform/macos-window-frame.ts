@@ -195,8 +195,14 @@ const nativeWindowFrameDependencies: WindowFrameDependencies = {
 	setPosition: (element, x, y) => setNativePair(element, "AXPosition", AX_VALUE_CG_POINT, x, y),
 	setSize: (element, width, height) => setNativePair(element, "AXSize", AX_VALUE_CG_SIZE, width, height),
 	release: releaseAXElement,
+	// An observation can name a window that is not on screen (another Space, an app launched hidden), so the lookup
+	// reads the all-Spaces listing; a build without one falls back to the on-screen listing.
 	windowFrames: async () =>
-		(await openWindowsForTargeting()).map((window) => ({
+		(
+			await openWindowsForTargeting(undefined, { includeOffscreen: true }).catch(
+				async () => await openWindowsForTargeting(),
+			)
+		).map((window) => ({
 			id: window.id,
 			...(window.owner?.processId === undefined ? {} : { pid: window.owner.processId }),
 			frame: { ...window.bounds },
