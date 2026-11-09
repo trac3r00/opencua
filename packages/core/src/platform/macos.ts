@@ -46,6 +46,7 @@ import {
 	isWebElementByIndex,
 	performActionByIndex,
 	pressElementAtScreenPoint,
+	raiseWindowInApp,
 	rebaselineObservedElement,
 	releaseAccessibilitySnapshot,
 	releaseSnapshotsForExitedPids,
@@ -690,8 +691,13 @@ export class MacOSHostComputer extends HostComputer {
 		let targetWindow = await this.resolveObservationWindow(app.pid, options?.windowId, windows);
 		if (options?.requireWindow === true && targetWindow === undefined && this.delivery === "attended") {
 			// Attended delivery drives the app like a person: an app whose windows are hidden, behind its own
-			// Space or on another display is brought forward, which puts a window on screen for the wait below.
+			// Space or on another display is brought forward, which puts a window on screen for the wait below. As attended
+			// input does, the window is raised too: activation alone can leave the person on a covering app's Space.
 			activateApplication(app.pid);
+			const hiddenWindowId = options.windowId ?? focusedWindowIdsForObservationPid(app.pid).focusedWindowId;
+			if (hiddenWindowId !== undefined) {
+				raiseWindowInApp(app.pid, hiddenWindowId);
+			}
 		}
 		// A window that was just opened (open_app, a new document, a reopened app) can take a moment to
 		// reach the window server. Wait a bounded time for it instead of failing the first observation.
