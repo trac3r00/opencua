@@ -468,9 +468,10 @@ export class GuardedSession {
 			const windows =
 				this.windowProbe === undefined
 					? []
-					: (await this.windowProbe({ titlesFor: pid === undefined ? "all" : [pid] })).filter(
-							(window) => pid === undefined || window.ownerPid === pid,
-						);
+					: // Every Space in either mode: attended input brings an off-Space window forward itself, so it is a target too.
+						(
+							await this.windowProbe({ titlesFor: pid === undefined ? "all" : [pid], includeOffscreen: true })
+						).filter((window) => pid === undefined || window.ownerPid === pid);
 			const prompts = this.systemPromptProbe === undefined ? [] : this.systemPromptProbe();
 			return textResult(
 				JSON.stringify(

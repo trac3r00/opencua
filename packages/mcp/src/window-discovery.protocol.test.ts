@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { SystemPrompt, TopLevelWindow } from "@opencua/core";
+import type { SystemPrompt, TopLevelWindow, TopLevelWindowOptions } from "@opencua/core";
 import { createHarness, jsonPayload } from "./protocol-client-harness.js";
 import { FakeGuardedComputer } from "./protocol-test-harness.js";
 
@@ -48,6 +48,26 @@ describe("window discovery #given a machine with on-screen windows #when the age
 				title: "scratch.txt",
 				bounds: { ...WINDOW_BOUNDS, x: 213, y: 77 },
 			},
+		]);
+	});
+
+	it("lists a window on another Space, which attended input can still bring forward and target", async () => {
+		const offSpace = {
+			id: 8337,
+			ownerPid: 42729,
+			ownerName: "Calculator",
+			title: "Calculator",
+			bounds: WINDOW_BOUNDS,
+		};
+		const harness = await createHarness(undefined, async (options?: TopLevelWindowOptions) =>
+			options?.includeOffscreen === true ? [offSpace] : [],
+		);
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(await harness.client.callTool({ name: "list_windows", arguments: {} }));
+
+		expect(payload["windows"]).toEqual([
+			{ window_id: 8337, pid: 42729, app: "Calculator", title: "Calculator", bounds: WINDOW_BOUNDS },
 		]);
 	});
 

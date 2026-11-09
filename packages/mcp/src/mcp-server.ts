@@ -240,7 +240,7 @@ export function createMcpServer(
 		"list_windows",
 		{
 			description:
-				"Window inventory: id, pid, app, title, bounds. Background includes other Spaces. Observe a window_id before input; listing authorizes none.",
+				"Window inventory: id, pid, app, title, bounds, including other Spaces. Observe a window_id before input; listing authorizes none.",
 			inputSchema: emptySchema,
 			annotations: READ_ONLY_ANNOTATIONS,
 		},
