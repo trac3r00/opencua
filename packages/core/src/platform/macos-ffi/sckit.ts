@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isMainThread } from "node:worker_threads";
 import type { KoffiFunc } from "koffi";
 import { koffi } from "./koffi.js";
 
@@ -30,6 +31,7 @@ type SckBindings = {
 	>;
 	readonly freeBytes: KoffiFunc<(bytes: Buffer) => void>;
 	readonly invalidateCache: KoffiFunc<() => void>;
+	readonly serviceMainRunLoop: KoffiFunc<(milliseconds: number) => void>;
 };
 
 const SCK_OK = 0;
@@ -41,6 +43,8 @@ const SCK_ERR_INVALID_ARGS = -5;
 const SCK_ERR_TIMEOUT = -6;
 const SCK_WINDOW_FORMAT_PNG = 0;
 const SCK_WINDOW_FORMAT_JPEG = 1;
+/** One main-run-loop slice while an async capture is pending; see sck_service_main_run_loop in sckit.m. */
+const MAIN_RUN_LOOP_SLICE_MILLISECONDS = 10;
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const sckitDylibCandidatePaths: readonly string[] = [
@@ -97,7 +101,17 @@ function tryLoadSckitBindings(): SckBindings | null {
 			]) as SckBindings["measureProcessAudio"];
 			const freeBytes = library.func("sck_free", "void", ["uint8_t *"]) as SckBindings["freeBytes"];
 			const invalidateCache = library.func("sck_invalidate_cache", "void", []) as SckBindings["invalidateCache"];
-			cachedBindings = { capture, captureWindow, measureProcessAudio, freeBytes, invalidateCache };
+			const serviceMainRunLoop = library.func("sck_service_main_run_loop", "void", [
+				"int32_t",
+			]) as SckBindings["serviceMainRunLoop"];
+			cachedBindings = {
+				capture,
+				captureWindow,
+				measureProcessAudio,
+				freeBytes,
+				invalidateCache,
+				serviceMainRunLoop,
+			};
 			return cachedBindings;
 		} catch (error) {
 			loadErrorMessage = error instanceof Error ? error.message : String(error);
@@ -191,6 +205,8 @@ export function captureWindowViaSck(
 /**
  * captureWindowViaSck on koffi's worker thread: the capture waits on ScreenCaptureKit, so the caller's
  * thread stays free for work that does not depend on the pixels, such as reading the accessibility tree.
+ * ScreenCaptureKit completes only while the main run loop is serviced, which Node's main thread never does on
+ * its own, so the main thread runs it in short slices between its other work until the capture settles.
  */
 export async function captureWindowViaSckAsync(
 	windowId: number,
@@ -204,7 +220,7 @@ export async function captureWindowViaSckAsync(
 		return null;
 	}
 	const outLen: [number] = [0];
-	const bytesPointer = await new Promise<Buffer | null>((resolve, reject) => {
+	const capture = new Promise<Buffer | null>((resolve, reject) => {
 		bindings.captureWindow.async(
 			windowId,
 			maxWidth,
@@ -219,7 +235,26 @@ export async function captureWindowViaSckAsync(
 			},
 		);
 	});
+	const bytesPointer = await whileServicingMainRunLoop(bindings, capture);
 	return takeWindowBytes(bindings, windowId, bytesPointer, outLen[0]);
+}
+
+async function whileServicingMainRunLoop<TValue>(bindings: SckBindings, pending: Promise<TValue>): Promise<TValue> {
+	if (!isMainThread) {
+		return await pending;
+	}
+	let settled = false;
+	const service = (): void => {
+		if (settled) return;
+		bindings.serviceMainRunLoop(MAIN_RUN_LOOP_SLICE_MILLISECONDS);
+		setImmediate(service);
+	};
+	setImmediate(service);
+	try {
+		return await pending;
+	} finally {
+		settled = true;
+	}
 }
 
 function takeWindowBytes(

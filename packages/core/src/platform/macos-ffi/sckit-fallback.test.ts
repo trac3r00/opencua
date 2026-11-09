@@ -9,6 +9,7 @@ const koffiMock = vi.hoisted(() => {
 	const state: { mode: "load-fails" | "supported" } = { mode: "load-fails" };
 	const pngBytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 	const nativeBytes = { type: "native-bytes" };
+	const pendingCapture: { complete: (() => void) | undefined } = { complete: undefined };
 
 	const sckitFunctions = {
 		sck_capture_main_display_png: vi.fn(
@@ -27,7 +28,25 @@ const koffiMock = vi.hoisted(() => {
 				return 0;
 			},
 		),
-		sckit_capture_window: vi.fn(() => null),
+		sckit_capture_window: Object.assign(
+			vi.fn(() => null),
+			{
+				// Like ScreenCaptureKit under Node: the capture calls back only once the main run loop has been serviced.
+				async: vi.fn((...args: unknown[]) => {
+					const outLen = args[5] as [number];
+					const done = args[6] as (error: unknown, result: object | null) => void;
+					pendingCapture.complete = () => {
+						outLen[0] = pngBytes.length;
+						done(null, nativeBytes);
+					};
+				}),
+			},
+		),
+		sck_service_main_run_loop: vi.fn(() => {
+			const complete = pendingCapture.complete;
+			pendingCapture.complete = undefined;
+			complete?.();
+		}),
 		sck_free: vi.fn(),
 		sck_invalidate_cache: vi.fn(),
 	};
@@ -143,5 +162,16 @@ describe("#given the library loads and the screenshot API exists #when the main 
 		expect([...shot.data.subarray(0, 8)]).toEqual(PNG_SIGNATURE);
 		expect(koffiMock.sckitFunctions.sck_capture_main_display_png).toHaveBeenCalledTimes(1);
 		expect(koffiMock.coreGraphicsFunctions.CGDisplayCreateImage).not.toHaveBeenCalled();
+	});
+});
+
+describe("#given a window capture whose completion needs the main run loop #when it is awaited on the main thread #then the run loop is serviced until it settles", () => {
+	it("resolves with the captured bytes instead of waiting forever", async () => {
+		const { sckit } = await loadCaptureModules("supported");
+
+		const data = await sckit.captureWindowViaSckAsync(42, 800, 600, "png", 100);
+
+		expect([...(data ?? Buffer.alloc(0)).subarray(0, 8)]).toEqual(PNG_SIGNATURE);
+		expect(koffiMock.sckitFunctions.sck_service_main_run_loop).toHaveBeenCalled();
 	});
 });

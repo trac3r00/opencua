@@ -7,6 +7,7 @@
 //   sckit_capture_window(windowId, maxW, maxH, format, quality, *outLen) -> *bytes
 //   sck_free(*bytes) -> void
 //   sck_invalidate_cache() -> void   (call after display config change)
+//   sck_service_main_run_loop(ms) -> void   (main thread only; see waitServicingMainRunLoop)
 //
 // Deployment target: macOS 15.0, so SCScreenshotManager and SCContentFilter's geometry are always present.
 //
@@ -42,12 +43,44 @@
 static const int64_t SCK_TIMEOUT_NANOSECONDS = 5LL * NSEC_PER_SEC;
 static const NSTimeInterval SCK_WINDOW_TIMEOUT_SECONDS = 3.0;
 static const NSTimeInterval SCK_WINDOW_CACHE_TTL_SECONDS = 2.0;
+// The caller waits this much past the worker's deadline, so a worker whose own waits expired has returned and
+// released the window's capture gate before the caller can start the next capture of that window.
+static const int64_t SCK_WINDOW_GATE_GRACE_NANOSECONDS = 250LL * NSEC_PER_MSEC;
 static const NSUInteger SCK_WINDOW_CACHE_CAPACITY = 32;
 static CFStringRef kSckPngUTI = CFSTR("public.png");
 static CFStringRef kSckJpegUTI = CFSTR("public.jpeg");
 
 static SCContentFilter *cachedFilter = nil;
 static CGDirectDisplayID cachedFilterDisplayID = 0;
+
+// ScreenCaptureKit completes some requests only while the process's main run loop is serviced. AppKit apps and
+// Bun service it; Node's main thread runs libuv and never does, so there every other SCShareableContent request
+// and many screenshots never call back. A wait on the main thread therefore runs the main run loop instead of
+// blocking in the semaphore. Slices of 10 ms keep the main thread in the run loop nearly all the time, which is
+// what the completions need (2 ms slices still lost some).
+static const CFTimeInterval SCK_MAIN_RUN_LOOP_SLICE_SECONDS = 0.01;
+
+static long waitServicingMainRunLoop(dispatch_semaphore_t semaphore, dispatch_time_t deadline) {
+	if (![NSThread isMainThread]) {
+		return dispatch_semaphore_wait(semaphore, deadline);
+	}
+	while (dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW) != 0) {
+		if (dispatch_time(DISPATCH_TIME_NOW, 0) >= deadline) {
+			return dispatch_semaphore_wait(semaphore, DISPATCH_TIME_NOW);
+		}
+		CFRunLoopRunInMode(kCFRunLoopDefaultMode, SCK_MAIN_RUN_LOOP_SLICE_SECONDS, true);
+	}
+	return 0;
+}
+
+// For a caller whose capture waits on another thread (koffi's async worker): its main thread calls this in a
+// loop until the capture settles. Off the main thread it returns at once.
+void sck_service_main_run_loop(int32_t milliseconds) {
+	if (![NSThread isMainThread] || milliseconds <= 0) {
+		return;
+	}
+	CFRunLoopRunInMode(kCFRunLoopDefaultMode, (CFTimeInterval)milliseconds / 1000.0, true);
+}
 
 static dispatch_queue_t filterCacheQueue(void) {
 	static dispatch_queue_t queue = nil;
@@ -93,7 +126,7 @@ static SCContentFilter *resolveMainDisplayFilter(int *errorOut) {
 
 		dispatch_time_t shareableDeadline = dispatch_time(
 			DISPATCH_TIME_NOW, SCK_TIMEOUT_NANOSECONDS);
-		if (dispatch_semaphore_wait(shareableDone, shareableDeadline) != 0) {
+		if (waitServicingMainRunLoop(shareableDone, shareableDeadline) != 0) {
 			error = SCK_ERR_TIMEOUT;
 			return;
 		}
@@ -212,7 +245,7 @@ static int captureMainDisplayPng(
 		}];
 
 	dispatch_time_t captureDeadline = dispatch_time(DISPATCH_TIME_NOW, SCK_TIMEOUT_NANOSECONDS);
-	if (dispatch_semaphore_wait(captureDone, captureDeadline) != 0) {
+	if (waitServicingMainRunLoop(captureDone, captureDeadline) != 0) {
 		return SCK_ERR_TIMEOUT;
 	}
 	if (resultCode != SCK_OK || encodedData == nil) {
@@ -258,29 +291,11 @@ static int captureMainDisplayPng(
 @implementation SCKWindowCaptureResult
 @end
 
-@interface SCKWindowOperationState : NSObject {
-@public
-	uint32_t windowID;
-	atomic_int pendingCallbacks;
-	atomic_bool workerFinished;
-	atomic_bool gateReleased;
-}
-@end
-@implementation SCKWindowOperationState
-- (instancetype)init {
-	self = [super init];
-	if (self != nil) {
-		atomic_init(&pendingCallbacks, 0);
-		atomic_init(&workerFinished, false);
-		atomic_init(&gateReleased, false);
-	}
-	return self;
-}
-@end
-
 static NSMutableDictionary<NSNumber *, SCKWindowCapturePlan *> *windowPlanCache;
 // One capture in flight per window: a second capture of the same window is refused while the first runs,
-// but captures of different windows proceed concurrently.
+// but captures of different windows proceed concurrently. The worker releases the gate when it returns, every wait
+// of which is bounded, and not when ScreenCaptureKit calls back: a request it never answers must not refuse every
+// later capture of that window for the life of the process.
 static os_unfair_lock activeWindowCapturesLock = OS_UNFAIR_LOCK_INIT;
 static NSMutableSet<NSNumber *> *activeWindowCaptures = nil;
 
@@ -302,25 +317,6 @@ static void releaseWindowCaptureGate(uint32_t windowID) {
 	os_unfair_lock_lock(&activeWindowCapturesLock);
 	[activeWindowCaptures removeObject:@(windowID)];
 	os_unfair_lock_unlock(&activeWindowCapturesLock);
-}
-
-static void releaseWindowCaptureGateIfFinished(SCKWindowOperationState *state) {
-	if (!atomic_load(&state->workerFinished) || atomic_load(&state->pendingCallbacks) != 0) {
-		return;
-	}
-	bool expected = false;
-	if (atomic_compare_exchange_strong(&state->gateReleased, &expected, true)) {
-		releaseWindowCaptureGate(state->windowID);
-	}
-}
-
-static void windowCallbackStarted(SCKWindowOperationState *state) {
-	atomic_fetch_add(&state->pendingCallbacks, 1);
-}
-
-static void windowCallbackFinished(SCKWindowOperationState *state) {
-	atomic_fetch_sub(&state->pendingCallbacks, 1);
-	releaseWindowCaptureGateIfFinished(state);
 }
 
 static dispatch_queue_t windowCacheQueue(void) {
@@ -442,11 +438,9 @@ static SCKWindowCapturePlan *buildWindowPlan(
 	int32_t maxWidth,
 	int32_t maxHeight,
 	SCKWindowIdentity *expectedIdentity,
-	NSTimeInterval startedAt,
-	SCKWindowOperationState *operationState) {
+	NSTimeInterval startedAt) {
 	__block SCShareableContent *shareableContent = nil;
 	dispatch_semaphore_t done = dispatch_semaphore_create(0);
-	windowCallbackStarted(operationState);
 	[SCShareableContent
 		getShareableContentExcludingDesktopWindows:NO
 		onScreenWindowsOnly:NO
@@ -455,7 +449,6 @@ static SCKWindowCapturePlan *buildWindowPlan(
 				shareableContent = content;
 			}
 			dispatch_semaphore_signal(done);
-			windowCallbackFinished(operationState);
 		}];
 	if (dispatch_semaphore_wait(done, remainingDeadline(startedAt)) != 0 ||
 		shareableContent == nil) {
@@ -542,8 +535,7 @@ static NSData *captureWindowData(
 	int32_t maxHeight,
 	int32_t format,
 	int32_t quality,
-	NSTimeInterval startedAt,
-	SCKWindowOperationState *operationState) {
+	NSTimeInterval startedAt) {
 	SCKWindowIdentity *identity = currentWindowIdentity(windowID);
 	if (identity == nil) {
 		return nil;
@@ -552,7 +544,7 @@ static NSData *captureWindowData(
 		windowID, maxWidth, maxHeight, identity);
 	if (plan == nil) {
 		plan = buildWindowPlan(
-			windowID, maxWidth, maxHeight, identity, startedAt, operationState);
+			windowID, maxWidth, maxHeight, identity, startedAt);
 		if (plan == nil) {
 			evictWindowPlan(windowID);
 			return nil;
@@ -563,7 +555,6 @@ static NSData *captureWindowData(
 	__block NSData *encoded = nil;
 	__block BOOL captureSucceeded = NO;
 	dispatch_semaphore_t done = dispatch_semaphore_create(0);
-	windowCallbackStarted(operationState);
 	[SCScreenshotManager
 		captureImageWithFilter:plan.filter
 		configuration:plan.configuration
@@ -573,7 +564,6 @@ static NSData *captureWindowData(
 				captureSucceeded = encoded != nil;
 			}
 			dispatch_semaphore_signal(done);
-			windowCallbackFinished(operationState);
 		}];
 	if (dispatch_semaphore_wait(done, remainingDeadline(startedAt)) != 0 ||
 		!captureSucceeded) {
@@ -628,20 +618,17 @@ static uint8_t *captureWindow(
 
 	NSTimeInterval startedAt = [NSDate timeIntervalSinceReferenceDate];
 	SCKWindowCaptureResult *result = [[SCKWindowCaptureResult alloc] init];
-	SCKWindowOperationState *operationState = [[SCKWindowOperationState alloc] init];
-	operationState->windowID = windowId;
 	dispatch_semaphore_t done = dispatch_semaphore_create(0);
 	dispatch_async(windowWorkerQueue(), ^{
 		@autoreleasepool {
 			result.data = captureWindowData(
-				windowId, maxWidth, maxHeight, format, quality, startedAt, operationState);
-			atomic_store(&operationState->workerFinished, true);
-			releaseWindowCaptureGateIfFinished(operationState);
+				windowId, maxWidth, maxHeight, format, quality, startedAt);
+			releaseWindowCaptureGate(windowId);
 			dispatch_semaphore_signal(done);
 		}
 	});
 
-	if (dispatch_semaphore_wait(done, remainingDeadline(startedAt)) != 0) {
+	if (waitServicingMainRunLoop(done, dispatch_time(remainingDeadline(startedAt), SCK_WINDOW_GATE_GRACE_NANOSECONDS)) != 0) {
 		return NULL;
 	}
 	NSData *data = result.data;
