@@ -1262,7 +1262,9 @@ export class MacOSInputController {
 		action: "pointer" | "keyboard" | "scroll",
 		windows?: readonly MacOSWindowInfo[],
 	): Promise<SkyLightTargetWindow> {
-		const targetWindow = await this.windowByIdForPid(pid, windowId, windows, this.isBackground);
+		// An observed window on another Space stays the target in both modes: background input reaches it per process, and
+		// attended input raises it (bringForward) first. A minimized window, or one whose state is unknown, is still refused.
+		const targetWindow = await this.windowByIdForPid(pid, windowId, windows, true);
 		if (targetWindow === undefined) {
 			throw new Error(
 				`${action} input refused: the observed window ${windowId} is unavailable on this Space for this app, is minimized, or its minimized state is unknown; observe the app again`,

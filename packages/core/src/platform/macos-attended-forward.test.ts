@@ -77,7 +77,8 @@ vi.mock("./macos-ffi/accessibility.js", () => ({
 		],
 	}),
 	focusedWindowIdsForObservationPid: () => ({ focusedWindowId: 8337, sheetOwnerWindowId: undefined }),
-	focusedWindowIdForPid: () => (desktop.raised ? 8337 : undefined),
+	// An app keeps its own key window while that window sits on another Space.
+	focusedWindowIdForPid: () => 8337,
 	focusedWindowIsModal: () => false,
 	focusedWindowShowsFilePanel: () => false,
 	focusedElementFrame: () => undefined,
@@ -99,12 +100,29 @@ vi.mock("./macos-ffi/workspace.js", () => ({
 	...actualWorkspace,
 	activateApplication: foregroundMock.activateApplication,
 }));
+const coreGraphicsMock = vi.hoisted(() => ({
+	getCurrentCursorPosition: vi.fn(() => ({ x: 863, y: 553 })),
+	postKeyboardEvent: vi.fn(),
+	postMouseEvent: vi.fn(),
+	postScrollEvent: vi.fn(),
+	postUnicodeText: vi.fn(),
+	warpCursorPosition: vi.fn(),
+}));
+vi.mock("./macos-ffi/coregraphics.js", () => ({
+	K_CG_EVENT_FLAG_MASK_ALTERNATE: 0x00080000,
+	K_CG_EVENT_FLAG_MASK_COMMAND: 0x00100000,
+	K_CG_EVENT_FLAG_MASK_CONTROL: 0x00040000,
+	K_CG_EVENT_FLAG_MASK_SHIFT: 0x00020000,
+	...coreGraphicsMock,
+}));
 
 const { setAttendedHostDelivery } = await import("../computer/host-interaction-policy.js");
+const { runInInputScope } = await import("../computer/input-scope.js");
 const { AppApprovalStore } = await import("../permission/app-approval.js");
 const { setRunningApplicationLookupForTesting } = await import("./app-list.js");
 const { NOOP_POINTER_OVERLAY } = await import("./macos-ffi/cursor-overlay.js");
-const { setFocusedFrameSourceForTesting, setOnscreenWindowIdsSourceForTesting } = await import("./macos-input.js");
+const { setFocusedFrameSourceForTesting, setKeyboardWindowFocuserForTesting, setOnscreenWindowIdsSourceForTesting } =
+	await import("./macos-input.js");
 const { setOpenWindowsSourceForTesting } = await import("./macos-open-windows.js");
 const { MacOSHostComputer } = await import("./macos.js");
 const { setSystemPromptWindowSourceForTesting } = await import("./system-prompts.js");
@@ -142,6 +160,7 @@ beforeEach(() => {
 	});
 	setOnscreenWindowIdsSourceForTesting(() => (desktop.raised || desktop.listed ? [WINDOW_ID] : []));
 	setFocusedFrameSourceForTesting(() => undefined);
+	setKeyboardWindowFocuserForTesting(async () => undefined);
 });
 
 afterEach(() => {
@@ -213,6 +232,27 @@ describe("#given an observed window and a Space switch sliding it when input is 
 		const { computer, observation } = await observedThenSliding("background");
 
 		expect(await computer.preflightInput(observation)).toEqual({ ok: false, reason: "window-bounds-changed" });
+		await computer.close();
+	});
+});
+
+describe("#given attended delivery and an observed window another app's activation moved off the current Space #when keys are typed into it #then it is brought forward and takes them", () => {
+	it("raises the observed off-Space window and types through the HID tap", async () => {
+		desktop.listed = true;
+		const computer = computerFor("attended");
+		await computer.getAppState(TARGET_PID, { settleMs: 0, requireWindow: true, includeScreenshot: false });
+		desktop.listed = false;
+		setOpenWindowsSourceForTesting(
+			() => undefined,
+			() => (desktop.raised ? [] : [{ id: WINDOW_ID, owner: { processId: TARGET_PID }, bounds: SHOWN }]),
+		);
+
+		await runInInputScope({ target: { pid: TARGET_PID, windowId: WINDOW_ID } }, async () => {
+			await computer.type("8");
+		});
+
+		expect(foregroundMock.raiseWindowInApp).toHaveBeenCalledWith(TARGET_PID, WINDOW_ID);
+		expect(coreGraphicsMock.postUnicodeText.mock.calls.map(([text, pid]) => [text, pid])).toEqual([["8", undefined]]);
 		await computer.close();
 	});
 });
