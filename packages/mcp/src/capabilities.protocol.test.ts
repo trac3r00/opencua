@@ -93,18 +93,19 @@ describe("#given a fully permitted console session #when capabilities are read #
 		expect(body.advice).toEqual([]);
 	});
 
-	it("advertises only background input when attended is requested", async () => {
+	it("advertises attended input through the global HID tap when attended is chosen", async () => {
 		const body = await report({
 			delivery: "attended",
 			probeHost: () => GRANTED_HOST,
 			allowedBundleIds: undefined,
 		});
 		expect(body.delivery).toMatchObject({
-			mode: "background",
+			mode: "attended",
 			requestedMode: "attended",
-			modes: ["background"],
+			modes: ["background", "attended"],
 		});
-		expect(body.input.route).toBe("per-process-background");
+		expect(body.input.route).toBe("global-hid-attended");
+		expect(body.host.workers.concurrent).toBe(false);
 	});
 });
 

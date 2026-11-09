@@ -79,6 +79,7 @@ const skylight = await import("./macos-ffi/skylight.js");
 const { setOnscreenWindowIdsSourceForTesting } = await import("./macos-input.js");
 const { setOpenWindowsSourceForTesting } = await import("./macos-open-windows.js");
 const { AppApprovalStore } = await import("../permission/app-approval.js");
+const { setAttendedHostDelivery } = await import("../computer/host-interaction-policy.js");
 const { NOOP_POINTER_OVERLAY } = await import("./macos-ffi/cursor-overlay.js");
 const { MacOSHostComputer } = await import("./macos.js");
 // The in-process WindowServer listing is pinned away so the get-windows fixtures above stay authoritative.
@@ -471,10 +472,35 @@ describe("MacOSHostComputer preflightInput", () => {
 		});
 	});
 
-	it("refuses attended delivery, the only route that required a frontmost target", () => {
-		expect(() => approvedComputer({ delivery: "attended" })).toThrow(
-			/global-input cannot operate on the human desktop/,
-		);
+	it("approves a target that is not frontmost under attended delivery, which brings the app forward itself", async () => {
+		const computer = approvedComputer({ delivery: "attended" });
+		try {
+			const expected = await observe(computer);
+			runtime.apps = [{ name: "Finder", bundleId: BUNDLE_ID, pid: TARGET_PID, isActive: false }];
+
+			expect(await computer.preflightInput(expected)).toEqual({ ok: true });
+		} finally {
+			setAttendedHostDelivery(false);
+			await computer.close();
+		}
+	});
+
+	it("rejects an app the allowlist no longer approves under attended delivery", async () => {
+		const approval = new AppApprovalStore([BUNDLE_ID]);
+		const computer = new MacOSHostComputer({
+			appApproval: approval,
+			delivery: "attended",
+			overlay: NOOP_POINTER_OVERLAY,
+		});
+		try {
+			const expected = await observe(computer);
+			approval.deny(BUNDLE_ID);
+
+			expect(await computer.preflightInput(expected)).toEqual({ ok: false, reason: "app-not-approved" });
+		} finally {
+			setAttendedHostDelivery(false);
+			await computer.close();
+		}
 	});
 
 	it("approves a target that is not frontmost when delivery is background", async () => {

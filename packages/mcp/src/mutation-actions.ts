@@ -16,6 +16,7 @@ import type {
 	KeySequenceEntry,
 	KeySequenceOptions,
 	Point,
+	Rect,
 	ScrollOptions,
 } from "@opencua/core";
 import { observedPointToScreen, validateElement, validatePoint } from "./guarded-session.js";
@@ -42,6 +43,11 @@ export async function click(
 	const modifiers = normalizeModifiers(input.modifiers);
 	if (input.element_index !== undefined) {
 		const index = parseElementIndex(input.element_index);
+		if (computer.delivery === "attended") {
+			// Attended delivery drives the real pointer: the element's centre is clicked through the HID tap.
+			const centre = await elementCentre(computer, targetPid, index, "click");
+			return await clickScreenPoint(computer, targetPid, centre, button, pressCount, modifiers, false);
+		}
 		if (button === "right" && modifiers.length === 0 && pressCount === 1 && actions?.includes("AXShowMenu")) {
 			await computer.performAction(targetPid, index, "AXShowMenu");
 			return { route: "accessibility", delivery: "background" };
@@ -87,6 +93,16 @@ async function elementCentre(
 	index: number,
 	gesture: string,
 ): Promise<Point> {
+	const frame = await elementFrame(computer, targetPid, index, gesture);
+	return { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+}
+
+async function elementFrame(
+	computer: ComputerInterface,
+	targetPid: number,
+	index: number,
+	gesture: string,
+): Promise<Rect> {
 	const frame = computer.elementFrame === undefined ? undefined : await computer.elementFrame(targetPid, index);
 	if (
 		frame === undefined ||
@@ -99,7 +115,7 @@ async function elementCentre(
 	) {
 		throw new Error(`cannot ${gesture}: element ${index} has no on-screen frame to aim the pointer at`);
 	}
-	return { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+	return frame;
 }
 
 /** Accessibility refusals of the press itself (not identity or safety refusals) can fall back to a click. */
@@ -137,7 +153,8 @@ async function clickScreenPoint(
 	allowAccessibilityHitTest = true,
 ): Promise<ActionDispatch> {
 	// An accessibility press at the point cannot carry modifiers, so a modified click is always a pointer click.
-	if (allowAccessibilityHitTest && button === "left" && modifiers.length === 0) {
+	// Attended delivery always clicks with the real pointer.
+	if (allowAccessibilityHitTest && computer.delivery !== "attended" && button === "left" && modifiers.length === 0) {
 		let pressedAll = true;
 		for (let pressIndex = 0; pressIndex < pressCount; pressIndex += 1) {
 			if (!(await computer.pressAtPosition(targetPid, point))) {
@@ -184,7 +201,15 @@ export async function clickResolvedTarget(
 ): Promise<ActionDispatch> {
 	const pressCount = Math.max(1, Math.trunc(target.clickCount ?? 1));
 	const button: ComputerUseMouseButton = target.mouseButton ?? "left";
-	if (button === "right" && pressCount === 1 && target.press !== "pointer" && target.actions.includes("AXShowMenu")) {
+	// Attended delivery clicks with the real pointer unless the caller explicitly asked for the accessibility press.
+	const attendedPointer = computer.delivery === "attended" && target.press !== "accessibility";
+	if (
+		button === "right" &&
+		pressCount === 1 &&
+		target.press !== "pointer" &&
+		!attendedPointer &&
+		target.actions.includes("AXShowMenu")
+	) {
 		if (target.hoverFirst === true) {
 			await computer.move(
 				observedPointToScreen(observation, {
@@ -202,7 +227,7 @@ export async function clickResolvedTarget(
 		computer.delivery === "background" &&
 		computer.isWebElement !== undefined &&
 		(await computer.isWebElement(targetPid, target.elementIndex));
-	const pointerRoute = target.press === "pointer" || button !== "left" || webElementRoute;
+	const pointerRoute = target.press === "pointer" || button !== "left" || webElementRoute || attendedPointer;
 	if (
 		pointerRoute &&
 		(!Number.isFinite(target.frame.x) ||
@@ -236,7 +261,7 @@ export async function clickResolvedTarget(
 	if (target.hoverFirst === true) {
 		await computer.move(centreScreen);
 	}
-	if (button === "left" && target.press !== "pointer" && !webElementRoute) {
+	if (button === "left" && target.press !== "pointer" && !webElementRoute && !attendedPointer) {
 		let pressedAll = true;
 		for (let pressIndex = 0; pressIndex < pressCount; pressIndex += 1) {
 			if (!(await computer.pressAtPosition(targetPid, centreScreen))) {
@@ -309,7 +334,23 @@ export async function scroll(
 		readonly modifiers?: ReadonlyArray<KeyModifierName> | undefined;
 	},
 ): Promise<ActionDispatch> {
-	if (normalizeModifiers(input.modifiers).length > 0) {
+	const modifiers = normalizeModifiers(input.modifiers);
+	if (computer.delivery === "attended") {
+		// Attended delivery scrolls with the real wheel: the pointer goes to the element's centre and each page is
+		// nine tenths of the element's height, in pixels.
+		const frame = await elementFrame(computer, targetPid, elementIndex, "scroll");
+		const pages = Math.max(1, Math.trunc(input.pages ?? 1));
+		await withTargetedApp(computer, targetPid, async () => {
+			await computer.scroll({
+				direction: input.direction,
+				amount: Math.max(1, Math.round(frame.height * 0.9)) * pages,
+				position: { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
+				...(modifiers.length === 0 ? {} : { modifiers }),
+			});
+		});
+		return { route: "synthetic_events", delivery: syntheticDelivery(computer) };
+	}
+	if (modifiers.length > 0) {
 		throw new Error(SCROLL_MODIFIERS_REFUSAL);
 	}
 	await scrollElement(computer, targetPid, elementIndex, input.direction, input.pages ?? 1);
@@ -330,7 +371,8 @@ export async function typeText(
 		text: string,
 		options?: { readonly settleWrite?: boolean },
 	) => Promise<boolean> = computer.typeIntoFocused.bind(computer);
-	if (await typeIntoFocused(targetPid, text, options)) {
+	// Attended delivery types through the HID tap into the focused element; background writes it through accessibility.
+	if (computer.delivery !== "attended" && (await typeIntoFocused(targetPid, text, options))) {
 		return { route: "accessibility", delivery: "background" };
 	}
 	await withTargetedApp(computer, targetPid, async () => {

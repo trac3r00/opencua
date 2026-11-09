@@ -191,6 +191,7 @@ describe("WorkerCoordinator #given cancellation #when a chain is interrupted #th
 describe("WorkerCoordinator #given attended delivery #when workers run concurrently #then gestures remain serialized", () => {
 	it("preserves the session input lane and both cursor identities", async () => {
 		const computer = new FakeGuardedComputer();
+		computer.delivery = "attended";
 		const coordinator = new WorkerCoordinator(new GuardedSession(computer), computer);
 		const events: { phase: string; pid: number | undefined; cursor: string | undefined }[] = [];
 		computer.inputGate = async () => {

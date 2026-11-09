@@ -21,6 +21,7 @@ import { registerDaemonCommands } from "./daemon-commands.js";
 import { forwardToDaemon } from "./daemon.js";
 import { IN_HELPER_ENV, needsHelperPermissions } from "./helper-route.js";
 import { registerHistoryCommands } from "./history-commands.js";
+import { deliveryFromEnv } from "./host-computer.js";
 import { registerIosCommands } from "./ios.js";
 import { resolveLayout } from "./layout.js";
 import { registerLifecycleCommands, resolveCursorMotion } from "./lifecycle-commands.js";
@@ -596,8 +597,7 @@ async function withComputer<T>(
 				.map((bundleId) => bundleId.trim())
 				.filter((bundleId) => bundleId.length > 0),
 		),
-		// The person's desktop takes background delivery only; attended delivery is refused there.
-		delivery: "background",
+		delivery: deliveryFromEnv(process.env),
 		...(showCursor ? { cursorMotion: resolveCursorMotion(resolveLayout().configPath) } : {}),
 		...hostOptions,
 		...(showCursor ? {} : { overlay: NOOP_POINTER_OVERLAY }),

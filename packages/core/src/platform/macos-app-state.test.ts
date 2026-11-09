@@ -359,11 +359,8 @@ describe("#given a locked Mac #when get_app_state is asked for #then it stops wi
 });
 
 describe("#given default host options #when the host is constructed #then input delivery stays in background", () => {
-	it("refuses an explicit request for attended delivery", () => {
+	it("uses background delivery unless attended is asked for", () => {
 		expect(new MacOSHostComputer().delivery).toBe("background");
-		expect(() => new MacOSHostComputer({ delivery: "attended" })).toThrow(
-			/global-input cannot operate on the human desktop/,
-		);
 	});
 });
 

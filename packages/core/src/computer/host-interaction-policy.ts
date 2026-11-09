@@ -18,7 +18,22 @@ export class HostInteractionDenied extends Error {
 	}
 }
 
-/** No delivery flag or caller-provided identity can authorize the human's focus, HID stream or pointer. */
 export function denyHostInteraction(operation: HostInteraction): never {
 	throw new HostInteractionDenied(operation);
+}
+
+let attendedHostDelivery = false;
+
+/**
+ * Attended (direct) delivery is the person's opt-in, made once per process (OPENCUA_DELIVERY=attended) when the host
+ * computer is built with it. Only then may input use the global HID tap, move the real pointer, or activate and raise
+ * an app. Background delivery never sets it, so those primitives stay refused there.
+ */
+export function setAttendedHostDelivery(enabled: boolean): void {
+	attendedHostDelivery = enabled;
+}
+
+/** Refuses `operation` unless this process opted into attended delivery. */
+export function requireAttendedHostDelivery(operation: HostInteraction): void {
+	if (!attendedHostDelivery) denyHostInteraction(operation);
 }

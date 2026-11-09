@@ -30,6 +30,7 @@ import {
 	focusedWindowIdForPid,
 	focusedWindowIsModal,
 	focusedWindowShowsFilePanel,
+	raiseWindowInApp,
 	windowIdsAtScreenPoint,
 	windowMinimizedForPid,
 	windowTitlesForPid,
@@ -54,6 +55,7 @@ import {
 	setProcessAppActive,
 } from "./macos-ffi/skylight.js";
 import { listOnscreenWindows, listWindows } from "./macos-ffi/window-list.js";
+import { activateApplication } from "./macos-ffi/workspace.js";
 import { startFocusStealWatch } from "./macos-focus-watch.js";
 import { dragSteps, interpolatePointEased, pointerTravelDuration, scrollEventPlan } from "./macos-input-drag.js";
 import { pointerModifierFlags, withHeldModifiers } from "./macos-input-modifiers.js";
@@ -65,12 +67,10 @@ import {
 	postDoubleClick,
 	postDragSequence,
 	primerPosition,
-	runFocusLeasedClick,
-	runFocusLeasedDoubleClick,
-	runFocusLeasedDrag,
 } from "./macos-input-pointer.js";
 import { modifierFlags, virtualKeyCodeFor } from "./macos-keycodes.js";
 import { openWindowsForTargeting } from "./macos-open-windows.js";
+import { gestureFocusSettleMilliseconds } from "./macos-targeted-gesture.js";
 import { selectSystemEventsTargetWindow } from "./macos-window-target-fallback.js";
 import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveTargetWindow, toTargetWindow, visibleWindowsForPid } from "./macos-window-target.js";
@@ -381,6 +381,32 @@ export class MacOSInputController {
 		}
 	}
 
+	/** Attended delivery posts through the global HID tap, under the real pointer; an owned surface keeps its own route. */
+	private postsGlobally(pid: number | undefined): boolean {
+		return !this.isBackground && (pid === undefined || !isOwnedSurfacePid(pid));
+	}
+
+	/** The pid an event is posted to: none (the HID tap) under attended delivery. */
+	private routedPid(pid: number | undefined): number | undefined {
+		return this.postsGlobally(pid) ? undefined : pid;
+	}
+
+	/**
+	 * The HID tap reaches the app in front, so attended delivery activates the target app and raises the target window
+	 * before its input, and refuses the input when the app did not come forward: it would reach another app.
+	 */
+	private async bringForward(pid: number, window: SkyLightTargetWindow): Promise<void> {
+		if (!this.postsGlobally(pid)) return;
+		if (focusGuardFor(window) === null && focusedWindowIdForPid(pid) === window.id) return;
+		activateApplication(pid);
+		raiseWindowInApp(pid, window.id);
+		const settle = gestureFocusSettleMilliseconds();
+		if (settle > 0) await delayMilliseconds(settle);
+		if (focusGuardFor(window) !== null) {
+			throw new Error(`attended delivery could not bring app ${pid} to the front; input refused`);
+		}
+	}
+
 	/**
 	 * Hold modifier keys across one pointer gesture, to the same process and window the pointer events
 	 * go to: flagsChanged key events before it, the flags handed to the gesture to stamp on every
@@ -620,7 +646,7 @@ export class MacOSInputController {
 					keyDown,
 					flags,
 					text: undefined,
-					targetPid: call.pid,
+					targetPid: this.routedPid(call.pid),
 					targetWindow,
 					flagsChanged: true,
 				});
@@ -761,6 +787,7 @@ export class MacOSInputController {
 			// Read after waiting for the gesture before this one and for the window lookup: nothing goes down once stopped.
 			this.checkpoint(call);
 			const post = this.clickPost(call);
+			if (call.pid !== undefined && targetWindow !== undefined) await this.bringForward(call.pid, targetWindow);
 			await this.holdModifiers(call, modifiers, targetWindow, "pointer", async (flags) => {
 				if (call.pid === undefined) {
 					await post("move", position, "left", undefined, targetWindow);
@@ -772,8 +799,9 @@ export class MacOSInputController {
 						this.showPointer(position, true, call.pid);
 						return;
 					}
-					await runFocusLeasedClick(targetWindow, position, button, post, flags, { targetPid: call.pid });
-					this.showPointer(position, true, call.pid);
+					await post("move", position, "left", undefined, targetWindow);
+					await postClick(post, position, button, 1, targetWindow, flags);
+					this.markPointer(position, call.pid);
 				}
 			});
 		});
@@ -787,6 +815,7 @@ export class MacOSInputController {
 			this.requirePointerWindow(call, targetWindow);
 			this.checkpoint(call);
 			const post = this.clickPost(call);
+			if (call.pid !== undefined && targetWindow !== undefined) await this.bringForward(call.pid, targetWindow);
 			await this.holdModifiers(call, modifiers, targetWindow, "pointer", async (flags) => {
 				if (call.pid === undefined) {
 					await post("move", position, "left", undefined, targetWindow);
@@ -798,8 +827,9 @@ export class MacOSInputController {
 						this.showPointer(position, true, call.pid);
 						return;
 					}
-					await runFocusLeasedDoubleClick(targetWindow, position, post, flags, { targetPid: call.pid });
-					this.showPointer(position, true, call.pid);
+					await post("move", position, "left", undefined, targetWindow);
+					await postDoubleClick(post, position, targetWindow, flags);
+					this.markPointer(position, call.pid);
 				}
 			});
 		});
@@ -833,7 +863,7 @@ export class MacOSInputController {
 			this.assertDeliverable(keyboardPid);
 			// Focus can move between characters (another worker clicks elsewhere): recheck it before each one.
 			assertFocusInInputRegion(() => (keyboardPid === undefined ? undefined : focusedFrameSource(keyboardPid)));
-			postUnicodeText(segment, keyboardPid, targetWindow);
+			postUnicodeText(segment, this.routedPid(keyboardPid), targetWindow);
 			if (!this.isBackground || this.backgroundCues) this.overlay.keyPress?.(call.pid);
 			this.noteKeyboardInput(call.pid);
 			const next = segments[i + 1];
@@ -874,7 +904,7 @@ export class MacOSInputController {
 			keyDown: true,
 			flags,
 			text: undefined,
-			targetPid: keyboardPid,
+			targetPid: this.routedPid(keyboardPid),
 			targetWindow,
 		});
 		if (!this.isBackground || this.backgroundCues) this.overlay.keyPress?.(call.pid);
@@ -889,7 +919,7 @@ export class MacOSInputController {
 				keyDown: false,
 				flags,
 				text: undefined,
-				targetPid: keyboardPid,
+				targetPid: this.routedPid(keyboardPid),
 				targetWindow,
 			});
 			this.noteKeyboardInput(call.pid);
@@ -971,6 +1001,10 @@ export class MacOSInputController {
 		};
 		const [ux, uy] = unit[options.direction];
 		const plan = scrollEventPlan(amount);
+		if (this.postsGlobally(call.pid)) {
+			// A HID wheel event scrolls the window under the real pointer, so the pointer goes there first.
+			await this.mousePost(call)("move", position, "left", undefined, targetWindow);
+		}
 		await this.holdModifiers(call, options.modifiers, targetWindow, "wheel", async (flags) => {
 			const started = performance.now();
 			for (const [index, d] of plan.entries()) {
@@ -983,7 +1017,7 @@ export class MacOSInputController {
 				postScrollEvent({
 					deltaX: d * ux,
 					deltaY: d * uy,
-					targetPid: call.pid,
+					targetPid: this.routedPid(call.pid),
 					targetWindow,
 					flags,
 					position: options.position ?? (targetWindow === undefined ? undefined : position),
@@ -1023,6 +1057,7 @@ export class MacOSInputController {
 			};
 			// Read between drag steps; a stopped drag lets go of the button where it is and sends nothing more.
 			const checkpoint = (): void => this.checkpoint(call);
+			if (call.pid !== undefined && targetWindow !== undefined) await this.bringForward(call.pid, targetWindow);
 			await this.holdModifiers(call, options.modifiers, targetWindow, "pointer", async (flags) => {
 				if (call.pid === undefined) {
 					await this.postMove(call, options.from);
@@ -1033,7 +1068,8 @@ export class MacOSInputController {
 						await postDragSequence(post, options, targetWindow, flags, checkpoint);
 						return;
 					}
-					await runFocusLeasedDrag(targetWindow, options, post, flags, checkpoint);
+					await this.postMove(call, options.from);
+					await postDragSequence(post, options, targetWindow, flags, checkpoint);
 				}
 			});
 		});
@@ -1137,6 +1173,19 @@ export class MacOSInputController {
 			this.assertDeliverable(call.pid);
 			// Every posted point, interpolated moves included, stays inside a confined worker's region.
 			assertPointInInputRegion(position, `pointer ${kind}`);
+			if (this.postsGlobally(call.pid)) {
+				// A plain HID event at screen coordinates: it moves the real pointer and reaches the window under it.
+				postMouseEvent({
+					kind,
+					position,
+					button,
+					clickState,
+					targetPid: undefined,
+					targetWindow: undefined,
+					flags,
+				});
+				return;
+			}
 			postMouseEvent({ kind, position, button, clickState, targetPid: call.pid, targetWindow, flags });
 		};
 	}
@@ -1324,6 +1373,7 @@ export class MacOSInputController {
 				throw new Error("observed keyboard target is not the verified focused window; input refused");
 			}
 		}
+		await this.bringForward(pid, targetWindow);
 		return targetWindow;
 	}
 }

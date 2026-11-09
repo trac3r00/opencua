@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import * as ts from "typescript";
 import { CursorKeyedObservations } from "../platform/cursor-observations.js";
-import { HostInteractionDenied, denyHostInteraction } from "./host-interaction-policy.js";
 
 // Evaluate the actual class, but not its imports or module initializers. Every dependency
 // capable of desktop input is absent or replaced with a counter. This test cannot load FFI.
@@ -26,6 +25,7 @@ function fixture() {
 	const exports: Record<string, unknown> = {};
 	const dispatched: string[] = [];
 	const controllerArgs: unknown[][] = [];
+	const attendedGrants: boolean[] = [];
 	let locked = 0;
 	const record =
 		(name: string) =>
@@ -56,7 +56,7 @@ function fixture() {
 				scroll = record("scroll");
 				drag = record("drag");
 			},
-			denyHostInteraction,
+			setAttendedHostDelivery: (enabled: boolean) => attendedGrants.push(enabled),
 			isOwnedSurfacePid: () => false,
 			cursorMotionFromEnvironment: () => undefined,
 			NOOP_POINTER_OVERLAY: { highlight: () => undefined, set: () => undefined },
@@ -69,7 +69,7 @@ function fixture() {
 	if (typeof hostConstructor !== "function") throw new Error("Missing host constructor");
 	const instance: unknown = Reflect.construct(hostConstructor, []);
 	if (typeof instance !== "object" || instance === null) throw new Error("Missing host instance");
-	return { hostConstructor, instance, dispatched, controllerArgs, locked: () => locked };
+	return { hostConstructor, instance, dispatched, controllerArgs, attendedGrants, locked: () => locked };
 }
 
 function method(instance: object, name: string): (...args: unknown[]) => unknown {
@@ -99,11 +99,15 @@ describe("#given the macOS host #when its capabilities are read #then the person
 	});
 });
 
-describe("#given the macOS host #when attended delivery is requested #then global input stays refused", () => {
-	it("rejects attended construction before creating an input controller", () => {
-		const { hostConstructor, controllerArgs, dispatched } = fixture();
-		expect(() => Reflect.construct(hostConstructor, [{ delivery: "attended" }])).toThrow(HostInteractionDenied);
-		expect(controllerArgs).toHaveLength(1);
+describe("#given the macOS host #when attended delivery is requested #then the process opts into direct input", () => {
+	it("opts in only for attended construction and builds an attended input controller", () => {
+		const { hostConstructor, controllerArgs, dispatched, attendedGrants } = fixture();
+		expect(attendedGrants).toEqual([]);
+
+		Reflect.construct(hostConstructor, [{ delivery: "attended" }]);
+
+		expect(attendedGrants).toEqual([true]);
+		expect(controllerArgs[1]?.[4]).toBe("attended");
 		expect(dispatched).toEqual([]);
 	});
 });

@@ -1,5 +1,5 @@
 import type { KoffiFunc } from "koffi";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
+import { requireAttendedHostDelivery } from "../../computer/host-interaction-policy.js";
 import type { CGEventRef, CGPoint } from "./coregraphics-types.js";
 import { koffi } from "./koffi.js";
 
@@ -60,6 +60,7 @@ const SLPSSetFrontProcessWithOptions = skyLight.func("SLPSSetFrontProcessWithOpt
 
 /** kCPSNoWindows: the process comes forward without raising or ordering any of its windows. */
 const K_CPS_NO_WINDOWS = 0x400;
+const K_CPS_USER_GENERATED = 0x200;
 
 const _SLPSGetFrontProcess = skyLight.func("_SLPSGetFrontProcess", "int32_t", ["void *"]) as KoffiFunc<
 	(psn: Buffer) => number
@@ -128,14 +129,23 @@ export function buildMouseEventRecord(window: SkyLightTargetWindow, eventType: n
 }
 
 /**
- * The foreground transport (it brings the target process forward) stays forbidden on the host.
+ * Deliver one synthesized mouse event straight to a window's own process.
+ *
+ * This routine brings the target process forward before posting the window-addressed record, so it is attended
+ * delivery only.
  */
 export function postMouseEventRecordToWindow(
-	_window: SkyLightTargetWindow,
-	_eventType: number,
-	_location: CGPoint,
+	window: SkyLightTargetWindow,
+	eventType: number,
+	location: CGPoint,
 ): boolean {
-	return denyHostInteraction("host-focus");
+	requireAttendedHostDelivery("host-focus");
+	const targetPsn = processSerialNumberForWindow(window.id);
+	if (targetPsn === null) {
+		return false;
+	}
+	SLPSSetFrontProcessWithOptions(targetPsn, window.id, K_CPS_USER_GENERATED);
+	return SLPSPostEventRecordTo(targetPsn, buildMouseEventRecord(window, eventType, location)) === 0;
 }
 
 export function postSkyLightEventToPid(pid: number, event: CGEventRef): void {
@@ -160,8 +170,29 @@ export function setSkyLightWindowLocation(event: CGEventRef, point: CGPoint): vo
 	CGEventSetWindowLocation(event, point);
 }
 
-export function activateWindowWithoutRaise(_window: SkyLightTargetWindow): boolean {
-	return denyHostInteraction("host-focus");
+/** Moves the person's focus to `window` (attended delivery only). */
+export function activateWindowWithoutRaise(window: SkyLightTargetWindow): boolean {
+	requireAttendedHostDelivery("host-focus");
+	const previousPsn = Buffer.alloc(8);
+	if (_SLPSGetFrontProcess(previousPsn) !== 0) {
+		return false;
+	}
+
+	const targetPsn = processSerialNumberForWindow(window.id);
+	if (targetPsn === null) {
+		return false;
+	}
+
+	const record = Buffer.alloc(0xf8);
+	record[0x04] = 0xf8;
+	record[0x08] = 0x0d;
+	record.writeUInt32LE(window.id, 0x3c);
+
+	record[0x8a] = 0x02;
+	const defocused = SLPSPostEventRecordTo(previousPsn, record) === 0;
+	record[0x8a] = 0x01;
+	const focused = SLPSPostEventRecordTo(targetPsn, record) === 0;
+	return defocused && focused;
 }
 
 /**
@@ -178,8 +209,28 @@ export function setProcessAppActive(psn: Buffer, windowId: number, active: boole
 	return SLPSPostEventRecordTo(psn, record) === 0;
 }
 
-export function beginFocusWithoutRaise(_window: SkyLightTargetWindow): FocusRestoreToken | null {
-	return denyHostInteraction("host-focus");
+/** Moves the person's focus to `window` and returns what restores it (attended delivery only). */
+export function beginFocusWithoutRaise(window: SkyLightTargetWindow): FocusRestoreToken | null {
+	requireAttendedHostDelivery("host-focus");
+	const previousPsn = frontProcessSerialNumber();
+	if (previousPsn === null) {
+		return null;
+	}
+
+	const targetPsn = processSerialNumberForWindow(window.id);
+	if (targetPsn === null) {
+		return null;
+	}
+
+	const record = Buffer.alloc(0xf8);
+	record[0x04] = 0xf8;
+	record[0x08] = 0x0d;
+	record.writeUInt32LE(window.id, 0x3c);
+	record[0x8a] = 0x02;
+	const defocused = SLPSPostEventRecordTo(previousPsn, record) === 0;
+	record[0x8a] = 0x01;
+	const focused = SLPSPostEventRecordTo(targetPsn, record) === 0;
+	return defocused && focused ? { previousPsn, targetPsn } : null;
 }
 
 /** The process that is frontmost right now, or null when the query fails. */

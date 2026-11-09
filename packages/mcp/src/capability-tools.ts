@@ -93,7 +93,7 @@ export function capabilityReport(sources: CapabilitySources): Record<string, unk
 	const host = sources.probeHost();
 	const mode = sessionMode(host);
 	const stop = sources.stop?.status();
-	const delivery = "background";
+	const delivery = sources.delivery ?? "background";
 	const toolNames = sources.toolNames ?? toolNamesFor("full", false);
 	const agentHost = sources.host?.() ?? detectHost(undefined, process.env);
 	return {
@@ -106,17 +106,23 @@ export function capabilityReport(sources: CapabilitySources): Record<string, unk
 		host: { ...agentHost, workers: spawnGuidance(agentHost.name, delivery) },
 		platform: process.platform,
 		backend: "macos-native",
-		input: { supported: true, scope: "allowed-apps", route: "per-process-background" },
+		input: {
+			supported: true,
+			scope: "allowed-apps",
+			route: delivery === "attended" ? "global-hid-attended" : "per-process-background",
+		},
 		capture: { supported: true, scope: "allowed-apps" },
 		permissions: host.permissions,
 		session: { ...host.session, mode },
 		mainDisplay: host.mainDisplay,
 		delivery: {
 			mode: delivery,
-			requestedMode: sources.delivery ?? "background",
-			modes: ["background"],
+			requestedMode: delivery,
+			modes: ["background", "attended"],
 			focusGuard:
-				"input goes to the target app's process in the background; the front app, window stacking and the physical pointer are never changed (global HID input, pointer warps and focus or raise primitives are refused)",
+				delivery === "attended"
+					? "attended (opt-in, OPENCUA_DELIVERY=attended): the target app is activated and its window raised, and input goes through the global HID tap under the real, moving pointer; the person should not use the Mac meanwhile"
+					: "input goes to the target app's process in the background; the front app, window stacking and the physical pointer are never changed (global HID input, pointer warps and focus or raise primitives are refused)",
 		},
 		approval: { allowedBundleIds: sources.allowedBundleIds ?? null },
 		stop: {

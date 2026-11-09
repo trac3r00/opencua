@@ -44,6 +44,9 @@ const skyLightMock = vi.hoisted(() => {
 
 vi.mock("get-windows", () => ({ openWindows: windowMock.openWindows }));
 vi.mock("./macos-ffi/lock-screen.js", () => ({ isScreenLocked: () => false }));
+// Attended clicks activate their app; the fake keeps that off the real desktop.
+const actualWorkspace = { ...(await import("./macos-ffi/workspace.js")) };
+vi.mock("./macos-ffi/workspace.js", () => ({ ...actualWorkspace, activateApplication: vi.fn(() => true) }));
 vi.mock("./macos-ffi/skylight.js", () => ({
 	// Background gestures first ask whether the target sits behind the person's app; here it is frontmost.
 	focusGuardFor: () => null,
@@ -72,14 +75,6 @@ const { setOpenWindowsSourceForTesting } = await import("./macos-open-windows.js
 // The in-process WindowServer listing is pinned away so the get-windows fixtures above stay authoritative.
 setOpenWindowsSourceForTesting(() => undefined);
 
-function callOrderAt(orders: readonly number[], index: number, label: string): number {
-	const order = orders[index];
-	if (order === undefined) {
-		throw new Error(`missing ${label} call order at index ${index}`);
-	}
-	return order;
-}
-
 describe("#given MacOSInputController target routing", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -99,94 +94,6 @@ describe("#given MacOSInputController target routing", () => {
 		);
 
 		expect(coreGraphicsMock.postMouseEvent).not.toHaveBeenCalled();
-		controller.close();
-	});
-
-	it("#when clicking a target pid with a known window #then leases focus, primes, clicks, and restores focus", async () => {
-		// given
-		windowMock.openWindows.mockResolvedValue([
-			{
-				id: 99,
-				owner: { processId: 1234 },
-				bounds: { x: 10, y: 20, width: 300, height: 200 },
-			},
-		]);
-		const { MacOSInputController } = await import("./macos-input.js");
-		const controller = new MacOSInputController(1234, undefined, undefined, undefined, "attended");
-
-		// when
-		await controller.click({ x: 50, y: 70 });
-		await controller.pressKey("t");
-
-		// then
-		const targetWindow = { id: 99, bounds: { x: 10, y: 20, width: 300, height: 200 } };
-		expect(skyLightMock.beginFocusWithoutRaise).toHaveBeenCalledWith(targetWindow);
-		expect(coreGraphicsMock.postMouseEvent).toHaveBeenNthCalledWith(1, {
-			kind: "move",
-			position: { x: 50, y: 70 },
-			button: "left",
-			clickState: undefined,
-			targetPid: 1234,
-			targetWindow,
-		});
-		expect(coreGraphicsMock.postMouseEvent).toHaveBeenNthCalledWith(2, {
-			kind: "down",
-			position: { x: -1, y: -1 },
-			button: "left",
-			clickState: 1,
-			targetPid: 1234,
-			targetWindow,
-		});
-		expect(coreGraphicsMock.postMouseEvent).toHaveBeenNthCalledWith(3, {
-			kind: "up",
-			position: { x: -1, y: -1 },
-			button: "left",
-			clickState: 1,
-			targetPid: 1234,
-			targetWindow,
-		});
-		expect(coreGraphicsMock.postMouseEvent).toHaveBeenNthCalledWith(4, {
-			kind: "down",
-			position: { x: 50, y: 70 },
-			button: "left",
-			clickState: 1,
-			targetPid: 1234,
-			targetWindow,
-		});
-		expect(coreGraphicsMock.postMouseEvent).toHaveBeenNthCalledWith(5, {
-			kind: "up",
-			position: { x: 50, y: 70 },
-			button: "left",
-			clickState: 1,
-			targetPid: 1234,
-			targetWindow,
-		});
-		expect(coreGraphicsMock.warpCursorPosition).toHaveBeenCalledOnce();
-		expect(coreGraphicsMock.warpCursorPosition).toHaveBeenCalledWith({ x: 1, y: 2 });
-		expect(skyLightMock.restoreFrontProcessNoWindows).toHaveBeenCalledOnce();
-		expect(skyLightMock.restoreFrontProcessNoWindows).toHaveBeenCalledWith(skyLightMock.focusToken);
-
-		const beginOrder = callOrderAt(skyLightMock.beginFocusWithoutRaise.mock.invocationCallOrder, 0, "begin focus");
-		const firstMoveOrder = callOrderAt(coreGraphicsMock.postMouseEvent.mock.invocationCallOrder, 0, "first move");
-		const realUpOrder = callOrderAt(coreGraphicsMock.postMouseEvent.mock.invocationCallOrder, 4, "real up");
-		const warpOrder = callOrderAt(coreGraphicsMock.warpCursorPosition.mock.invocationCallOrder, 0, "cursor warp");
-		const restoreOrder = callOrderAt(
-			skyLightMock.restoreFrontProcessNoWindows.mock.invocationCallOrder,
-			0,
-			"front-process restore",
-		);
-		expect(beginOrder).toBeLessThan(firstMoveOrder);
-		expect(realUpOrder).toBeLessThan(warpOrder);
-		expect(warpOrder).toBeLessThan(restoreOrder);
-
-		expect(coreGraphicsMock.postKeyboardEvent).toHaveBeenCalledWith({
-			keyCode: 17,
-			keyDown: true,
-			flags: 0,
-			text: undefined,
-			targetPid: 1234,
-			targetWindow,
-		});
 		controller.close();
 	});
 

@@ -102,6 +102,7 @@ vi.mock("./macos-ffi/cursor-overlay.js", () => ({
 }));
 
 const { AppApprovalStore } = await import("../permission/app-approval.js");
+const { setAttendedHostDelivery } = await import("../computer/host-interaction-policy.js");
 const { setRunningApplicationLookupForTesting } = await import("./app-list.js");
 const { NOOP_POINTER_OVERLAY } = await import("./macos-ffi/cursor-overlay.js");
 const { MacOSInputController, setOnscreenWindowIdsSourceForTesting } = await import("./macos-input.js");
@@ -270,10 +271,15 @@ describe("#given an explicit window on another Space #when the background host o
 	});
 });
 
-describe("#given attended delivery #when the host computer is built #then it is refused before any window query", () => {
-	it("does not query the all-Spaces source", () => {
-		expect(() => approvedBackgroundComputer("attended")).toThrow(/global-input cannot operate on the human desktop/);
-		expect(fixture.openWindowsForTargeting).not.toHaveBeenCalled();
+describe("#given attended delivery #when the host computer is built #then it queries no window", () => {
+	it("does not query the all-Spaces source", async () => {
+		const computer = approvedBackgroundComputer("attended");
+		try {
+			expect(fixture.openWindowsForTargeting).not.toHaveBeenCalled();
+		} finally {
+			setAttendedHostDelivery(false);
+			await computer.close();
+		}
 	});
 });
 

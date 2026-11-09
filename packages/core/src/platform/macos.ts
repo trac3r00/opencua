@@ -8,7 +8,7 @@ import type { OcrTextEntry, WindowInventoryEntry } from "../accessibility/types.
 import { resolveAppInstructions } from "../app-instructions/index.js";
 import { resolveDisplayMetadata } from "../computer/display-metadata.js";
 import type { InputObservation, PreflightOptions, PreflightResult } from "../computer/guarded-interface.js";
-import { denyHostInteraction } from "../computer/host-interaction-policy.js";
+import { setAttendedHostDelivery } from "../computer/host-interaction-policy.js";
 import { assertElementInInputRegion, assertFocusInInputRegion } from "../computer/input-region.js";
 import { currentInputScope } from "../computer/input-scope.js";
 import type { ComputerInterface, ScreenshotResult, WindowTextRead } from "../computer/interface.js";
@@ -86,6 +86,7 @@ import {
 } from "./macos-ffi/select-text.js";
 import type { SkyLightTargetWindow } from "./macos-ffi/skylight.js";
 import { recognizeTextInImage } from "./macos-ffi/vision.js";
+import { activateApplication } from "./macos-ffi/workspace.js";
 import { MacOSInputController } from "./macos-input.js";
 import type { InputDelivery } from "./macos-input.js";
 import { currentOnscreenWindowIds, guardAgainstFocusSteal } from "./macos-input.js";
@@ -141,8 +142,9 @@ export interface MacOSHostComputerOptions extends HostComputerOptions {
 	appApproval?: AppApprovalStore;
 	urlBlocklist?: readonly string[];
 	/**
-	 * Only "background" is accepted: input reaches the target app per process (SLEventPostToPid) without changing
-	 * the frontmost app, raising windows or moving the pointer. "attended" would need global HID input and is refused.
+	 * "background" (the default): input reaches the target app per process (SLEventPostToPid) without changing the
+	 * frontmost app, raising windows or moving the pointer. "attended" is the opt-in direct mode: the target app is
+	 * activated and raised, and input goes through the global HID tap under the real, moving pointer.
 	 */
 	delivery?: InputDelivery;
 	/** Reports whether the Mac is locked. Defaults to the console session's lock flag. */
@@ -177,7 +179,7 @@ export class MacOSHostComputer extends HostComputer {
 
 	constructor(options: MacOSHostComputerOptions = {}) {
 		super();
-		if (options.delivery === "attended") denyHostInteraction("global-input");
+		if (options.delivery === "attended") setAttendedHostDelivery(true);
 		this.appApproval = options.appApproval;
 		this.delivery = options.delivery ?? "background";
 		this.urlBlocklist = options.urlBlocklist ?? [];
@@ -652,6 +654,11 @@ export class MacOSHostComputer extends HostComputer {
 		await this.assertBrowserUrlAllowed(app, options?.requireWindow === true);
 		let windows = await openWindowsForTargeting();
 		let targetWindow = await this.resolveObservationWindow(app.pid, options?.windowId, windows);
+		if (options?.requireWindow === true && targetWindow === undefined && this.delivery === "attended") {
+			// Attended delivery drives the app like a person: an app whose windows are hidden, behind its own
+			// Space or on another display is brought forward, which puts a window on screen for the wait below.
+			activateApplication(app.pid);
+		}
 		// A window that was just opened (open_app, a new document, a reopened app) can take a moment to
 		// reach the window server. Wait a bounded time for it instead of failing the first observation.
 		const windowDeadline = Date.now() + WINDOW_APPEAR_WAIT_MILLISECONDS;
@@ -1265,10 +1272,9 @@ export class MacOSHostComputer extends HostComputer {
 			throw error;
 		}
 		const app = apps.find((candidate) => candidate.pid === expected.pid);
-		// Background delivery routes every action to the target process, so a window the user is
-		// not looking at is a legal target and the refusal would defeat the mode. Attended delivery
-		// may still take focus, so it keeps requiring the frontmost app.
-		if (app === undefined || (!app.isActive && this.delivery !== "background")) {
+		// A window the user is not looking at is a legal target in either mode: background delivery routes every
+		// action to the target process, and attended delivery brings the app forward itself before its input.
+		if (app === undefined) {
 			return { ok: false, reason: "app-not-frontmost" };
 		}
 		if (app.bundleId !== expected.bundleId) {

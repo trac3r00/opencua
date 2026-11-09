@@ -153,7 +153,7 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	/** Called at the start of every accessibility walk, so a test can change the tree between polls. */
 	onStateCall: ((call: number) => void) | undefined;
 	/** Delivery mode the fake computer reports, mirroring the native driver's default. */
-	delivery: "attended" | "background" = "attended";
+	delivery: "attended" | "background" = "background";
 	frontmost = true;
 	/** When set, every accessibility action throws it, modelling a control that rejects AXPress. */
 	performActionError: Error | undefined;

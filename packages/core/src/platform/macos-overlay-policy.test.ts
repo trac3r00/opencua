@@ -49,14 +49,17 @@ describe("#given host cursor overlay policy", () => {
 		}
 	});
 
-	it("#when attended delivery is requested #then construction is refused before any overlay exists", async () => {
+	it("#when attended delivery is requested #then it creates no overlay either", async () => {
 		const { MacOSHostComputer } = await import("./macos.js");
+		const { setAttendedHostDelivery } = await import("../computer/host-interaction-policy.js");
+		try {
+			const host = new MacOSHostComputer({ delivery: "attended" });
 
-		expect(() => new MacOSHostComputer({ delivery: "attended" })).toThrow(
-			/global-input cannot operate on the human desktop/,
-		);
-
-		expect(overlayMock.createCursorOverlay).not.toHaveBeenCalled();
+			expect(overlayMock.createCursorOverlay).not.toHaveBeenCalled();
+			await host.close();
+		} finally {
+			setAttendedHostDelivery(false);
+		}
 	});
 
 	it("#when an overlay is injected #then background delivery uses it instead of creating one", async () => {

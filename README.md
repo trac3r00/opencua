@@ -363,9 +363,11 @@ Details, caveats and manual setups: [reference → Agent clients](docs/reference
 - **Explicit targets only.** Agents name an app by name, bundle ID or PID, and nothing ever implicitly targets the
   frontmost app. You can optionally restrict agents to a list of apps with `opencua config --allow`.
 - **Observation tokens.** Input is accepted only against a fresh observation of the exact window it targets.
-- **Background, never your focus.** OpenCUA drives your apps per process: it never posts to the global event tap,
-  warps your cursor, raises a window or switches Spaces. Your focus and real cursor stay yours. Named agent cursors
-  (never your real one) show where each action lands.
+- **Background, never your focus (by default).** OpenCUA drives your apps per process: it never posts to the global
+  event tap, warps your cursor, raises a window or switches Spaces. Your focus and real cursor stay yours. Named agent
+  cursors (never your real one) show where each action lands. Attended mode is opt-in (`OPENCUA_DELIVERY=attended`):
+  the agent then activates and raises the target app and drives the real cursor through the global event tap, so
+  leave the Mac to it while it runs.
 - **Global stop.** **Control + Option + Command** stops every agent at once. Reads keep working so the agent can tell
   you what it was doing, and only you can resume.
 - **Permissions stay yours.** Only a person can grant macOS privacy permissions. `opencua doctor` reports their

@@ -19,6 +19,9 @@ const overlayMock = vi.hoisted(() => ({
 }));
 
 vi.mock("./macos-ffi/lock-screen.js", () => ({ isScreenLocked: () => false }));
+// Attended keys activate their app; the fake keeps that off the real desktop.
+const actualWorkspace = { ...(await import("./macos-ffi/workspace.js")) };
+vi.mock("./macos-ffi/workspace.js", () => ({ ...actualWorkspace, activateApplication: vi.fn(() => true) }));
 vi.mock("./macos-ffi/coregraphics.js", () => ({
 	K_CG_EVENT_FLAG_MASK_ALTERNATE: 0x00080000,
 	K_CG_EVENT_FLAG_MASK_COMMAND: 0x00100000,

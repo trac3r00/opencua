@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { MacOSHostComputer } from "@opencua/core";
+import type { InputDelivery, MacOSHostComputer } from "@opencua/core";
 import { AppApprovalStore } from "@opencua/core/light";
 import { resolveLayout } from "./layout.js";
 import { resolveCursorMotion } from "./lifecycle-commands.js";
@@ -13,6 +13,11 @@ export type HostComputerSpec = {
 	readonly appApproval: AppApprovalStore;
 	readonly hostOptions: HostOptions;
 };
+
+/** OPENCUA_DELIVERY: background unless it says attended, the opt-in direct mode that moves the real pointer. */
+export function deliveryFromEnv(env: NodeJS.ProcessEnv): InputDelivery {
+	return env["OPENCUA_DELIVERY"]?.trim().toLowerCase() === "attended" ? "attended" : "background";
+}
 
 /** The app allowlist from OPENCUA_ALLOWED_BUNDLE_IDS; unset allows any explicitly targeted app. */
 export function approvalFromEnv(env: NodeJS.ProcessEnv): AppApprovalStore {
@@ -30,8 +35,7 @@ export async function createHostComputer(spec: HostComputerSpec): Promise<MacOSH
 	const showCursor = spec.cursorRequested && agentCursorEnabled();
 	return new MacOSHostComputer({
 		appApproval: spec.appApproval,
-		// The person's desktop takes background delivery only; attended delivery is refused there.
-		delivery: "background",
+		delivery: deliveryFromEnv(process.env),
 		...(showCursor ? { cursorMotion: resolveCursorMotion(resolveLayout().configPath) } : {}),
 		...spec.hostOptions,
 		...(showCursor ? {} : { overlay: NOOP_POINTER_OVERLAY }),

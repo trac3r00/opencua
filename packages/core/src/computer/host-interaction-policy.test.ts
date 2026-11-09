@@ -1,8 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import * as ts from "typescript";
-import { type HostInteraction, HostInteractionDenied, denyHostInteraction } from "./host-interaction-policy.js";
+import {
+	type HostInteraction,
+	HostInteractionDenied,
+	denyHostInteraction,
+	requireAttendedHostDelivery,
+	setAttendedHostDelivery,
+} from "./host-interaction-policy.js";
 
 const operations: readonly HostInteraction[] = [
 	"physical-pointer",
@@ -67,40 +73,66 @@ function exportedFunction(exports: Record<string, unknown>, name: string): (...a
 	return (...args) => Reflect.apply(dispatch, undefined, args);
 }
 
-describe("#given the focus, HID and pointer wrappers #when invoked in a fake-only context #then physical effects are denied", () => {
-	it.each([
-		{ module: "coregraphics-bindings", name: "postToHidEventTap", operation: "global-input" },
-		{ module: "coregraphics-bindings", name: "warpCursorPosition", operation: "physical-pointer" },
-		{ module: "skylight", name: "postMouseEventRecordToWindow", operation: "host-focus" },
-		{ module: "skylight", name: "activateWindowWithoutRaise", operation: "host-focus" },
-		{ module: "skylight", name: "beginFocusWithoutRaise", operation: "host-focus" },
-		{ module: "workspace", name: "activateApplication", operation: "host-focus" },
-	])("refuses every generated input to $name", ({ module, name, operation }) => {
-		const exports: Record<string, unknown> = {};
-		let nativeEffects = 0;
-		runInNewContext(
-			compileWrapper(module, name),
-			{
-				exports,
-				denyHostInteraction,
-				CGEventPost: () => nativeEffects++,
-				CGWarpMouseCursorPosition: () => nativeEffects++,
-				Buffer,
-				K_CPS_NO_WINDOWS: 0x400,
-				K_CPS_USER_GENERATED: 0x200,
-				_SLPSGetFrontProcess: () => 0,
-				frontProcessSerialNumber: () => Buffer.alloc(8),
-				processSerialNumberForWindow: () => Buffer.alloc(8),
-				buildMouseEventRecord: () => Buffer.alloc(248),
-				SLPSSetFrontProcessWithOptions: () => nativeEffects++,
-				SLPSPostEventRecordTo: () => {
-					nativeEffects++;
-					return 0;
-				},
-			},
-			{ timeout: 5_000 },
-		);
-		const dispatch = exportedFunction(exports, name);
+const window = { id: 7, bounds: { x: 0, y: 0, width: 100, height: 100 } };
+const nativeWrappers = [
+	{ module: "coregraphics-bindings", name: "postToHidEventTap", operation: "global-input", input: {} },
+	{
+		module: "coregraphics-bindings",
+		name: "warpCursorPosition",
+		operation: "physical-pointer",
+		input: { x: 1, y: 2 },
+	},
+	{ module: "skylight", name: "postMouseEventRecordToWindow", operation: "host-focus", input: window },
+	{ module: "skylight", name: "activateWindowWithoutRaise", operation: "host-focus", input: window },
+	{ module: "skylight", name: "beginFocusWithoutRaise", operation: "host-focus", input: window },
+	{ module: "workspace", name: "activateApplication", operation: "host-focus", input: 1234 },
+] as const;
+
+/** One wrapper compiled into a context whose every native primitive is a counter. */
+function fakeNativeWrapper(
+	module: string,
+	name: string,
+): { dispatch: (input: unknown) => unknown; effects: () => number } {
+	const exports: Record<string, unknown> = {};
+	let nativeEffects = 0;
+	const effect = () => {
+		nativeEffects++;
+		return 0;
+	};
+	runInNewContext(
+		compileWrapper(module, name),
+		{
+			exports,
+			requireAttendedHostDelivery,
+			CGEventPost: effect,
+			CGWarpMouseCursorPosition: effect,
+			K_CG_HID_EVENT_TAP: 0,
+			Buffer,
+			K_CPS_NO_WINDOWS: 0x400,
+			K_CPS_USER_GENERATED: 0x200,
+			_SLPSGetFrontProcess: () => 0,
+			frontProcessSerialNumber: () => Buffer.alloc(8),
+			processSerialNumberForWindow: () => Buffer.alloc(8),
+			buildMouseEventRecord: () => Buffer.alloc(248),
+			SLPSSetFrontProcessWithOptions: effect,
+			SLPSPostEventRecordTo: effect,
+			withAutoreleasePool: (operation: () => unknown) => operation(),
+			msgPointerProcessIdentifier: () => ({}),
+			runningApplicationClass: {},
+			runningApplicationWithProcessIdentifierSelector: {},
+			activateWithOptionsSelector: {},
+			ACTIVATE_IGNORING_OTHER_APPS: 2,
+			msgBoolUnsignedInteger: () => effect() === 0,
+		},
+		{ timeout: 5_000 },
+	);
+	const dispatch = exportedFunction(exports, name);
+	return { dispatch: (input) => dispatch(input), effects: () => nativeEffects };
+}
+
+describe("#given background delivery #when the focus, HID and pointer wrappers run in a fake-only context #then physical effects are denied", () => {
+	it.each(nativeWrappers)("refuses every generated input to $name", ({ module, name, operation }) => {
+		const { dispatch, effects } = fakeNativeWrapper(module, name);
 		const inputs: readonly unknown[] = [
 			undefined,
 			null,
@@ -108,11 +140,13 @@ describe("#given the focus, HID and pointer wrappers #when invoked in a fake-onl
 			{ x: 0, y: 0 },
 			{ x: -1, y: 1 },
 			{ x: Number.NaN, y: Number.POSITIVE_INFINITY },
+			window,
+			1234,
 		];
 		for (const input of inputs) {
 			expect(() => dispatch(input)).toThrow(HostInteractionDenied);
 			expect(() => dispatch(input)).toThrow(`${operation} cannot operate on the human desktop`);
-			expect(nativeEffects).toBe(0);
+			expect(effects()).toBe(0);
 		}
 	});
 
@@ -125,6 +159,21 @@ describe("#given the focus, HID and pointer wrappers #when invoked in a fake-onl
 		};
 		expect(() => assertDenied(unsafe)).toThrow();
 		expect(fakeEffects).toBe(1);
+	});
+});
+
+describe("#given attended delivery #when the focus, HID and pointer wrappers run in a fake-only context #then they reach their native primitive", () => {
+	afterEach(() => {
+		setAttendedHostDelivery(false);
+	});
+
+	it.each(nativeWrappers)("routes $name to its native call", ({ module, name, input }) => {
+		const { dispatch, effects } = fakeNativeWrapper(module, name);
+		setAttendedHostDelivery(true);
+
+		dispatch(input);
+
+		expect(effects()).toBeGreaterThan(0);
 	});
 });
 

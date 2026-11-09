@@ -17,9 +17,9 @@ export function allowedBundleIdsFromEnvironment(value: string | undefined): read
 }
 
 /**
- * Host input is background-only: it reaches the target app per process and never takes focus, posts global
- * HID input or moves the physical pointer. Preserve an explicit attended request so the constructor rejects
- * it, rather than silently downgrading a request to borrow the person's focus and pointer.
+ * Background (the default) reaches the target app per process and never takes focus, posts global HID input or
+ * moves the physical pointer. "attended" is the opt-in direct mode: the target app is activated and raised, and
+ * input goes through the global HID tap under the real pointer.
  */
 function deliveryFromEnvironment(value: string | undefined): InputDelivery {
 	return value?.trim().toLowerCase() === "attended" ? "attended" : "background";
@@ -30,7 +30,7 @@ export function allowedBundleIdsFromProcessEnvironment(): readonly string[] | un
 	return allowedBundleIdsFromEnvironment(process.env["OPENCUA_ALLOWED_BUNDLE_IDS"]);
 }
 
-/** MCP input must not take over the desktop, including when a legacy attended setting remains. */
+/** OPENCUA_DELIVERY, read when the server starts: background unless it says attended. */
 export function deliveryFromProcessEnvironment(): InputDelivery {
 	return deliveryFromEnvironment(process.env["OPENCUA_DELIVERY"]);
 }
@@ -44,7 +44,7 @@ export function createNativeComputer(platform: NodeJS.Platform = process.platfor
 	}
 	if (platform === "linux") return new GuardedPlatformComputer(createLinuxHostComputer(), { approval: appApproval });
 	if (platform === "win32") return new GuardedPlatformComputer(createWindowsHostComputer(), { approval: appApproval });
-	// The macOS host drives any app the allowlist permits, always in the background.
+	// The macOS host drives any app the allowlist permits, in the background unless attended delivery is chosen.
 	const delivery = process.env["OPENCUA_DELIVERY"] === undefined ? "background" : deliveryFromProcessEnvironment();
 	return new MacOSHostComputer({ appApproval, delivery });
 }
