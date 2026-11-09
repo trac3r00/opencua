@@ -64,7 +64,7 @@ import {
 	cursorMotionFromEnvironment,
 	parseCursorMotion,
 } from "./macos-ffi/cursor-motion-config.js";
-import { NOOP_POINTER_OVERLAY, type PointerOverlay } from "./macos-ffi/cursor-overlay.js";
+import { NOOP_POINTER_OVERLAY, type PointerOverlay, createCursorOverlay } from "./macos-ffi/cursor-overlay.js";
 import { onlineDisplayInfo } from "./macos-ffi/display-list.js";
 import { isScreenLocked } from "./macos-ffi/lock-screen.js";
 import { readClipboard, writeClipboard } from "./macos-ffi/pasteboard.js";
@@ -189,7 +189,14 @@ export class MacOSHostComputer extends HostComputer {
 		const cursorMotion =
 			options.cursorMotion !== undefined ? parseCursorMotion(options.cursorMotion) : cursorMotionFromEnvironment();
 		const cursorTravelEnabled = cursorMotion !== undefined;
-		this.overlay = options.overlay ?? NOOP_POINTER_OVERLAY;
+		// The agent's drawn cursor is on by default (OPENCUA_CURSOR=off hides it); it shows where each action lands.
+		this.overlay =
+			options.overlay ??
+			(this.delivery === "background" && !cursorBackgroundCuesEnabled()
+				? NOOP_POINTER_OVERLAY
+				: agentCursorEnabled()
+					? createCursorOverlay(undefined, options.cursorMotion)
+					: NOOP_POINTER_OVERLAY);
 		this.isLocked = options.isLocked ?? isScreenLocked;
 		this.input = new MacOSInputController(
 			options.defaultTargetPid,
@@ -516,7 +523,7 @@ export class MacOSHostComputer extends HostComputer {
 	 * extension, which only the real key does.
 	 */
 	private selectAllInTextField(pid: number): boolean {
-		return !focusedWindowIsModal(pid) && selectAllInFocusedTextElement(pid);
+		return !focusedWindowShowsFilePanel(pid) && selectAllInFocusedTextElement(pid);
 	}
 
 	/** Carries out a Command chord for a background app; false hands the chord back to real key events. */
@@ -846,7 +853,11 @@ export class MacOSHostComputer extends HostComputer {
 			...(windowCandidates !== undefined ? { windowCandidates } : {}),
 			...(tree?.windowContentUnavailable === true ? { windowContentUnavailable: true } : {}),
 			...(ocrText !== undefined ? { ocrText } : {}),
-			...(screenshotUnavailable === undefined ? {} : { screenshotUnavailable }),
+			...(screenshotUnavailable !== undefined
+				? { screenshotUnavailable }
+				: captured.captureFailed !== undefined
+					? { screenshotUnavailable: "window-capture-failed" as const }
+					: {}),
 			...(systemPrompts.length > 0 ? { systemPrompts } : {}),
 		};
 		if (targetWindow === undefined) {
@@ -994,7 +1005,19 @@ export class MacOSHostComputer extends HostComputer {
 			await image?.catch(() => undefined);
 			throw error;
 		}
-		return { screenshot: image === undefined ? undefined : await image, tree };
+		if (image === undefined) {
+			return { screenshot: undefined, tree };
+		}
+		try {
+			return { screenshot: await image, tree };
+		} catch (error) {
+			// ScreenCaptureKit refuses a window for a moment while it is resized or re-ordered; a capture that failed twice
+			// costs the observation its image, not its elements and token.
+			if (error instanceof Error && error.message.startsWith("window capture failed (transient)")) {
+				return { screenshot: undefined, tree, captureFailed: error.message };
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -1768,6 +1791,8 @@ interface ObservationCaptureRequest {
 interface CapturedObservation {
 	readonly screenshot: ScreenshotResult | undefined;
 	readonly tree: ReturnType<typeof extractAccessibilityTree> | undefined;
+	/** Set when the window image failed transiently (twice): the observation keeps its elements and token. */
+	readonly captureFailed?: string;
 }
 
 /**

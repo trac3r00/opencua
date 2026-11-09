@@ -178,44 +178,43 @@ describe("#given attended delivery #when the focus, HID and pointer wrappers run
 });
 
 describe("#given host resources outside background app control #when their native default is used #then nothing native is touched", () => {
-	it.each([
-		{ module: "../terminal-session", name: "createTerminalSession", args: [], method: "runCommand" },
-		{ module: "cursor-overlay", name: "createCursorOverlay", args: [] },
-		{ module: "cursor-overlay", name: "defaultSocketTransport", args: [Date.now, () => undefined] },
-	])("refuses the native default for $name", async (testCase) => {
-		const { module, name, args } = testCase;
-		const exports: Record<string, unknown> = {};
-		let nativeCalls = 0;
-		runInNewContext(
-			compileWrapper(module, name),
-			{
-				exports,
-				denyHostInteraction,
-				spawn: () => nativeCalls++,
-				connect: () => nativeCalls++,
-				cursorOverlaySocketPath: () => "/synthetic/host-overlay.sock",
-				nativeAccess: {
-					find: () => nativeCalls++,
-					run: () => nativeCalls++,
+	it.each([{ module: "../terminal-session", name: "createTerminalSession", args: [], method: "runCommand" }])(
+		"refuses the native default for $name",
+		async (testCase) => {
+			const { module, name, args } = testCase;
+			const exports: Record<string, unknown> = {};
+			let nativeCalls = 0;
+			runInNewContext(
+				compileWrapper(module, name),
+				{
+					exports,
+					denyHostInteraction,
+					spawn: () => nativeCalls++,
+					connect: () => nativeCalls++,
+					cursorOverlaySocketPath: () => "/synthetic/host-overlay.sock",
+					nativeAccess: {
+						find: () => nativeCalls++,
+						run: () => nativeCalls++,
+					},
 				},
-			},
-			{ timeout: 5_000 },
-		);
-		const dispatch = exportedFunction(exports, name);
-		await expect(
-			Promise.resolve().then(() => {
-				const result: unknown = dispatch(...args);
-				if ("method" in testCase && testCase.method !== undefined) {
-					if (typeof result !== "object" || result === null) throw new Error("Missing resource");
-					const method: unknown = Reflect.get(result, testCase.method);
-					if (typeof method !== "function") throw new Error("Missing resource method");
-					return Reflect.apply(method, result, []);
-				}
-				return result;
-			}),
-		).rejects.toBeInstanceOf(HostInteractionDenied);
-		expect(nativeCalls).toBe(0);
-	});
+				{ timeout: 5_000 },
+			);
+			const dispatch = exportedFunction(exports, name);
+			await expect(
+				Promise.resolve().then(() => {
+					const result: unknown = dispatch(...args);
+					if ("method" in testCase && testCase.method !== undefined) {
+						if (typeof result !== "object" || result === null) throw new Error("Missing resource");
+						const method: unknown = Reflect.get(result, testCase.method);
+						if (typeof method !== "function") throw new Error("Missing resource method");
+						return Reflect.apply(method, result, []);
+					}
+					return result;
+				}),
+			).rejects.toBeInstanceOf(HostInteractionDenied);
+			expect(nativeCalls).toBe(0);
+		},
+	);
 });
 
 describe("#given host app resources #when their native default is used #then it reaches the native seam", () => {

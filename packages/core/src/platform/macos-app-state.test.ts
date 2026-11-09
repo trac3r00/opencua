@@ -378,6 +378,25 @@ describe("#given a window that appears just after the first look #when a window 
 	});
 });
 
+describe("#given a window capture that fails transiently twice #when get_app_state runs #then it degrades to an accessibility-only state", () => {
+	it("returns the elements and the reason instead of failing the observation", async () => {
+		screenshotMock.captureWindowImage.mockImplementation(() => {
+			throw new Error("Native ScreenCaptureKit window capture failed for window 99");
+		});
+		const computer = new MacOSHostComputer();
+		try {
+			const state = await computer.getAppState(TARGET_PID, { settleMs: 0, requireWindow: true });
+
+			expect(state.screenshotUnavailable).toBe("window-capture-failed");
+			expect(state.elements.map((element) => element.id)).toEqual([5]);
+			expect(computer.getInputObservation(TARGET_PID)).toBeDefined();
+		} finally {
+			screenshotMock.captureWindowImage.mockReset();
+			await computer.close();
+		}
+	});
+});
+
 describe("#given no Screen Recording permission #when get_app_state is asked for an image #then it observes without capturing", () => {
 	it("returns the elements and the reason, and never starts a capture that would raise the permission prompt", async () => {
 		screenshotMock.screenCaptureAllowed.mockReturnValue(false);

@@ -167,6 +167,18 @@ describe("#given Edit menu commands that AppKit validates only while its menu is
 		await computer.close();
 	});
 
+	it("#when the focused document window reports a dialog subrole but shows no file panel #then Select All still selects the field", async () => {
+		accessibility.focusedWindowIsModal.mockReturnValue(true);
+		const computer = new MacOSHostComputer({ delivery: "background" });
+
+		const result = await computer.invokeMenu(PID, ["Edit", "Select All"]);
+
+		expect(result.action).toBe("accessibility");
+		expect(menu.invokeMenu).not.toHaveBeenCalled();
+		accessibility.focusedWindowIsModal.mockReturnValue(false);
+		await computer.close();
+	});
+
 	it("#when nothing is selected in a native field #then Copy is handed to the menu, which decides", async () => {
 		selectText.selectedTextOfFocusedElement.mockReturnValue(undefined);
 		const computer = new MacOSHostComputer({ delivery: "background" });

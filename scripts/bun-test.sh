@@ -6,6 +6,9 @@
 # case only the suite runs once more and the second result stands. Any other failure is reported as is.
 set -uo pipefail
 
+# The agent's drawn cursor is on by default; a unit test must never spawn the real overlay helper on this desktop.
+export OPENCUA_CURSOR=off
+
 log="$(mktemp -t opencua-bun-test)"
 trap 'rm -f "$log"' EXIT
 

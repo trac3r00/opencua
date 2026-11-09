@@ -59,6 +59,11 @@ function fixture() {
 			setAttendedHostDelivery: (enabled: boolean) => attendedGrants.push(enabled),
 			isOwnedSurfacePid: () => false,
 			cursorMotionFromEnvironment: () => undefined,
+			cursorBackgroundCuesEnabled: () => false,
+			agentCursorEnabled: () => false,
+			createCursorOverlay: () => {
+				throw new Error("the boundary fixture never builds a real overlay");
+			},
 			NOOP_POINTER_OVERLAY: { highlight: () => undefined, set: () => undefined },
 			NOOP_DISPLAY_SLEEP: {},
 			isScreenLocked: () => false,

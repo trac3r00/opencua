@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type CursorOwner, currentCursorIdentity, currentCursorOwner } from "../../computer/cursor-scope.js";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
 import type { Point, Rect } from "../../types/index.js";
 import {
 	CURSOR_MOTION_ENV,
@@ -112,7 +111,6 @@ export function createCursorOverlay(
 	transportFactory?: OverlayTransportFactory,
 	motion?: CursorMotionConfig | null,
 ): PointerOverlay {
-	if (transportFactory === undefined) denyHostInteraction("host-overlay");
 	const environmentMotion = process.env[CURSOR_MOTION_ENV]?.trim();
 	// Default the renderer, not the shared parser used by persisted CLI settings.
 	const configuration =
@@ -123,7 +121,10 @@ export function createCursorOverlay(
 				: cursorMotionFromEnvironment();
 	const transportsByIdentity = new Map<string | undefined, OverlayTransport | undefined>();
 	const pidsByIdentity = new Map<string | undefined, Set<number>>();
-	const factory = transportFactory;
+	const factory: OverlayTransportFactory =
+		transportFactory ??
+		((scopedIdentity, _owner, configured) =>
+			defaultSocketTransport(Date.now, spawn, configured, cursorOverlaySocketPath(scopedIdentity)));
 
 	function send(command: string, pid?: number, direct = false): void {
 		const identity = currentCursorIdentity();
@@ -241,7 +242,6 @@ export function defaultSocketTransport(
 	socketPath = cursorOverlaySocketPath(),
 	connectSocket: ConnectOverlaySocket = connect,
 ): OverlayTransport {
-	if (spawnProcess === spawn || connectSocket === connect) denyHostInteraction("host-overlay");
 	let lastSpawnAt = Number.NEGATIVE_INFINITY;
 	// A binary that cannot be executed (ENOENT/EACCES) will not become executable by retrying every
 	// second, so one failure turns daemon spawning off; the overlay then stays a silent no-op.
