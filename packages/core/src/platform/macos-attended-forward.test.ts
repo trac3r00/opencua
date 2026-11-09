@@ -6,12 +6,19 @@ type ExecFileCallback = (error: Error | null, stdout: string | Buffer, stderr: s
 const TARGET_PID = 42729;
 const WINDOW_ID = 8337;
 const SHOWN = { x: 740, y: 400, width: 230, height: 408 };
+/** Where the live WindowServer reported Calculator while another app was in front: off the only (2560-wide) display. */
+const PARKED = { x: 3361, y: 400, width: 230, height: 408 };
 
 /**
  * The desktop as attended observation sees it: activating the app alone leaves the person on the covering app's
  * Space, while raising the app's window switches to the window's Space and puts it on screen.
  */
-const desktop = vi.hoisted(() => ({ activated: false, raised: false }));
+const desktop = vi.hoisted(() => ({
+	activated: false,
+	raised: false,
+	/** The window is listed on screen but parked off every display until its app comes forward. */
+	parked: false,
+}));
 
 const childProcessMock = vi.hoisted(() => ({
 	execFile: vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: ExecFileCallback) => {
@@ -23,18 +30,13 @@ const childProcessMock = vi.hoisted(() => ({
 	}),
 }));
 const windowMock = vi.hoisted(() => ({
-	openWindows: vi.fn(async () =>
-		desktop.raised
-			? [
-					{
-						id: 8337,
-						title: "Calculator",
-						owner: { processId: 42729 },
-						bounds: { x: 740, y: 400, width: 230, height: 408 },
-					},
-				]
-			: [],
-	),
+	openWindows: vi.fn(async () => {
+		const shown = { x: 740, y: 400, width: 230, height: 408 };
+		const parked = { x: 3361, y: 400, width: 230, height: 408 };
+		if (!desktop.parked && !desktop.raised) return [];
+		const bounds = desktop.parked && !desktop.raised ? parked : shown;
+		return [{ id: 8337, title: "Calculator", owner: { processId: 42729 }, bounds }];
+	}),
 }));
 const foregroundMock = vi.hoisted(() => ({
 	activateApplication: vi.fn((_pid: number) => {
@@ -108,6 +110,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	desktop.activated = false;
 	desktop.raised = false;
+	desktop.parked = false;
 	// The in-process WindowServer listings are pinned away so the get-windows fixture stays authoritative.
 	setOpenWindowsSourceForTesting(
 		() => undefined,
@@ -122,7 +125,7 @@ beforeEach(() => {
 			throw new Error("native application lookup is unavailable in this test");
 		},
 	});
-	setOnscreenWindowIdsSourceForTesting(() => (desktop.raised ? [WINDOW_ID] : []));
+	setOnscreenWindowIdsSourceForTesting(() => (desktop.raised || desktop.parked ? [WINDOW_ID] : []));
 	setFocusedFrameSourceForTesting(() => undefined);
 });
 
@@ -143,6 +146,42 @@ describe("#given attended delivery and an app whose window sits on a Space activ
 		expect(state.windowId).toBe(WINDOW_ID);
 		expect(foregroundMock.activateApplication).toHaveBeenCalledWith(TARGET_PID);
 		expect(foregroundMock.raiseWindowInApp).toHaveBeenCalledWith(TARGET_PID, WINDOW_ID);
+		await computer.close();
+	});
+});
+
+describe("#given attended delivery and a window parked off every display while its app is not in front #when it is observed #then the observation records where input will find it", () => {
+	it("brings the window forward and records its on-display bounds, not the parked ones", async () => {
+		desktop.parked = true;
+		const computer = new MacOSHostComputer({ delivery: "attended", overlay: NOOP_POINTER_OVERLAY });
+
+		const state = await computer.getAppState(TARGET_PID, {
+			settleMs: 0,
+			requireWindow: true,
+			includeScreenshot: false,
+		});
+
+		expect(state.windowBounds).toEqual(SHOWN);
+		expect(computer.getInputObservation(TARGET_PID)?.windowBounds).toEqual(SHOWN);
+		expect(foregroundMock.raiseWindowInApp).toHaveBeenCalledWith(TARGET_PID, WINDOW_ID);
+		await computer.close();
+	});
+});
+
+describe("#given background delivery and a parked window #when it is observed #then the app is never brought forward", () => {
+	it("observes the window where it is listed without activating or raising it", async () => {
+		desktop.parked = true;
+		const computer = new MacOSHostComputer({ delivery: "background", overlay: NOOP_POINTER_OVERLAY });
+
+		const state = await computer.getAppState(TARGET_PID, {
+			settleMs: 0,
+			requireWindow: true,
+			includeScreenshot: false,
+		});
+
+		expect(state.windowBounds).toEqual(PARKED);
+		expect(foregroundMock.activateApplication).not.toHaveBeenCalled();
+		expect(foregroundMock.raiseWindowInApp).not.toHaveBeenCalled();
 		await computer.close();
 	});
 });

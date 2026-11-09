@@ -689,12 +689,19 @@ export class MacOSHostComputer extends HostComputer {
 		await this.assertBrowserUrlAllowed(app, options?.requireWindow === true);
 		let windows = await openWindowsForTargeting();
 		let targetWindow = await this.resolveObservationWindow(app.pid, options?.windowId, windows);
-		if (options?.requireWindow === true && targetWindow === undefined && this.delivery === "attended") {
+		// Attended input brings a window forward before it acts, and a window macOS parked off every display while its app
+		// was not in front comes back elsewhere: observing it where it was parked records bounds the window guard then
+		// refuses (window-bounds-changed) once the first step brings it forward. Attended observation brings it forward first.
+		const bringsForward = options?.requireWindow === true && this.delivery === "attended";
+		const awaitsWindow = (window: SkyLightTargetWindow | undefined): boolean =>
+			window === undefined || (bringsForward && parkedOffDisplays(window.bounds, onlineDisplayInfo()));
+		if (bringsForward && awaitsWindow(targetWindow)) {
 			// Attended delivery drives the app like a person: an app whose windows are hidden, behind its own
 			// Space or on another display is brought forward, which puts a window on screen for the wait below. As attended
 			// input does, the window is raised too: activation alone can leave the person on a covering app's Space.
 			activateApplication(app.pid);
-			const hiddenWindowId = options.windowId ?? focusedWindowIdsForObservationPid(app.pid).focusedWindowId;
+			const hiddenWindowId =
+				targetWindow?.id ?? options.windowId ?? focusedWindowIdsForObservationPid(app.pid).focusedWindowId;
 			if (hiddenWindowId !== undefined) {
 				raiseWindowInApp(app.pid, hiddenWindowId);
 			}
@@ -702,7 +709,7 @@ export class MacOSHostComputer extends HostComputer {
 		// A window that was just opened (open_app, a new document, a reopened app) can take a moment to
 		// reach the window server. Wait a bounded time for it instead of failing the first observation.
 		const windowDeadline = Date.now() + WINDOW_APPEAR_WAIT_MILLISECONDS;
-		while (options?.requireWindow === true && targetWindow === undefined && Date.now() < windowDeadline) {
+		while (options?.requireWindow === true && awaitsWindow(targetWindow) && Date.now() < windowDeadline) {
 			await new Promise((resolve) => setTimeout(resolve, WINDOW_APPEAR_POLL_MILLISECONDS));
 			windows = await openWindowsForTargeting();
 			targetWindow = await this.resolveObservationWindow(app.pid, options?.windowId, windows);
@@ -1764,6 +1771,11 @@ function resolveDisplayInfo(id: number): DisplayInfo {
 	}
 	const metadata = resolveDisplayMetadata(nativePixel === undefined ? { logical } : { logical, nativePixel });
 	return { ...metadata, id, isMain: true, x: 0, y: 0 };
+}
+
+/** A window the WindowServer reports entirely off every online display: where macOS parks it while its app is not in front. */
+function parkedOffDisplays(bounds: Rect, displays: ReturnType<typeof onlineDisplayInfo>): boolean {
+	return displays !== undefined && displays.length > 0 && displaysForWindow(bounds, displays).length === 0;
 }
 
 function displaysForWindow(
