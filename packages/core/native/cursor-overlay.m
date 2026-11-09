@@ -998,8 +998,11 @@ static void stack_marker_window(NSWindow *window, NSNumber *key,
     [window orderOut:nil];
     return;
   }
-  [window setLevel:NSNormalWindowLevel];
-  [window orderWindow:NSWindowAbove relativeTo:(NSInteger)target];
+  // Background input lands in a window that is usually behind the person's own
+  // app. Stacked just above that window the marker would be hidden with it, so
+  // it floats above every app window instead (it ignores the mouse).
+  [window setLevel:NSFloatingWindowLevel];
+  [window orderFrontRegardless];
 }
 
 static NSArray<NSDictionary *> *onscreen_windows(void) {
