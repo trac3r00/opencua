@@ -14,6 +14,20 @@ const pasteboard = vi.hoisted(() => ({
 }));
 const menu = vi.hoisted(() => ({
 	invokeMenu: vi.fn(async (_pid: number, path: readonly string[]) => ({ resolvedPath: path, action: "AXPress" })),
+	invokeWindowMenu: vi.fn(
+		async (
+			pid: number,
+			path: readonly string[],
+			runner: (
+				wants: () => boolean,
+				command: (held: boolean) => Promise<{ resolvedPath: readonly string[]; action: string }>,
+			) => Promise<{ resolvedPath: readonly string[]; action: string }>,
+		) =>
+			await runner(
+				() => false,
+				async () => await menu.invokeMenu(pid, path),
+			),
+	),
 	normalizeMenuPath: (path: readonly string[]) => path.map((segment) => segment.trim()),
 	commandChordMask: vi.fn<() => number | undefined>(() => undefined),
 	findMenuKeyEquivalent: vi.fn<() => MenuKeyEquivalent | undefined>(() => undefined),
@@ -127,6 +141,28 @@ describe("#given Edit menu commands that AppKit validates only while its menu is
 
 		expect(selectText.selectAllInFocusedTextElement).toHaveBeenCalledWith(PID);
 		expect(accessibility.typeIntoFocusedAXElement).toHaveBeenCalledWith(PID, "from clipboard");
+		expect(menu.invokeMenu).not.toHaveBeenCalled();
+		await computer.close();
+	});
+
+	it("#when Select All reaches a background app with no focused field until it is told it is active #then the field is selected, not the stale menu item pressed", async () => {
+		selectText.selectAllInFocusedTextElement.mockReturnValueOnce(false).mockReturnValue(true);
+		const held = vi
+			.spyOn(MacOSInputController.prototype, "withWindowCommand")
+			.mockImplementation(async (_pid, _window, wantsActivation, command) => {
+				expect(wantsActivation()).toBe(true);
+				return await command(true);
+			});
+		const computer = new MacOSHostComputer({ delivery: "background" });
+		Reflect.get(computer, "inputObservations").set(PID, {
+			windowId: 7505,
+			windowBounds: { x: 0, y: 0, width: 600, height: 400 },
+		});
+
+		const result = await computer.invokeMenu(PID, ["Edit", "Select All"]);
+
+		expect(held).toHaveBeenCalledOnce();
+		expect(result).toEqual({ resolvedPath: ["Edit", "Select All"], action: "accessibility" });
 		expect(menu.invokeMenu).not.toHaveBeenCalled();
 		await computer.close();
 	});

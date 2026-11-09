@@ -120,6 +120,9 @@ const SCREENSHOT_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 const DEFAULT_APP_STATE_SETTLE_MILLISECONDS = 300;
 const WINDOW_APPEAR_WAIT_MILLISECONDS = 3_000;
 const WINDOW_APPEAR_POLL_MILLISECONDS = 150;
+/** How long an Edit command waits for the focused field of an app just told it is active: 10 x 30 ms. */
+const EDIT_FOCUS_POLLS = 10;
+const EDIT_FOCUS_POLL_MILLISECONDS = 30;
 const KEYBOARD_FENCE_CLOCK: KeyboardFenceClock = {
 	now: () => performance.now(),
 	sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -351,7 +354,20 @@ export class MacOSHostComputer extends HostComputer {
 			result = await invokeMenu(targetPid, normalized);
 		} else {
 			result = await invokeWindowMenu(targetPid, normalized, (disabled, run) =>
-				this.input.withWindowCommand(targetPid, window, disabled, run),
+				this.input.withWindowCommand(
+					targetPid,
+					window,
+					command === undefined ? disabled : () => true,
+					async (held) => {
+						// An app behind the person's has no key window, so its focused field answers only once it is told
+						// it is active; the Edit item itself stays disabled, since AppKit validates it only while shown.
+						if (held && command !== undefined && (await this.editCommandOnceFocused(targetPid, command))) {
+							this.input.showKeyboard();
+							return { resolvedPath: normalized, action: "accessibility" };
+						}
+						return await run(held);
+					},
+				),
 			);
 		}
 		this.input.noteKeyboardInput(targetPid);
@@ -455,6 +471,17 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	/** True when the Edit command ran on the focused native text field; false hands it to the menu. */
+	/** The Edit command on the focused field, retried (bounded) while an app just told it is active takes focus. */
+	private async editCommandOnceFocused(pid: number, command: string): Promise<boolean> {
+		for (let poll = 0; poll < EDIT_FOCUS_POLLS; poll += 1) {
+			if (await this.editCommandOnTextField(pid, command)) {
+				return true;
+			}
+			await new Promise((resolve) => setTimeout(resolve, EDIT_FOCUS_POLL_MILLISECONDS));
+		}
+		return false;
+	}
+
 	private async editCommandOnTextField(pid: number, command: string): Promise<boolean> {
 		switch (command) {
 			case "Select All":

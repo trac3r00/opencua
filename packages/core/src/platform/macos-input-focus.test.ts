@@ -188,6 +188,30 @@ describe("#given attended delivery and a target app behind the person's", () => 
 		controller.close();
 	});
 
+	it("#when the raised window becomes key only after a few polls #then no click goes out before it is key", async () => {
+		let pollsUntilKey = 3;
+		let keyReported = false;
+		foregroundMock.focusedWindowIdForPid.mockImplementation(() => {
+			if (front.psn !== 2) return undefined;
+			if (pollsUntilKey > 0) {
+				pollsUntilKey -= 1;
+				return undefined;
+			}
+			keyReported = true;
+			return 99;
+		});
+		coreGraphicsMock.postMouseEvent.mockImplementation(() => {
+			expect(keyReported).toBe(true);
+		});
+		const controller = attended();
+
+		await controller.click({ x: 50, y: 70 });
+
+		expect(mouseEvents()).toHaveLength(3);
+		coreGraphicsMock.postMouseEvent.mockImplementation(() => undefined);
+		controller.close();
+	});
+
 	it("#when the app does not come forward #then nothing is posted, since it would reach the person's app", async () => {
 		front.comesForward = false;
 		const controller = attended();

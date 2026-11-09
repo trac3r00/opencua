@@ -208,6 +208,9 @@ export function setScreenLayoutSourceForTesting(source: () => ScreenLayout | und
 	screenLayoutSource = source;
 }
 
+/** How many focus-settle intervals attended delivery waits for a raised window to become key: 40 x 25 ms by default. */
+const ATTENDED_FOREGROUND_POLLS = 40;
+
 /** Logged when an app was told it is active but no point is provably clear for its primer click. */
 const PRIMER_SKIPPED_MESSAGE =
 	"opencua: activation primer skipped: the display and window layout could not be read, so no point outside all of them is known; a first-mouse app (Finder) may spend the next background click on activating its window\n";
@@ -400,8 +403,16 @@ export class MacOSInputController {
 		if (focusGuardFor(window) === null && focusedWindowIdForPid(pid) === window.id) return;
 		activateApplication(pid);
 		raiseWindowInApp(pid, window.id);
-		const settle = gestureFocusSettleMilliseconds();
-		if (settle > 0) await delayMilliseconds(settle);
+		// A click on a window that is not yet key is spent making it key (an app without first-mouse ignores it), so input
+		// waits, bounded, until the app is in front and the window is its focused one. An app in front whose focus never
+		// reports that window (a sheet, a helper window) still gets the input: that click is then what makes it key.
+		const poll = Math.max(1, gestureFocusSettleMilliseconds());
+		for (let attempt = 0; attempt < ATTENDED_FOREGROUND_POLLS; attempt += 1) {
+			await delayMilliseconds(poll);
+			if (focusGuardFor(window) === null && focusedWindowIdForPid(pid) === window.id) {
+				return;
+			}
+		}
 		if (focusGuardFor(window) !== null) {
 			throw new Error(`attended delivery could not bring app ${pid} to the front; input refused`);
 		}
