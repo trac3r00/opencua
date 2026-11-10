@@ -770,6 +770,10 @@ Restart the client or terminal after a grant (some apps cache the permission sta
 `opencua doctor` reports what is missing without raising a prompt, and `opencua permissions grant` walks through
 granting it.
 
+An observation taken without Accessibility carries `axUnavailable: "accessibility-permission"` and an `axNote` naming
+the process to grant, so its empty `elements` never reads as an app without UI; an app that answers with no tree says
+`"app-not-accessible"` instead. `opencua apps state` then also prints the note on stderr and exits 3.
+
 Full walkthrough: [`skills/opencua/references/installation.md`](../skills/opencua/references/installation.md).
 
 ## Architecture

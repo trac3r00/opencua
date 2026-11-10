@@ -445,6 +445,7 @@ describe("#given a window-scoped accessibility walk", () => {
 		const state = extractAccessibilityTree(process.pid, { windowId: 999 });
 		expect(state.elements).toEqual([]);
 		expect(state.axAvailable).toBe(false);
+		expect(state.axUnavailable).toBe("app-not-accessible");
 		expect(state.windowTitle).toBeUndefined();
 	});
 	it.each([42, 999])(
@@ -1006,6 +1007,7 @@ describe("#given retained accessibility snapshots", () => {
 		expect(extractAccessibilityTree(process.pid)).toEqual({
 			elements: [],
 			axAvailable: false,
+			axUnavailable: "accessibility-permission",
 			truncated: false,
 			walkKey: expect.any(String),
 		});

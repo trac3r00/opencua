@@ -79,6 +79,11 @@ export interface AppState {
 	};
 	frontmost: boolean;
 	axAvailable: boolean;
+	/**
+	 * Why `axAvailable` is false: this process lacks Accessibility trust, or the app answered with no tree. Absent
+	 * when the tree was read or not asked for.
+	 */
+	axUnavailable?: AxUnavailableReason;
 	elements: AXTreeElement[];
 	screenshotBase64: string;
 	screenshotWidth: number;
@@ -163,6 +168,8 @@ export interface AppState {
 	 */
 	systemPrompts?: readonly SystemPrompt[];
 }
+
+export type AxUnavailableReason = "accessibility-permission" | "app-not-accessible";
 
 export interface OcrTextEntry {
 	readonly text: string;

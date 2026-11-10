@@ -167,6 +167,10 @@ const inProcessReads: ReadCommandHost = {
 	withComputer: async (action, hostOptions) => await withComputer(action, hostOptions),
 	emit: (result) => {
 		process.stdout.write(result.stdout);
+		process.stderr.write(result.stderr ?? "");
+		if (result.exitCode !== 0) {
+			process.exitCode = result.exitCode;
+		}
 	},
 };
 

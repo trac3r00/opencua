@@ -1,6 +1,7 @@
 import "./env-compat.js";
 export type * from "./accessibility/types.js";
 export { classifyContentKind, type ContentKind } from "./accessibility/content-kind.js";
+export { axUnavailableNote } from "./accessibility/ax-unavailable.js";
 export { diffAxTreeChanges, type AxTreeChanges } from "./accessibility/diff.js";
 export {
 	type ElementMatch,

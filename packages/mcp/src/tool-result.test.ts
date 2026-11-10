@@ -246,6 +246,17 @@ function elementRange(count: number): AXTreeElement[] {
 	}));
 }
 
+describe("#given accessibility trust is missing #when the state is reported #then the payload names the reason and the process to grant", () => {
+	it("keeps axUnavailable and adds an axNote naming this process", () => {
+		const payload = payloadOf(
+			stateResult({ ...state, axAvailable: false, axUnavailable: "accessibility-permission" }),
+		);
+
+		expect(payload["axUnavailable"]).toBe("accessibility-permission");
+		expect(String(payload["axNote"])).toContain(process.execPath);
+	});
+});
+
 function payloadOf(result: { readonly content: readonly unknown[] }): Record<string, unknown> {
 	const text = result.content
 		.flatMap((item) =>

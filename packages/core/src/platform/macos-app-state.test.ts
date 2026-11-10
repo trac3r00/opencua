@@ -498,6 +498,23 @@ describe("#given an observed hidden window without an AX root #when its native t
 	});
 });
 
+describe("#given this process lacks Accessibility trust #when an app is observed #then the state says why it holds no elements", () => {
+	it("carries the walk's accessibility-permission reason", async () => {
+		accessibilityMock.extractAccessibilityTree.mockReturnValue({
+			axAvailable: false,
+			axUnavailable: "accessibility-permission",
+			truncated: false,
+			walkKey: "untrusted",
+			elements: [],
+		});
+
+		const state = await new MacOSHostComputer().getAppState(TARGET_PID, { settleMs: 0, includeScreenshot: false });
+
+		expect(state.axAvailable).toBe(false);
+		expect(state.axUnavailable).toBe("accessibility-permission");
+	});
+});
+
 describe("#given an app with several windows #when the observation resolves a target #then it names the window and lists the alternatives", () => {
 	it("scopes to the app's focused window and reports every candidate", async () => {
 		windowMock.openWindows.mockResolvedValue([

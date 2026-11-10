@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import type { ComputerInterface, MacOSHostComputerOptions, ScreenshotOptions } from "@opencua/core";
 import type { Command } from "commander";
 
-export type CommandResult = { readonly stdout: string; readonly exitCode: number };
+export type CommandResult = { readonly stdout: string; readonly stderr?: string; readonly exitCode: number };
+
+/** `apps state` read no elements because this process lacks macOS Accessibility permission. */
+export const AX_PERMISSION_EXIT_CODE = 3;
 
 export type GlobalOptions = {
 	json?: boolean;
@@ -123,6 +126,10 @@ export function registerAppsStateCommand(apps: Command, host: ReadCommandHost): 
 			Number.parseInt(value, 10),
 		)
 		.option("--menu-bar", "Include the application menu bar")
+		.addHelpText(
+			"after",
+			`\nExits ${AX_PERMISSION_EXIT_CODE} with a warning on stderr when this process lacks Accessibility permission (axUnavailable: "accessibility-permission"); run \`opencua doctor\`.`,
+		)
 		.action(async (app: string, options: AppStateCommandOptions) =>
 			host.emit(await appsStateCommand(host, app, options)),
 		);
@@ -174,7 +181,7 @@ async function appsStateCommand(
 	app: string,
 	options: AppStateCommandOptions,
 ): Promise<CommandResult> {
-	const { getAppStateForApp } = await import("@opencua/core");
+	const { axUnavailableNote, getAppStateForApp } = await import("@opencua/core");
 	const state = await host.withComputer((computer) =>
 		getAppStateForApp(computer, app, {
 			...(options.maxElements === undefined ? {} : { maxElements: options.maxElements }),
@@ -184,12 +191,17 @@ async function appsStateCommand(
 	);
 	// The base64 screenshot dwarfs the AX tree and makes the JSON unusable for
 	// programmatic consumers, so it is dropped unless explicitly requested.
-	const payload = options.screenshot === true ? state : { ...state, screenshotBase64: "" };
-	return output(
+	const axNote =
+		state.axUnavailable === undefined ? undefined : axUnavailableNote(state.axUnavailable, process.execPath);
+	const payload = {
+		...(options.screenshot === true ? state : { ...state, screenshotBase64: "" }),
+		...(axNote === undefined ? {} : { axNote }),
+	};
+	const result = output(
 		host,
 		payload,
 		[
-			`${state.app} (${state.bundleId}) pid=${state.pid} frontmost=${state.frontmost} axAvailable=${state.axAvailable}${state.windowId === undefined ? "" : ` window=${state.windowId}${state.windowTitle === undefined ? "" : ` (${state.windowTitle})`}`}`,
+			`${state.app} (${state.bundleId}) pid=${state.pid} frontmost=${state.frontmost} axAvailable=${state.axAvailable}${state.axUnavailable === undefined ? "" : ` axUnavailable=${state.axUnavailable}`}${state.windowId === undefined ? "" : ` window=${state.windowId}${state.windowTitle === undefined ? "" : ` (${state.windowTitle})`}`}`,
 			...(state.windowCandidates ?? []).map(
 				(candidate) =>
 					`candidate #${candidate.id}\t${candidate.title}\t` +
@@ -202,6 +214,11 @@ async function appsStateCommand(
 			),
 		].join("\n"),
 	);
+	// An empty tree from a missing grant must not read as an app without UI to a script checking the exit status.
+	if (state.axUnavailable !== "accessibility-permission") {
+		return result;
+	}
+	return { ...result, stderr: `opencua: warning: ${axNote}\n`, exitCode: AX_PERMISSION_EXIT_CODE };
 }
 
 function output(host: ReadCommandHost, jsonValue: unknown, humanValue: string): CommandResult {

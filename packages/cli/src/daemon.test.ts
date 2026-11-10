@@ -152,4 +152,36 @@ describe("#given the daemon executor #when a read command runs #then it prints w
 		const result = await executeReadCommand({ argv: ["screen"], cwd: stateDir, env: {} }, failing);
 		expect(result).toEqual({ stdout: "", stderr: "Screen Recording permission is required\n", exitCode: 1 });
 	});
+
+	it("warns once on stderr and exits 3 when apps state lacks Accessibility permission", async () => {
+		const untrusted = async () =>
+			({
+				...fakeComputer,
+				getAppState: async () => ({
+					app: "Calculator",
+					bundleId: "com.apple.calculator",
+					pid: 7,
+					frontmost: false,
+					axAvailable: false,
+					axUnavailable: "accessibility-permission",
+					elements: [],
+					screenshotBase64: "",
+					screenshotWidth: 0,
+					screenshotHeight: 0,
+					display: { width: 1512, height: 982, scaleFactor: 2 },
+				}),
+			}) as never;
+
+		const result = await executeReadCommand(
+			{ argv: ["--json", "apps", "state", "com.apple.calculator"], cwd: stateDir, env: {} },
+			untrusted,
+		);
+
+		expect(result.exitCode).toBe(3);
+		expect(result.stderr.trimEnd().split("\n")).toHaveLength(1);
+		expect(JSON.parse(result.stdout)).toMatchObject({
+			axAvailable: false,
+			axUnavailable: "accessibility-permission",
+		});
+	});
 });

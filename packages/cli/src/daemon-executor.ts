@@ -23,6 +23,7 @@ export type ComputerSource = (spec: {
 export async function executeReadCommand(request: DaemonRequest, computerFor: ComputerSource): Promise<DaemonResponse> {
 	let stdout = "";
 	let stderr = "";
+	let exitCode = 0;
 	const program = addGlobalOptions(new Command().name("opencua"))
 		.exitOverride()
 		.configureOutput({
@@ -46,12 +47,14 @@ export async function executeReadCommand(request: DaemonRequest, computerFor: Co
 			),
 		emit: (result) => {
 			stdout += result.stdout;
+			stderr += result.stderr ?? "";
+			exitCode = result.exitCode;
 		},
 	};
 	registerReadCommands(program, host);
 	try {
 		await program.parseAsync(["node", "opencua", ...request.argv]);
-		return { stdout, stderr, exitCode: 0 };
+		return { stdout, stderr, exitCode };
 	} catch (error: unknown) {
 		if (error instanceof CommanderError) {
 			return { stdout, stderr, exitCode: error.exitCode };

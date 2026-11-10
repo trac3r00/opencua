@@ -1,10 +1,11 @@
-import type {
-	AXTreeElement,
-	AppState,
-	AxTreeChanges,
-	ElementMatch,
-	InputObservation,
-	SystemPrompt,
+import {
+	type AXTreeElement,
+	type AppState,
+	type AxTreeChanges,
+	type ElementMatch,
+	type InputObservation,
+	type SystemPrompt,
+	axUnavailableNote,
 } from "@opencua/core";
 import { UNTRUSTED_CONTENT_NOTE, detectUntrustedContent } from "./untrusted-content.js";
 
@@ -788,6 +789,9 @@ function stateToolResult(
 	}
 	if (state.windowContentUnavailable === true) {
 		payload["windowContentNote"] = WINDOW_CONTENT_UNAVAILABLE_NOTE;
+	}
+	if (state.axUnavailable !== undefined) {
+		payload["axNote"] = axUnavailableNote(state.axUnavailable, process.execPath);
 	}
 	if (state.screenshotUnavailable !== undefined) {
 		payload["screenshotNote"] =

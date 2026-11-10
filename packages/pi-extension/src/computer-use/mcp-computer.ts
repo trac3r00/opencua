@@ -35,7 +35,14 @@ export const UNOBSERVED_DISPLAY: DisplayConfig = {
 
 const SUMMARY_KEYS = ["app", "bundleId", "windowTitle", "screenshotWidth", "screenshotHeight"] as const;
 /** get_app_state notes that change what a screenshot means; they stay when the element tree is left out. */
-const NOTE_KEYS = ["note", "screenshotNote", "windowContentNote", "systemPrompts", "systemPromptNote"] as const;
+const NOTE_KEYS = [
+	"note",
+	"axNote",
+	"screenshotNote",
+	"windowContentNote",
+	"systemPrompts",
+	"systemPromptNote",
+] as const;
 
 const NO_TARGET =
 	"no app window is targeted yet. Call get_app_state with the app to control (list_apps shows what is running, open_app launches one); computer then acts on that window.";

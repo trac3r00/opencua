@@ -1,5 +1,5 @@
 import type { KoffiFunc } from "koffi";
-import type { AXTreeElement } from "../../accessibility/types.js";
+import type { AXTreeElement, AxUnavailableReason } from "../../accessibility/types.js";
 import { AX_ERROR_CANNOT_COMPLETE, resolveAxMessagingTimeoutSeconds } from "./ax-timeout.js";
 import {
 	type CFArrayRef,
@@ -274,6 +274,8 @@ function assertAppAnswersAccessibility(root: AXUIElementRef, pid: number): void 
 export interface AccessibilityTreeResult {
 	readonly elements: AXTreeElement[];
 	readonly axAvailable: boolean;
+	/** Why the walk read nothing; present exactly when `axAvailable` is false. */
+	readonly axUnavailable?: AxUnavailableReason;
 	/** Title of the exactly matched AX window, never borrowed from an unmatched app-wide walk. */
 	readonly windowTitle?: string;
 	/** True when the walk stopped at the element budget, so the tree is a partial view. */
@@ -831,11 +833,18 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 	const maxDepth = options.maxDepth ?? DEFAULT_AX_MAX_DEPTH;
 	const maxElements = options.maxElements ?? DEFAULT_AX_MAX_ELEMENTS;
 	const keepIndexSpace = options.signatureOnly === true;
-	if (!AXIsProcessTrusted() || !isRunning(pid) || maxDepth < 0 || maxElements <= 0) {
+	const trusted = AXIsProcessTrusted();
+	if (!trusted || !isRunning(pid) || maxDepth < 0 || maxElements <= 0) {
 		if (!keepIndexSpace) {
 			replaceElementSnapshot(pid, undefined);
 		}
-		return { elements: [], axAvailable: false, truncated: false, walkKey: unavailableWalkKey(maxDepth, maxElements) };
+		return {
+			elements: [],
+			axAvailable: false,
+			axUnavailable: trusted ? "app-not-accessible" : "accessibility-permission",
+			truncated: false,
+			walkKey: unavailableWalkKey(maxDepth, maxElements),
+		};
 	}
 
 	const root = createApplicationElement(pid);
@@ -857,6 +866,7 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 			return {
 				elements: [],
 				axAvailable: false,
+				axUnavailable: "app-not-accessible",
 				truncated: false,
 				walkKey: unavailableWalkKey(maxDepth, maxElements),
 			};
@@ -885,6 +895,7 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 			return {
 				elements: [],
 				axAvailable: false,
+				axUnavailable: "app-not-accessible",
 				truncated: false,
 				walkKey: unavailableWalkKey(maxDepth, maxElements),
 				...contentUnavailable,

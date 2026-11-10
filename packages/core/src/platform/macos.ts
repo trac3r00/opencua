@@ -851,6 +851,7 @@ export class MacOSHostComputer extends HostComputer {
 			...(audio === undefined ? {} : { audio }),
 			frontmost: app.isActive,
 			axAvailable: tree?.axAvailable ?? true,
+			...(tree?.axUnavailable === undefined ? {} : { axUnavailable: tree.axUnavailable }),
 			elements: diffOnly ? [] : elements,
 			...(observationKey === undefined ? {} : { observationKey }),
 			...(tree?.truncated === true ? { elementsTruncated: true } : {}),
