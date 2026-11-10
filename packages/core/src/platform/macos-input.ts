@@ -272,8 +272,20 @@ export class MacOSInputController {
 	/** The window each app's input last went to (or its observation named), by pid. */
 	private readonly targetWindowsByPid = new Map<number, SkyLightTargetWindow>();
 	private readonly keyboardInputAt = new Map<number, number>();
-	/** Apps behind the person's that this controller told they are active, by pid, to be told otherwise once idle. */
+	/**
+	 * Apps behind the person's that this controller told they are active, by pid, to be told otherwise once idle.
+	 *
+	 * Known limitation: the hold is per process. Another OpenCUA process driving the same app keeps its own map, so its
+	 * idle release can tell the app it is inactive while this one still counts it held; this controller then does not
+	 * tell it again, and its next click may be spent on activating the window. No per-event re-assertion fixes that: the
+	 * first click after an activation is spent on it whatever told the app, so it needs a cross-process hold.
+	 */
 	private readonly activations = new Map<number, { readonly window: SkyLightTargetWindow; readonly psn: Buffer }>();
+	/**
+	 * Input calls in flight on each pid. While any runs, the app's idle release waits: it is scheduled only when the last
+	 * one ends, so neither a long call nor an overlapping call on the same app has the app told inactive under it.
+	 */
+	private readonly activationHolders = new Map<number, number>();
 	private readonly activationReleaseTimers = new Map<number, NodeJS.Timeout>();
 	/**
 	 * Registered on process exit while any app is held: a process that ends (a server turns termination
@@ -448,23 +460,20 @@ export class MacOSInputController {
 		) {
 			throw new Error("modified pointer input refused for an off-Space window; activation priming is unavailable");
 		}
-		let held = false;
-		if (pid !== undefined && targetWindow !== undefined) {
-			if (this.isBackground && !currentOnscreenWindowIds()?.includes(targetWindow.id)) {
-				held = false;
-			} else {
-				held =
-					activation === "pointer" || modified
-						? await this.activateBehind(pid, targetWindow)
-						: this.postponeActivationRelease(pid);
-			}
-		}
+		const holder = pid !== undefined && targetWindow !== undefined ? pid : undefined;
+		if (holder !== undefined) this.holdActivation(holder);
 		try {
+			if (
+				holder !== undefined &&
+				targetWindow !== undefined &&
+				(activation === "pointer" || modified) &&
+				(!this.isBackground || currentOnscreenWindowIds()?.includes(targetWindow.id) === true)
+			) {
+				await this.activateBehind(holder, targetWindow);
+			}
 			return await this.postWithHeldModifiers(call, modifiers, targetWindow, gesture);
 		} finally {
-			if (held && pid !== undefined) {
-				this.scheduleActivationRelease(pid);
-			}
+			if (holder !== undefined) this.dropActivationHold(holder);
 		}
 	}
 
@@ -481,7 +490,7 @@ export class MacOSInputController {
 	 * {@link BACKGROUND_ACTIVATION_IDLE_MILLISECONDS} (or the controller closes): telling it otherwise
 	 * right after each action leaves some apps (Finder) deaf to the very next activation, while a chain of
 	 * actions shares one. An app held for another of its windows is told again, naming this one. True when
-	 * this controller holds the app active afterwards; the caller then schedules the release. Never done with
+	 * this controller holds the app active afterwards; the release is scheduled once no call holds it. Never done with
 	 * background activation turned off (OPENCUA_BACKGROUND_ACTIVATION=off), which avoids the release's autosave (see
 	 * releaseActivation) at the cost of the clicks and window commands above.
 	 */
@@ -517,13 +526,23 @@ export class MacOSInputController {
 		return true;
 	}
 
-	/** Keep a held activation from running out while another action reaches the app; false when none is held. */
-	private postponeActivationRelease(pid: number): boolean {
-		if (!this.activations.has(pid)) {
-			return false;
-		}
+	/** An input call on `pid` starts: the app's idle release waits until every call on it has ended. */
+	private holdActivation(pid: number): void {
+		this.activationHolders.set(pid, (this.activationHolders.get(pid) ?? 0) + 1);
 		this.cancelActivationRelease(pid);
-		return true;
+	}
+
+	/** An input call on `pid` ended, thrown or not: the last one to end starts the app's idle period, if it is held. */
+	private dropActivationHold(pid: number): void {
+		const remaining = (this.activationHolders.get(pid) ?? 1) - 1;
+		if (remaining > 0) {
+			this.activationHolders.set(pid, remaining);
+			return;
+		}
+		this.activationHolders.delete(pid);
+		if (this.activations.has(pid)) {
+			this.scheduleActivationRelease(pid);
+		}
 	}
 
 	private cancelActivationRelease(pid: number): void {
@@ -536,6 +555,9 @@ export class MacOSInputController {
 
 	private scheduleActivationRelease(pid: number): void {
 		this.cancelActivationRelease(pid);
+		if (this.activationHolders.has(pid)) {
+			return;
+		}
 		const timer = setTimeout(() => {
 			this.activationReleaseTimers.delete(pid);
 			this.releaseActivation(pid);
@@ -612,14 +634,13 @@ export class MacOSInputController {
 			focusStealWatcher(target);
 			// Window commands of an app behind the person's read disabled until it is told it is active. The window is
 			// not on screen, so no click follows that a primer would absorb: the app is only told, never raised.
-			const offscreenHeld =
-				(this.activations.has(pid) || wantsActivation()) && (await this.activateBehind(pid, target, false));
+			this.holdActivation(pid);
 			try {
+				const offscreenHeld =
+					(this.activations.has(pid) || wantsActivation()) && (await this.activateBehind(pid, target, false));
 				return await command(offscreenHeld);
 			} finally {
-				if (offscreenHeld) {
-					this.scheduleActivationRelease(pid);
-				}
+				this.dropActivationHold(pid);
 			}
 		}
 		await keyboardWindowFocuser(pid, window.id);
@@ -627,13 +648,12 @@ export class MacOSInputController {
 			throw new Error("observed command target is not the verified focused window; input refused");
 		}
 		const activate = this.activations.has(pid) || (this.isBackground && wantsActivation());
-		const held = activate ? await this.activateBehind(pid, window) : false;
+		this.holdActivation(pid);
 		try {
+			const held = activate ? await this.activateBehind(pid, window) : false;
 			return await command(held);
 		} finally {
-			if (held) {
-				this.scheduleActivationRelease(pid);
-			}
+			this.dropActivationHold(pid);
 		}
 	}
 
@@ -642,16 +662,14 @@ export class MacOSInputController {
 		return this.activations.has(pid);
 	}
 
-	/** Keys reaching an app this controller holds active keep it so: its idle period restarts after them. */
+	/** Keys hold the app's activation for the whole call, every key of it: its idle period starts after the last call. */
 	private async keepingActivation<T>(call: InputCall, work: () => Promise<T>): Promise<T> {
 		const pid = call.pid;
-		const held = pid !== undefined && this.postponeActivationRelease(pid);
+		if (pid !== undefined) this.holdActivation(pid);
 		try {
 			return await work();
 		} finally {
-			if (held && pid !== undefined) {
-				this.scheduleActivationRelease(pid);
-			}
+			if (pid !== undefined) this.dropActivationHold(pid);
 		}
 	}
 
