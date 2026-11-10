@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+	currentCursorIdentity,
 	isOwnedSurfacePid,
 	parseElementIndex,
 	resolveAppPid,
@@ -304,7 +305,28 @@ export class WorkerCoordinator {
 		/** Apps several workers may share, each driving its own cursor: opencua-owned surfaces. */
 		private readonly sharedApp: (pid: number) => boolean = isOwnedSurfacePid,
 	) {
-		// The shared session owns token validation and per-app mutation queues.
+		// The shared session owns token validation and per-app mutation queues; this coordinator tells it which apps
+		// its workers hold, so an unassigned call cannot drive a worker's app or retire the worker's token.
+		session.setAppOwnership((pid) => this.ownershipRefusal(pid));
+	}
+
+	/**
+	 * The refusal for a call on app `pid` that is not the owning worker's own, or undefined when the app is free, is
+	 * a shared surface, or the call runs under the owning worker's cursor. A worker another opencua process assigned
+	 * owns the app here too.
+	 */
+	private ownershipRefusal(pid: number): string | undefined {
+		if (this.sharedApp(pid)) return undefined;
+		const local = [...this.workers.values()].find((worker) => worker.pid === pid);
+		if (local !== undefined) {
+			return local.assignment.cursor_id === currentCursorIdentity()
+				? undefined
+				: `app "${local.assignment.app}" is owned by worker "${local.assignment.worker_id}"; act through run_worker or manage_workers observe for that worker, or release it first`;
+		}
+		const remote = this.registry?.holder(pid);
+		return remote === undefined
+			? undefined
+			: `app "${remote.app}" is owned by worker "${remote.worker_id}" in another opencua session; act through run_worker for that worker, or have that session release it first`;
 	}
 
 	async assign(

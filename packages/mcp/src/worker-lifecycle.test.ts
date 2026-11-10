@@ -191,3 +191,39 @@ describe("#given a worker run in flight #when its coordinator closes #then the c
 		expect(() => registryFor(3).claim([claimOf("x", 3)])).not.toThrow();
 	});
 });
+
+describe("#given an assigned idle worker #when an unassigned call observes its app #then the worker keeps its token", () => {
+	it("refuses the unassigned observation naming the worker, and the worker's token still runs", async () => {
+		const a = processAt(1);
+		try {
+			const [assigned] = await a.coordinator.assign([{ worker_id: "w", task: "task", app: "Finder" }]);
+
+			await expect(a.session.observe({ app: "Finder", diffOnly: false })).rejects.toThrow(
+				/app "Finder" is owned by worker "w"/,
+			);
+
+			const run = await a.coordinator.run(
+				"w",
+				assigned?.observation_token ?? "",
+				[{ type: "type_text", text: "mine" }],
+				undefined,
+			);
+			expect(run.result.isError).not.toBe(true);
+			expect(sent(a.computer, "mine")).toBe(true);
+		} finally {
+			await a.coordinator.close();
+		}
+	});
+
+	it("refuses an unassigned observation of an app a worker in another opencua process owns", async () => {
+		registryFor(1).claim([claimOf("w", 1)]);
+		const b = processAt(2);
+		try {
+			await expect(b.session.observe({ app: "Finder", diffOnly: false })).rejects.toThrow(
+				/app "Finder" is owned by worker "w" in another opencua session/,
+			);
+		} finally {
+			await b.coordinator.close();
+		}
+	});
+});

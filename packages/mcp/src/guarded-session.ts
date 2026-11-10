@@ -315,6 +315,12 @@ export interface StepDispatchOptions {
 	readonly settleWrite?: boolean;
 }
 
+/**
+ * Why the current caller may not use app `pid`: a refusal naming the worker that holds it, or undefined when the app
+ * is free or the caller is that worker (the cursor identity in scope says which).
+ */
+export type AppOwnershipProbe = (pid: number) => string | undefined;
+
 export interface RunStepDriver {
 	readonly elementIndex: (step: RunStep) => number | undefined;
 	/** The described element a step acts on, resolved against a fresh read right before it runs. */
@@ -444,6 +450,7 @@ export class GuardedSession {
 	private globalTail: Promise<void> = Promise.resolve();
 	private closed = false;
 	private closePromise: Promise<void> | undefined;
+	private appOwnership: AppOwnershipProbe = () => undefined;
 
 	constructor(
 		private readonly computer: GuardedComputerInterface,
@@ -1872,6 +1879,15 @@ export class GuardedSession {
 		this.tokenByPid.clear();
 	}
 
+	/**
+	 * A worker coordinator tells this session which apps its workers hold. From then on a call on such an app that
+	 * is not that worker's own is refused before it runs, so it can neither drive the worker's app nor replace the
+	 * worker's live token with its own.
+	 */
+	setAppOwnership(probe: AppOwnershipProbe): void {
+		this.appOwnership = probe;
+	}
+
 	/** Retire a released worker's context without disturbing another app's live token. */
 	revokeToken(token: string): void {
 		const live = this.tokens.get(token);
@@ -2671,6 +2687,10 @@ export class GuardedSession {
 		const result = previous
 			.then(async () => {
 				this.assertOpen();
+				const owned = pid === undefined ? undefined : this.appOwnership(pid);
+				if (owned !== undefined) {
+					throw new Error(owned);
+				}
 				return await operation();
 			})
 			.catch((error: unknown) => {

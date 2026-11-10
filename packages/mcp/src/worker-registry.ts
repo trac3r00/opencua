@@ -48,6 +48,8 @@ export interface WorkerRegistry {
 	/** Claims every entry or none, each under a fresh lease: refuses a worker id or app another live process already holds. */
 	claim(entries: readonly SharedWorkerClaim[]): readonly SharedWorkerEntry[];
 	find(workerId: string): SharedWorkerEntry | undefined;
+	/** The worker holding app `appPid` alone, in any live process; a shared surface has no single holder. */
+	holder(appPid: number): SharedWorkerEntry | undefined;
 	/**
 	 * Drops this process's claim. Refused when another live process owns the claim, or is running the worker:
 	 * the refusal names that process. A claim that is already gone is nothing to release.
@@ -311,6 +313,7 @@ export function fileWorkerRegistry(
 				return leased;
 			}),
 		find: (workerId) => read().find((entry) => entry.worker_id === workerId),
+		holder: (appPid) => read().find((entry) => entry.appPid === appPid && entry.shared !== true),
 		release: (workerId) =>
 			locked(() => {
 				const current = read();

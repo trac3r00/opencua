@@ -55,6 +55,7 @@ describe("#given named workers #when assigned #then virtual cursor ownership use
 				exports: {},
 				randomUUID: () => `test-id-${++nextId}`,
 				withCursorIdentity,
+				currentCursorIdentity: () => undefined,
 				WorkerLeaseRefusal: class extends Error {},
 				setTimeout,
 				isOwnedSurfacePid: () => false,
@@ -68,6 +69,7 @@ describe("#given named workers #when assigned #then virtual cursor ownership use
 						};
 					},
 					close: async () => undefined,
+					setAppOwnership: () => undefined,
 				},
 			},
 			{ timeout: 5_000 },
