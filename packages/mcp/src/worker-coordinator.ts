@@ -317,7 +317,7 @@ export class WorkerCoordinator {
 	 */
 	private ownershipRefusal(pid: number): string | undefined {
 		if (this.sharedApp(pid)) return undefined;
-		const local = [...this.workers.values()].find((worker) => worker.pid === pid);
+		const local = this.localHolder(pid);
 		if (local !== undefined) {
 			return local.assignment.cursor_id === currentCursorIdentity()
 				? undefined
@@ -327,6 +327,20 @@ export class WorkerCoordinator {
 		return remote === undefined
 			? undefined
 			: `app "${remote.app}" is owned by worker "${remote.worker_id}" in another opencua session; act through run_worker for that worker, or have that session release it first`;
+	}
+
+	/**
+	 * The worker in this process that holds app `pid` right now. A worker adopted from another process is only as
+	 * current as its lease, so it is looked up again first: one whose assigner released it is dropped here and holds
+	 * nothing, and a reused worker id that now names another app does not hold this one.
+	 */
+	private localHolder(pid: number): WorkerState | undefined {
+		const cached = [...this.workers.values()].find((worker) => worker.pid === pid);
+		if (cached === undefined || !this.adopted.has(workerKey(cached.session, cached.assignment.worker_id))) {
+			return cached;
+		}
+		const current = this.lookup(cached.assignment.worker_id, cached.session);
+		return current?.pid === pid ? current : undefined;
 	}
 
 	async assign(

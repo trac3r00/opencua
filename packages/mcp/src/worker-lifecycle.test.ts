@@ -227,6 +227,29 @@ describe("#given an assigned idle worker #when an unassigned call observes its a
 		}
 	});
 
+	it("#given a process that was refused the release of another process's worker #when the owner releases it #then that process may use the app again", async () => {
+		const a = processAt(1);
+		const b = processAt(2);
+		try {
+			await a.coordinator.assign([{ worker_id: "w", task: "task", app: "Finder" }]);
+			expect(() => b.coordinator.release("w")).toThrow(/was assigned by another opencua session \(process 1\)/);
+			await expect(b.session.observe({ app: "Finder", diffOnly: false })).rejects.toThrow(
+				/app "Finder" is owned by worker "w"/,
+			);
+
+			a.coordinator.release("w");
+
+			const observed = await b.session.observe({ app: "Finder", diffOnly: false });
+			expect(observed.isError).not.toBe(true);
+			const text = observed.content.find((item) => item.type === "text");
+			expect(text?.type === "text" ? text.text : "").toMatch(/"observation_token":/);
+			expect(b.coordinator.status()).toEqual([]);
+		} finally {
+			await a.coordinator.close();
+			await b.coordinator.close();
+		}
+	});
+
 	it("refuses an unassigned observation of an app a worker in another opencua process owns", async () => {
 		registryFor(1).claim([claimOf("w", 1)]);
 		const b = processAt(2);
