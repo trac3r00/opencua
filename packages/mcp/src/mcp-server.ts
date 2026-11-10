@@ -373,23 +373,66 @@ function browserToolsEnabled(): boolean {
 	return existsSync(join(resolveStateDir(), "browser-connection.json"));
 }
 
+/** How long a terminating server lets the calls in flight finish; override with OPENCUA_SHUTDOWN_GRACE_MS. */
+const DEFAULT_SHUTDOWN_GRACE_MS = 5_000;
+
+function shutdownGraceMilliseconds(value: string | undefined): number {
+	if (value === undefined || !/^\d+$/.test(value.trim())) return DEFAULT_SHUTDOWN_GRACE_MS;
+	return Number(value);
+}
+
 export async function main(): Promise<void> {
 	const server = createMcpServer();
-	exitOnTerminationSignals();
+	const shutdown = gracefulShutdown(server, shutdownGraceMilliseconds(process.env["OPENCUA_SHUTDOWN_GRACE_MS"]));
+	exitOnTerminationSignals(shutdown);
 	if (process.argv.includes(SUPERVISED_CHILD_FLAG)) {
 		// The supervisor owns the client connection; when it goes away this child must not linger.
-		process.stdin.once("end", () => process.exit(0));
+		process.stdin.once("end", () => void shutdown(0));
 	}
 	await server.connect(new StdioServerTransport());
 }
 
 /**
- * End the process through process.exit on a termination signal, which runs exit hooks the default signal
- * handling skips: an app that background input told it is active is told otherwise on the way out.
+ * The way out of the process: close the server, which refuses new calls and lets the ones in flight finish, then
+ * `exit`. A gesture that holds something (a drag's button, held modifiers) releases it in its own finally blocks,
+ * which an immediate exit would skip, leaving the button or key down in the target app; the exit hook only releases
+ * activation. The wait is bounded by `graceMs`, so a wedged call cannot keep a supervisor-requested restart from
+ * happening. Once started, later requests are ignored; the returned promise settles when `exit` has been called.
  */
-function exitOnTerminationSignals(): void {
+export function gracefulShutdown(
+	server: McpServer,
+	graceMs: number,
+	exit: (code: number) => void = (code) => process.exit(code),
+): (code: number) => Promise<void> {
+	let started: Promise<void> | undefined;
+	return (code) => {
+		started ??= new Promise<void>((resolve) => {
+			let done = false;
+			const finish = () => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				exit(code);
+				resolve();
+			};
+			const timer = setTimeout(finish, graceMs);
+			server.close().then(finish, (error: unknown) => {
+				const details = error instanceof Error ? error.message : String(error);
+				process.stderr.write(`Failed to close the server on shutdown: ${details}\n`);
+				finish();
+			});
+		});
+		return started;
+	};
+}
+
+/**
+ * End the process through `shutdown` on a termination signal, which runs exit hooks the default signal handling
+ * skips: an app that background input told it is active is told otherwise on the way out.
+ */
+function exitOnTerminationSignals(shutdown: (code: number) => Promise<void>): void {
 	const exitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
 	for (const [signal, code] of Object.entries(exitCodes)) {
-		process.once(signal, () => process.exit(code));
+		process.once(signal, () => void shutdown(code));
 	}
 }
