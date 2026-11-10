@@ -57,6 +57,15 @@ function errorMetadata(
 			suggestion: "Observe the app again and use only that snapshot's refs and token.",
 		};
 	}
+	// The session refuses an unassigned call on a worker's app before it runs: nothing was read or sent.
+	if (/^app ".+" is owned by worker ".+"/.test(message)) {
+		return {
+			code: "APP_OWNED_BY_WORKER",
+			retry: "safe",
+			suggestion:
+				"Nothing was sent. Act through run_worker or manage_workers observe for the worker named, or release it first.",
+		};
+	}
 	// The coordinator refuses these before any read or input, so nothing was sent and asking again is safe.
 	if (/^(?:app|worker) ".+" is already (?:owned|assigned)/.test(message)) {
 		return {

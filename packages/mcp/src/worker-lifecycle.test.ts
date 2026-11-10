@@ -193,7 +193,7 @@ describe("#given a worker run in flight #when its coordinator closes #then the c
 });
 
 describe("#given an assigned idle worker #when an unassigned call observes its app #then the worker keeps its token", () => {
-	it("refuses the unassigned observation naming the worker, and the worker's token still runs", async () => {
+	it("refuses the unassigned observation naming the worker, while the worker's own run, its outcome read and its next observe all pass", async () => {
 		const a = processAt(1);
 		try {
 			const [assigned] = await a.coordinator.assign([{ worker_id: "w", task: "task", app: "Finder" }]);
@@ -202,14 +202,26 @@ describe("#given an assigned idle worker #when an unassigned call observes its a
 				/app "Finder" is owned by worker "w"/,
 			);
 
+			// Described targets make the run read the tree again mid-run, as the live harness's run_worker does.
 			const run = await a.coordinator.run(
 				"w",
 				assigned?.observation_token ?? "",
-				[{ type: "type_text", text: "mine" }],
+				[
+					{ type: "click", target: { label: "Open" } },
+					{ type: "type_text", text: "mine" },
+				],
 				undefined,
 			);
 			expect(run.result.isError).not.toBe(true);
 			expect(sent(a.computer, "mine")).toBe(true);
+			const outcome = JSON.parse(
+				run.result.content[0]?.type === "text" ? run.result.content[0].text : "{}",
+			) as Record<string, unknown>;
+			expect(outcome["observationStatus"]).toBe("changed");
+			expect(outcome["paused"]).toBe(false);
+			expect(run.observation_token).toEqual(expect.any(String));
+			const again = await a.coordinator.observe("w");
+			expect(again.observation_token).toEqual(expect.any(String));
 		} finally {
 			await a.coordinator.close();
 		}

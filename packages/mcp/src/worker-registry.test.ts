@@ -178,6 +178,7 @@ describe("#given a worker lookup that fails before anything is sent #when the er
 		['worker "w" is busy', "WORKER_BUSY"],
 		['app "Finder" is already owned', "WORKER_CONFLICT"],
 		['app "Finder" is already owned by worker "one" in another opencua session', "WORKER_CONFLICT"],
+		['app "Finder" is owned by worker "one"; act through run_worker for that worker', "APP_OWNED_BY_WORKER"],
 	])("%s -> %s", (message, code) => {
 		const normalized = normalizeToolError({
 			isError: true,
@@ -186,6 +187,23 @@ describe("#given a worker lookup that fails before anything is sent #when the er
 		const text = normalized.content[0]?.type === "text" ? normalized.content[0].text : "";
 		expect(JSON.parse(text)).toMatchObject({ code, retry: "safe" });
 	});
+
+	it.each([
+		["worker-owned-elsewhere", "WORKER_OWNED_ELSEWHERE"],
+		["worker-running-elsewhere", "WORKER_RUNNING_ELSEWHERE"],
+	])(
+		"#given a lease refusal with reason %s #when normalized #then its code is %s and retry is safe",
+		(reason, code) => {
+			const normalized = normalizeToolError({
+				isError: true,
+				content: [
+					{ type: "text", text: JSON.stringify({ error: 'worker "w" refused', reason, actionDispatched: false }) },
+				],
+			});
+			const text = normalized.content[0]?.type === "text" ? normalized.content[0].text : "";
+			expect(JSON.parse(text)).toMatchObject({ code, retry: "safe" });
+		},
+	);
 });
 
 describe("#given shared-surface regions #when processes claim workers #then regions travel with the claim and must stay disjoint", () => {
