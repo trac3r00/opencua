@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import type { StopStatusSource } from "@opencua/core";
 import { vi, whenSettled } from "@opencua/test-support";
 import { WebSocket } from "ws";
 import { z } from "zod";
 import { BrowserBridge } from "./bridge.js";
-import type { BrowserCommand } from "./protocol.js";
+import { type BrowserCommand, BrowserError } from "./protocol.js";
 
 const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 const packetSchema = z.object({
@@ -274,6 +275,22 @@ describe("BrowserBridge", () => {
 		const waiting = bridge.waitForAgentControl(1000, cancellation.signal);
 		cancellation.abort();
 		await whenSettled(waiting, (settled) => expect(settled).resolves.toBe(false));
+	});
+
+	it("#given no paired extension #when a request arrives #then rejects with the pairing steps and extension path", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		bridges.push(bridge);
+		await bridge.listen(0);
+		const extensionDirectory = fileURLToPath(new URL("../extension", import.meta.url));
+		const failure = await bridge.request({ method: "handoff", reason: "login" }).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toBeInstanceOf(BrowserError);
+		if (!(failure instanceof BrowserError)) throw new Error("Expected a BrowserError");
+		expect(failure.code).toBe("disconnected");
+		expect(failure.message).toContain("opencua browser setup");
+		expect(failure.message).toContain(extensionDirectory);
 	});
 
 	it("#given a pending request #when the extension disconnects #then rejects without replay", async () => {

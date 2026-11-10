@@ -3,10 +3,14 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
 import type { StopStatusSource } from "@opencua/core";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { type BrowserCommand, BrowserError, type HandoffRequest, replySchema } from "./protocol.js";
+
+export const extensionDirectory = fileURLToPath(new URL("../extension", import.meta.url));
+export const NOT_CONNECTED = `The opencua browser extension is not connected. Ask the user to run \`opencua browser setup\` and load the unpacked extension from ${extensionDirectory} in Brave (chrome://extensions, Developer mode, Load unpacked), then call browser_status.`;
 
 const helloSchema = z.object({ token: z.string().max(128) });
 const eventSchema = z.discriminatedUnion("event", [
@@ -266,7 +270,7 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 			return Promise.reject(new BrowserError("stopped", "Browser request was cancelled. Do not replay input."));
 		const socket = this.socket;
 		if (socket === undefined || socket.readyState !== WebSocket.OPEN) {
-			return Promise.reject(new BrowserError("disconnected", "Pair the opencua browser extension first."));
+			return Promise.reject(new BrowserError("disconnected", NOT_CONNECTED));
 		}
 		if ((command.method === "open" || command.method === "run") && this.controlOwner === "human") {
 			return Promise.reject(this.humanControlError());

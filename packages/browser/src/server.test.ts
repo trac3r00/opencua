@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { once } from "node:events";
 import { createServer } from "node:net";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { vi } from "@opencua/test-support";
+import { WebSocket } from "ws";
 import { z } from "zod";
 import { BrowserBridge } from "./bridge.js";
 import * as connection from "./connection.js";
@@ -16,6 +19,16 @@ async function resolvedAtLeastOnce(spy: {
 }): Promise<boolean> {
 	const outcomes = await Promise.allSettled(spy.mock.results.map((result) => result.value));
 	return outcomes.some((outcome) => outcome.status === "fulfilled");
+}
+
+const extensionDirectory = fileURLToPath(new URL("../extension", import.meta.url));
+
+async function statusOf(client: Client): Promise<Record<string, unknown>> {
+	const result = await client.callTool({ name: "browser_status", arguments: {} });
+	const content = z.array(z.object({ type: z.literal("text"), text: z.string() })).parse(result.content);
+	const item = content[0];
+	if (item === undefined) throw new Error("Expected a status response");
+	return z.record(z.string(), z.unknown()).parse(JSON.parse(item.text));
 }
 
 describe("browser MCP contract", () => {
@@ -91,6 +104,38 @@ describe("browser MCP contract", () => {
 			"browser_wait",
 			"browser_wait_control",
 		]);
+	});
+
+	it("#given no paired extension #when checking status #then names the pairing next step", async () => {
+		const client = await harness();
+		const status = await statusOf(client);
+		expect(status["next_step"]).toEqual(expect.stringContaining("opencua browser setup"));
+		expect(status["next_step"]).toEqual(expect.stringContaining(extensionDirectory));
+	});
+
+	it("#given a paired extension #when checking status #then omits next_step", async () => {
+		const bridge = new BrowserBridge({ status: () => ({ stopped: false }) }, 1000, "a".repeat(64));
+		const port = await bridge.listen(0);
+		const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+			headers: { origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop" },
+		});
+		const server = createBrowserMcpServer(bridge);
+		const client = new Client({ name: "browser-test", version: "1" });
+		const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+		await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+		cleanups.push(async () => {
+			socket.terminate();
+			await client.close();
+			await server.close();
+			await bridge.close();
+		});
+		await once(socket, "open");
+		const ready = once(socket, "message");
+		socket.send(JSON.stringify({ token: "a".repeat(64) }));
+		await ready;
+		const status = await statusOf(client);
+		expect(status["connected"]).toBe(true);
+		expect(status).not.toHaveProperty("next_step");
 	});
 
 	it("#given no paired extension #when checking status #then reports disconnected without input", async () => {
