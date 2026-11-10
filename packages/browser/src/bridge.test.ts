@@ -55,14 +55,16 @@ describe("BrowserBridge", () => {
 		expect(bridge.connected).toBe(false);
 	});
 
-	it("#given a valid origin #when pairing with wrong auth #then refuses pairing", async () => {
+	it("#given a valid origin #when pairing with wrong auth #then refuses pairing with the code the extension recovers from", async () => {
 		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
 		bridges.push(bridge);
 		const socket = await connect(await bridge.listen(0));
 		clients.push(socket);
 		const closed = once(socket, "close");
 		socket.send(JSON.stringify({ token: "wrong" }));
-		expect(await closed).toBeDefined();
+		const [code, reason] = await closed;
+		expect(code).toBe(1008);
+		expect(String(reason)).toBe("Invalid pairing");
 		expect(bridge.connected).toBe(false);
 	});
 
