@@ -1,9 +1,14 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { connectionToken, readConnection, writeConnection } from "./connection.js";
+import { readBuildId, watchBuild } from "./reload.js";
 import { doctorBrowserService, installBrowserService, uninstallBrowserService } from "./service.js";
+
+/** Matches the RPC client timeout, so a request a client still waits on is never cut by a reload. */
+const RELOAD_DRAIN_MS = 20_000;
 
 const usage = "Usage: cua-browser <install|doctor|uninstall|serve|call <json>|status>";
 
@@ -19,9 +24,12 @@ async function serve(): Promise<void> {
 		import("./bridge.js"),
 		import("./controller.js"),
 	]);
+	const distDirectory = dirname(fileURLToPath(import.meta.url));
+	const buildDirectories = [distDirectory, resolve(distDirectory, "../../core/dist")].filter(existsSync);
+	const buildId = await readBuildId(buildDirectories);
 	const token = await connectionToken();
 	const bridge = new BrowserBridge(new StopSwitch(), 15000, token);
-	const controller = new BrowserController(bridge);
+	const controller = new BrowserController(bridge, buildId);
 	bridge.setRpcHandler((input, signal) => controller.dispatch(input, signal));
 	const configuredPort = process.env["OPENCUA_BROWSER_PORT"];
 	const port = z.coerce
@@ -37,9 +45,31 @@ async function serve(): Promise<void> {
 		await bridge.close();
 		throw error;
 	}
-	process.stderr.write(`Browser pairing token: ${token}\nBrowser RPC listening on 127.0.0.1:${actualPort}\n`);
+	process.stderr.write(
+		`Browser pairing token: ${token}\nBrowser RPC listening on 127.0.0.1:${actualPort} (build ${buildId})\n`,
+	);
 
+	const stopWatching = watchBuild({
+		directories: buildDirectories,
+		initialId: buildId,
+		onChange: (next) => {
+			stopWatching();
+			process.removeListener("SIGINT", onSigint);
+			process.removeListener("SIGTERM", onSigterm);
+			process.stderr.write(
+				`Browser build changed (${buildId} -> ${next}); draining and exiting so launchd restarts it.\n`,
+			);
+			void bridge.drain(RELOAD_DRAIN_MS).then(
+				() => process.exit(0),
+				(error: unknown) => {
+					reportError(error);
+					process.exit(1);
+				},
+			);
+		},
+	});
 	const close = async (): Promise<void> => {
+		stopWatching();
 		process.removeListener("SIGINT", onSigint);
 		process.removeListener("SIGTERM", onSigterm);
 		await bridge.close();

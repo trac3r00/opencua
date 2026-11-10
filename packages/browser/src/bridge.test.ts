@@ -425,4 +425,65 @@ describe("BrowserBridge", () => {
 		expect(await denied).toEqual({ checkpoint: packet.id, allowed: false });
 		expect(bridge.paused).toBe(false);
 	});
+
+	function rpc(port: number, body: unknown): Promise<Response> {
+		return fetch(`http://127.0.0.1:${port}/rpc`, {
+			method: "POST",
+			headers: { authorization: "Bearer secret", "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	it("#given an rpc in flight #when draining for a reload #then it finishes that rpc, refuses new ones, then closes", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		let entered: () => void = () => undefined;
+		const handling = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let release: (value: unknown) => void = () => undefined;
+		bridge.setRpcHandler(
+			() =>
+				new Promise((resolve) => {
+					release = resolve;
+					entered();
+				}),
+		);
+		const port = await bridge.listen(0);
+		const first = rpc(port, { action: "status" });
+		await handling;
+		let drained = false;
+		const draining = bridge.drain(10_000).then(() => {
+			drained = true;
+		});
+		const refused = await rpc(port, { action: "status" });
+		expect(refused.status).toBe(503);
+		expect(await refused.json()).toMatchObject({ error: "disconnected" });
+		expect(drained).toBe(false);
+		release({ finished: true });
+		const reply = await first;
+		expect(reply.status).toBe(200);
+		expect(await reply.json()).toEqual({ finished: true });
+		await draining;
+		await expect(rpc(port, { action: "status" })).rejects.toBeInstanceOf(Error);
+	});
+
+	it("#given an rpc that never settles #when draining #then closes once the bound passes", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		let entered: () => void = () => undefined;
+		const handling = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		bridge.setRpcHandler(() => {
+			entered();
+			return new Promise(() => undefined);
+		});
+		const port = await bridge.listen(0);
+		const stuck = rpc(port, { action: "status" }).then(
+			() => "answered",
+			() => "cut",
+		);
+		await handling;
+		await bridge.drain(50);
+		expect(await stuck).toBe("cut");
+	});
 });

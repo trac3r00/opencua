@@ -35,6 +35,12 @@ describe("browser task-space RPC", () => {
 		expect(await controller.dispatch({ action: "status" })).toMatchObject({ spaces: [] });
 	});
 
+	it("#given a daemon started from a build #when reading status #then reports that build id", async () => {
+		const bridge = new BrowserBridge({ status: () => ({ stopped: false }) });
+		const controller = new BrowserController(bridge, "3f9c2a1b7d4e");
+		expect(await controller.dispatch({ action: "status" })).toMatchObject({ build_id: "3f9c2a1b7d4e" });
+	});
+
 	it("#given an opening space #when finishing concurrently #then retains ownership until open settles", async () => {
 		const bridge = new BrowserBridge({ status: () => ({ stopped: false }) });
 		let release: (_value: unknown) => void = (_value) => undefined;

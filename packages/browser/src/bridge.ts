@@ -44,6 +44,8 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 	private reason: "taken_over" | "window_revealed" | "stopped" | undefined;
 	private handoff: HandoffRequest | undefined;
 	private epoch = 0;
+	private inFlight = 0;
+	private draining = false;
 	private readonly pending = new Map<
 		string,
 		{
@@ -130,6 +132,26 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 			);
 			return;
 		}
+		if (this.draining) {
+			response.writeHead(503, { "content-type": "application/json" }).end(
+				JSON.stringify({
+					error: "disconnected",
+					message: "The browser daemon is restarting to load an update. Retry in a few seconds.",
+				}),
+			);
+			return;
+		}
+		this.inFlight++;
+		try {
+			await this.answerRpc(request, response);
+		} finally {
+			this.inFlight--;
+			if (this.inFlight === 0) this.emit("idle");
+		}
+	}
+
+	private async answerRpc(request: IncomingMessage, response: ServerResponse): Promise<void> {
+		if (this.rpcHandler === undefined) return;
 		try {
 			const cancellation = new AbortController();
 			response.once("close", () => {
@@ -385,9 +407,27 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 		this.pending.clear();
 	}
 
+	/** Refuses new RPCs, lets in-flight ones finish for up to `timeoutMs`, then closes. */
+	async drain(timeoutMs: number): Promise<void> {
+		this.draining = true;
+		if (this.inFlight > 0) {
+			await new Promise<void>((resolve) => {
+				const finish = () => {
+					clearTimeout(timer);
+					this.removeListener("idle", finish);
+					resolve();
+				};
+				const timer = setTimeout(finish, timeoutMs);
+				this.once("idle", finish);
+			});
+		}
+		await this.close();
+	}
+
 	async close(): Promise<void> {
 		this.failPending(new BrowserError("disconnected", "Browser bridge closed"));
 		for (const client of this.wss.clients) client.terminate();
+		this.http.closeAllConnections();
 		await new Promise<void>((resolve) => this.wss.close(() => resolve()));
 		await new Promise<void>((resolve, reject) => this.http.close((error) => (error ? reject(error) : resolve())));
 	}
