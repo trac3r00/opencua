@@ -114,6 +114,8 @@ type WorkerState = {
 	};
 	readonly pid: number;
 	readonly session: string;
+	/** The registry lease this state stands for; undefined without a registry, or for an entry an older opencua wrote. */
+	lease: string | undefined;
 	busy: boolean;
 	control: WorkerControl;
 	activeRun: AbortController | undefined;
@@ -341,19 +343,23 @@ export class WorkerCoordinator {
 			pids.add(pid);
 		}
 
-		this.registry?.claim(
-			resolved.map(({ assignment, pid }) => ({
-				worker_id: workerKey(sessionId, assignment.worker_id),
-				task: assignment.task,
-				app: assignment.app,
-				...(assignment.agent_name === undefined ? {} : { agent_name: assignment.agent_name }),
-				...(assignment.parent_agent_name === undefined ? {} : { parent_agent_name: assignment.parent_agent_name }),
-				appPid: pid,
-				...(this.sharedApp(pid) ? { shared: true } : {}),
-				...(assignment.region === undefined ? {} : { region: assignment.region }),
-				ownerPid: process.pid,
-			})),
-		);
+		const registry = this.registry;
+		const leased =
+			registry?.claim(
+				resolved.map(({ assignment, pid }) => ({
+					worker_id: workerKey(sessionId, assignment.worker_id),
+					task: assignment.task,
+					app: assignment.app,
+					...(assignment.agent_name === undefined ? {} : { agent_name: assignment.agent_name }),
+					...(assignment.parent_agent_name === undefined
+						? {}
+						: { parent_agent_name: assignment.parent_agent_name }),
+					appPid: pid,
+					...(this.sharedApp(pid) ? { shared: true } : {}),
+					...(assignment.region === undefined ? {} : { region: assignment.region }),
+					ownerPid: registry.ownerPid,
+				})),
+			) ?? [];
 		const provisional = resolved.map(({ assignment, pid }) => {
 			const worker: WorkerState = {
 				assignment: {
@@ -371,6 +377,7 @@ export class WorkerCoordinator {
 				},
 				pid,
 				session: sessionId,
+				lease: leased.find((entry) => entry.worker_id === workerKey(sessionId, assignment.worker_id))?.lease,
 				busy: true,
 				control: "running",
 				activeRun: undefined,
@@ -516,15 +523,19 @@ export class WorkerCoordinator {
 		for (const worker of workers) this.forget(worker);
 	}
 
-	/** Drops a worker and retires its token, so a released worker's context cannot act again. */
+	/**
+	 * Drops a worker and retires its token, so a released worker's context cannot act again. The shared claim goes
+	 * first: when the registry refuses (another process assigned the worker, or is running it), nothing changes here
+	 * and the refusal names that process.
+	 */
 	private forget(worker: WorkerState): void {
 		const key = workerKey(worker.session, worker.assignment.worker_id);
+		this.registry?.release(key);
 		if (worker.assignment.observation_token !== undefined) {
 			this.session.revokeToken(worker.assignment.observation_token);
 		}
 		this.workers.delete(key);
 		this.adopted.delete(key);
-		this.registry?.release(key);
 	}
 
 	/** Take Over: cancel the worker's in-flight run between guarded steps and refuse new runs until resume. */
@@ -578,6 +589,10 @@ export class WorkerCoordinator {
 		if (worker.control !== "running") {
 			throw new WorkerControlRefusal(workerId, worker.control);
 		}
+		// Every opencua process sees the run through the shared busy marker: a release or a second run elsewhere waits
+		// for it, and one already in flight elsewhere refuses this one before anything changes here.
+		const key = workerKey(worker.session, worker.assignment.worker_id);
+		const sharedRun = this.registry?.beginRun(key);
 		worker.busy = true;
 		worker.assignment = { ...worker.assignment, observation_token: undefined };
 		const startedAt = new Date().toISOString();
@@ -686,6 +701,7 @@ export class WorkerCoordinator {
 		} finally {
 			worker.busy = false;
 			worker.activeRun = undefined;
+			if (sharedRun !== undefined) this.registry?.endRun(key, sharedRun);
 		}
 	}
 
@@ -785,15 +801,15 @@ export class WorkerCoordinator {
 	private lookup(workerId: string, sessionId = DEFAULT_WORKER_SESSION): WorkerState | undefined {
 		const key = workerKey(sessionId, workerId);
 		const cached = this.workers.get(key);
-		// An adopted worker lives only while its registry entry does: a release in the assigning process ends it here
-		// too, together with any token this process issued for it.
-		if (cached !== undefined && this.adopted.has(key) && this.registry?.find(key) === undefined) {
+		// An adopted worker lives only while the lease it was adopted under does: a release in the assigning process
+		// ends it here too, together with any token this process issued for it. A later claim of the same worker id by
+		// anyone is a different worker, adopted afresh below.
+		if (cached !== undefined && this.adopted.has(key) && this.registry?.find(key)?.lease !== cached.lease) {
 			if (cached.assignment.observation_token !== undefined) {
 				this.session.revokeToken(cached.assignment.observation_token);
 			}
 			this.workers.delete(key);
 			this.adopted.delete(key);
-			return undefined;
 		}
 		const local = this.workers.get(key);
 		const shared = local === undefined ? this.registry?.find(key) : undefined;
@@ -817,6 +833,7 @@ export class WorkerCoordinator {
 			},
 			pid: shared.appPid,
 			session: sessionId,
+			lease: shared.lease,
 			busy: false,
 			control: "running",
 			activeRun: undefined,

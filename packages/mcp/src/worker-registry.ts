@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** One assignment as every opencua-mcp process on this Mac sees it. */
-export interface SharedWorkerEntry {
+/** One assignment as its assigning process submits it; the registry stamps the lease. */
+export interface SharedWorkerClaim {
 	readonly worker_id: string;
 	readonly task: string;
 	readonly app: string;
@@ -18,16 +18,58 @@ export interface SharedWorkerEntry {
 	readonly ownerPid: number;
 }
 
+/** One assignment as every opencua-mcp process on this Mac sees it. */
+export interface SharedWorkerEntry extends SharedWorkerClaim {
+	/**
+	 * Minted when the claim is written: a worker id released and claimed again is a different lease, so a process
+	 * still holding the old one cannot mistake the new owner's worker for its own. Absent in a file an older
+	 * opencua wrote.
+	 */
+	readonly lease?: string;
+	/** The process running this worker right now; absent while it is idle. */
+	readonly busy?: SharedWorkerRun;
+}
+
+/** One run of a worker, in whichever process executes it. */
+export interface SharedWorkerRun {
+	readonly pid: number;
+	readonly run: string;
+}
+
 /**
  * Assignments shared across server processes, so a subagent whose session runs its own opencua-mcp can act for a
  * worker its coordinator assigned in another one, while an app still belongs to one worker at a time unless it is a
- * shared opencua-owned surface.
+ * shared opencua-owned surface. A claim belongs to the process that made it, and a run marks the worker busy for
+ * every process: release waits for both.
  */
 export interface WorkerRegistry {
-	/** Claims every entry or none: refuses a worker id or app another live process already holds. */
-	claim(entries: readonly SharedWorkerEntry[]): void;
+	/** The process this registry acts for: the owner it compares on release, and the runner it records. */
+	readonly ownerPid: number;
+	/** Claims every entry or none, each under a fresh lease: refuses a worker id or app another live process already holds. */
+	claim(entries: readonly SharedWorkerClaim[]): readonly SharedWorkerEntry[];
 	find(workerId: string): SharedWorkerEntry | undefined;
+	/**
+	 * Drops this process's claim. Refused when another live process owns the claim, or is running the worker:
+	 * the refusal names that process. A claim that is already gone is nothing to release.
+	 */
 	release(workerId: string): void;
+	/** Marks the worker busy in this process; refused while another live process runs it, or when its claim is gone. */
+	beginRun(workerId: string): SharedWorkerRun;
+	/** Clears the busy marker `run` set; a marker another run set since is left alone. */
+	endRun(workerId: string, run: SharedWorkerRun): void;
+}
+
+/** A release or run the shared registry refused: nothing was sent, and the message names the process in the way. */
+export class WorkerLeaseRefusal extends Error {
+	readonly actionDispatched = false;
+
+	constructor(
+		readonly reason: "worker-owned-elsewhere" | "worker-running-elsewhere",
+		message: string,
+	) {
+		super(message);
+		this.name = "WorkerLeaseRefusal";
+	}
 }
 
 export interface SharedRegion {
@@ -84,6 +126,17 @@ function lockOwner(lock: string): string | undefined {
 	}
 }
 
+/** `entry` with its busy marker cleared. */
+function idle({ busy: _busy, ...entry }: SharedWorkerEntry): SharedWorkerEntry {
+	return entry;
+}
+
+function isRun(value: unknown): value is SharedWorkerRun {
+	if (typeof value !== "object" || value === null) return false;
+	const run = value as Record<string, unknown>;
+	return Number.isSafeInteger(run["pid"]) && typeof run["run"] === "string";
+}
+
 function isEntry(value: unknown): value is SharedWorkerEntry {
 	if (typeof value !== "object" || value === null) return false;
 	const entry = value as Record<string, unknown>;
@@ -93,11 +146,21 @@ function isEntry(value: unknown): value is SharedWorkerEntry {
 		typeof entry["app"] === "string" &&
 		Number.isSafeInteger(entry["appPid"]) &&
 		Number.isSafeInteger(entry["ownerPid"]) &&
-		(entry["region"] === undefined || isRegion(entry["region"]))
+		(entry["region"] === undefined || isRegion(entry["region"])) &&
+		(entry["lease"] === undefined || typeof entry["lease"] === "string") &&
+		(entry["busy"] === undefined || isRun(entry["busy"]))
 	);
 }
 
-export function fileWorkerRegistry(directory: string, ownAlive: (pid: number) => boolean = alive): WorkerRegistry {
+/**
+ * `ownAlive` answers whether a process still runs, and `ownerPid` is the process this registry acts for; tests
+ * model several opencua processes over one directory by giving each registry its own.
+ */
+export function fileWorkerRegistry(
+	directory: string,
+	ownAlive: (pid: number) => boolean = alive,
+	ownerPid: number = process.pid,
+): WorkerRegistry {
 	const file = join(directory, "registry.json");
 	const lock = join(directory, "registry.lock");
 
@@ -184,7 +247,27 @@ export function fileWorkerRegistry(directory: string, ownAlive: (pid: number) =>
 				`the shared worker registry ${file} does not hold a valid worker list; remove it once no opencua session is running`,
 			);
 		}
-		return entries.filter((entry) => ownAlive(entry.ownerPid));
+		// A run in a process that exited is over, whatever the file still says.
+		return entries
+			.filter((entry) => ownAlive(entry.ownerPid))
+			.map((entry) => (entry.busy !== undefined && !ownAlive(entry.busy.pid) ? idle(entry) : entry));
+	};
+
+	/** The one process in the way of releasing or running `entry`, or undefined when this process may go ahead. */
+	const heldElsewhere = (entry: SharedWorkerEntry, action: "release" | "run"): WorkerLeaseRefusal | undefined => {
+		if (entry.busy !== undefined && entry.busy.pid !== ownerPid) {
+			return new WorkerLeaseRefusal(
+				"worker-running-elsewhere",
+				`worker "${entry.worker_id}" is running in another opencua session (process ${entry.busy.pid}); wait for that run to finish before you ${action} it`,
+			);
+		}
+		if (action === "release" && entry.ownerPid !== ownerPid) {
+			return new WorkerLeaseRefusal(
+				"worker-owned-elsewhere",
+				`worker "${entry.worker_id}" was assigned by another opencua session (process ${entry.ownerPid}); only that session can release it`,
+			);
+		}
+		return undefined;
 	};
 
 	const write = (entries: readonly SharedWorkerEntry[]): void => {
@@ -194,6 +277,7 @@ export function fileWorkerRegistry(directory: string, ownAlive: (pid: number) =>
 	};
 
 	return {
+		ownerPid,
 		claim: (entries) =>
 			locked(() => {
 				const current = read();
@@ -222,12 +306,39 @@ export function fileWorkerRegistry(directory: string, ownAlive: (pid: number) =>
 					}
 				}
 				const claimed = new Set(entries.map((entry) => entry.worker_id));
-				write([...current.filter((entry) => !claimed.has(entry.worker_id)), ...entries]);
+				const leased = entries.map((entry) => ({ ...entry, lease: randomUUID() }));
+				write([...current.filter((entry) => !claimed.has(entry.worker_id)), ...leased]);
+				return leased;
 			}),
 		find: (workerId) => read().find((entry) => entry.worker_id === workerId),
 		release: (workerId) =>
 			locked(() => {
-				write(read().filter((entry) => entry.worker_id !== workerId));
+				const current = read();
+				const entry = current.find((candidate) => candidate.worker_id === workerId);
+				if (entry === undefined) return;
+				const refusal = heldElsewhere(entry, "release");
+				if (refusal !== undefined) throw refusal;
+				write(current.filter((candidate) => candidate !== entry));
+			}),
+		beginRun: (workerId) =>
+			locked(() => {
+				const current = read();
+				const entry = current.find((candidate) => candidate.worker_id === workerId);
+				if (entry === undefined) {
+					throw new Error(`worker "${workerId}" is not assigned`);
+				}
+				const refusal = heldElsewhere(entry, "run");
+				if (refusal !== undefined) throw refusal;
+				const busy: SharedWorkerRun = { pid: ownerPid, run: randomUUID() };
+				write(current.map((candidate) => (candidate === entry ? { ...entry, busy } : candidate)));
+				return busy;
+			}),
+		endRun: (workerId, run) =>
+			locked(() => {
+				const current = read();
+				const entry = current.find((candidate) => candidate.worker_id === workerId);
+				if (entry === undefined || entry.busy?.run !== run.run) return;
+				write(current.map((candidate) => (candidate === entry ? idle(entry) : candidate)));
 			}),
 	};
 }
