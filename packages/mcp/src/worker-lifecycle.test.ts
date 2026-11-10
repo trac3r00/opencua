@@ -165,3 +165,29 @@ describe("#given an adopted worker run in flight #when its assigning process exi
 		}
 	});
 });
+
+describe("#given a worker run in flight #when its coordinator closes #then the claim outlives the input", () => {
+	it("keeps the app claimed until the in-flight call drains, then releases it", async () => {
+		const a = processAt(1);
+		const [assigned] = await a.coordinator.assign([{ worker_id: "w", task: "task", app: "Finder" }]);
+		const gate = gateOn(a.computer, "late");
+		const run = a.coordinator.run(
+			"w",
+			assigned?.observation_token ?? "",
+			[{ type: "type_text", text: "late" }],
+			undefined,
+		);
+		await gate.entered;
+
+		const closing = a.coordinator.close();
+		expect(a.registry.find("w")?.ownerPid).toBe(1);
+		expect(() => registryFor(3).claim([claimOf("x", 3)])).toThrow(/already owned by worker "w"/);
+
+		gate.open();
+		await run.catch(() => undefined);
+		await closing;
+		expect(sent(a.computer, "late")).toBe(true);
+		expect(a.registry.find("w")).toBeUndefined();
+		expect(() => registryFor(3).claim([claimOf("x", 3)])).not.toThrow();
+	});
+});

@@ -19,7 +19,7 @@ import { notificationsEnabled, postNotification } from "./notify.js";
 import { createRunStepDriver } from "./step-actions.js";
 import type { ToolResult } from "./tool-result.js";
 import type { RunStep } from "./tool-schemas.js";
-import type { SharedWorkerRun, WorkerRegistry } from "./worker-registry.js";
+import { type SharedWorkerRun, WorkerLeaseRefusal, type WorkerRegistry } from "./worker-registry.js";
 
 export type WorkerAssignmentInput = {
 	readonly worker_id: string;
@@ -73,6 +73,15 @@ export type WorkerObservationOptions = Omit<ObservationOptions, "includeAccessib
 
 /** Coordinators sharing one server name their workers per session; omitted means this one. */
 export const DEFAULT_WORKER_SESSION = "default";
+
+/** How long a closing coordinator keeps its claims while in-flight calls finish. */
+const CLOSE_DRAIN_MILLISECONDS = 30_000;
+
+function delayMilliseconds(milliseconds: number): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(resolve, milliseconds).unref();
+	});
+}
 
 /**
  * The default session keeps the bare worker id, so registry entries from other processes still match. A named session
@@ -286,6 +295,7 @@ export class WorkerCoordinator {
 	private readonly adopted = new Set<string>();
 	private attendedTail: Promise<void> = Promise.resolve();
 	private closed = false;
+	private closePromise: Promise<void> | undefined;
 
 	constructor(
 		private readonly session: GuardedSession,
@@ -728,13 +738,29 @@ export class WorkerCoordinator {
 		}
 	}
 
-	async close(): Promise<void> {
+	/**
+	 * Refuses new work at once, lets the session drain the calls already in flight (for at most
+	 * {@link CLOSE_DRAIN_MILLISECONDS}: a process on its way out cannot wait forever), and only then gives up this
+	 * process's claims, so no other process can take an app this one is still sending input to. A claim another
+	 * process is running stays with it; this process's exit frees it.
+	 */
+	close(): Promise<void> {
 		this.closed = true;
-		for (const workerId of this.workers.keys()) {
-			if (!this.adopted.has(workerId)) this.registry?.release(workerId);
-		}
-		this.workers.clear();
-		await this.session.close();
+		this.closePromise ??= (async () => {
+			const drained = this.session.close();
+			await Promise.race([drained, delayMilliseconds(CLOSE_DRAIN_MILLISECONDS)]);
+			for (const workerId of this.workers.keys()) {
+				if (this.adopted.has(workerId)) continue;
+				try {
+					this.registry?.release(workerId);
+				} catch (error: unknown) {
+					if (!(error instanceof WorkerLeaseRefusal)) throw error;
+				}
+			}
+			this.workers.clear();
+			await drained;
+		})();
+		return this.closePromise;
 	}
 
 	/**

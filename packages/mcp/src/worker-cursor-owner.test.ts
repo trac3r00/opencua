@@ -18,10 +18,15 @@ const declarations = source.statements.filter(
 		(ts.isClassDeclaration(statement) &&
 			(statement.name?.text === "WorkerCoordinator" || statement.name?.text === "WorkerLeaseLost")) ||
 		(ts.isFunctionDeclaration(statement) &&
-			(statement.name?.text === "payload" || statement.name?.text === "workerKey")) ||
+			(statement.name?.text === "payload" ||
+				statement.name?.text === "workerKey" ||
+				statement.name?.text === "delayMilliseconds")) ||
 		(ts.isVariableStatement(statement) &&
 			statement.declarationList.declarations.some(
-				(declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === "DEFAULT_WORKER_SESSION",
+				(declaration) =>
+					ts.isIdentifier(declaration.name) &&
+					(declaration.name.text === "DEFAULT_WORKER_SESSION" ||
+						declaration.name.text === "CLOSE_DRAIN_MILLISECONDS"),
 			)),
 );
 const compiled = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
@@ -50,6 +55,8 @@ describe("#given named workers #when assigned #then virtual cursor ownership use
 				exports: {},
 				randomUUID: () => `test-id-${++nextId}`,
 				withCursorIdentity,
+				WorkerLeaseRefusal: class extends Error {},
+				setTimeout,
 				isOwnedSurfacePid: () => false,
 				resolveAppPid: async (_computer: unknown, app: string) => (app === "First" ? 101 : 202),
 				computer: { delivery: "background" },
