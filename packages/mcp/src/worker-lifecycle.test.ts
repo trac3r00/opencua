@@ -129,3 +129,39 @@ describe("#given a worker id released and claimed again by a third process #when
 		}
 	});
 });
+
+describe("#given an adopted worker run in flight #when its assigning process exits and a third process claims the app #then the run stops", () => {
+	it("sends no step after the lease is gone and reports the loss", async () => {
+		registryFor(1).claim([claimOf("w", 1)]);
+		const b = processAt(2);
+		const gate = gateOn(b.computer, "first");
+		try {
+			const adopted = await b.coordinator.observe("w");
+			const run = b.coordinator.run(
+				"w",
+				adopted.observation_token ?? "",
+				[
+					{ type: "type_text", text: "first" },
+					{ type: "type_text", text: "late" },
+				],
+				undefined,
+			);
+			await gate.entered;
+			dead.add(1);
+			registryFor(3).claim([claimOf("x", 3)]);
+			gate.open();
+
+			const outcome = await run.then(
+				(result) => JSON.stringify(result.result),
+				(error: unknown) => (error instanceof Error ? error.message : String(error)),
+			);
+			expect(outcome).toMatch(/lost its lease mid-run: .*earlier steps of this run were sent/);
+			expect(outcome).toMatch(/"stoppedEarly\\":true/);
+			expect(sent(b.computer, "first")).toBe(true);
+			expect(sent(b.computer, "late")).toBe(false);
+		} finally {
+			gate.open();
+			await b.coordinator.close();
+		}
+	});
+});

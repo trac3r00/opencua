@@ -15,7 +15,8 @@ const source = ts.createSourceFile(
 );
 const declarations = source.statements.filter(
 	(statement) =>
-		(ts.isClassDeclaration(statement) && statement.name?.text === "WorkerCoordinator") ||
+		(ts.isClassDeclaration(statement) &&
+			(statement.name?.text === "WorkerCoordinator" || statement.name?.text === "WorkerLeaseLost")) ||
 		(ts.isFunctionDeclaration(statement) &&
 			(statement.name?.text === "payload" || statement.name?.text === "workerKey")) ||
 		(ts.isVariableStatement(statement) &&

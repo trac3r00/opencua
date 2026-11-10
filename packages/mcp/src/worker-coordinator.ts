@@ -19,7 +19,7 @@ import { notificationsEnabled, postNotification } from "./notify.js";
 import { createRunStepDriver } from "./step-actions.js";
 import type { ToolResult } from "./tool-result.js";
 import type { RunStep } from "./tool-schemas.js";
-import type { WorkerRegistry } from "./worker-registry.js";
+import type { SharedWorkerRun, WorkerRegistry } from "./worker-registry.js";
 
 export type WorkerAssignmentInput = {
 	readonly worker_id: string;
@@ -240,6 +240,28 @@ function pointerTargets(step: RunStep): readonly PointerTarget[] | undefined {
 				: [{ element: parseElementIndex(step.element_index), what: `runs ${step.type} on element` }];
 		default:
 			return [];
+	}
+}
+
+/**
+ * The worker's shared claim ended or changed hands while its run was in flight: this step and the steps after it were
+ * not sent. `actionDispatched` says whether earlier steps of the same run were.
+ */
+export class WorkerLeaseLost extends Error {
+	readonly reason = "worker-lease-lost";
+
+	constructor(
+		workerId: string,
+		readonly actionDispatched: boolean,
+	) {
+		super(
+			`worker "${workerId}" lost its lease mid-run: its assigning opencua session ended or its app changed hands; ${
+				actionDispatched
+					? "earlier steps of this run were sent, but this step and the steps after it were not"
+					: "nothing was sent"
+			}. Do not retry; report back`,
+		);
+		this.name = "WorkerLeaseLost";
 	}
 }
 
@@ -604,7 +626,8 @@ export class WorkerCoordinator {
 				: AbortSignal.any([executionOptions.signal, activeRun.signal]);
 		const region = worker.assignment.region;
 		try {
-			const driver = createRunStepDriver(this.computer);
+			const bare = createRunStepDriver(this.computer);
+			const driver = sharedRun === undefined ? bare : this.leasedDriver(bare, worker, sharedRun);
 			const dispatch = () =>
 				withCursorIdentity(
 					worker.assignment.cursor_id,
@@ -712,6 +735,28 @@ export class WorkerCoordinator {
 		}
 		this.workers.clear();
 		await this.session.close();
+	}
+
+	/**
+	 * The driver for a worker another opencua process may take over: the shared claim is read right before each
+	 * step's input goes out, and a step whose lease is gone (its assigning process exited and the app was claimed
+	 * again, or the marker was cleared) is refused together with every step after it.
+	 */
+	private leasedDriver(driver: RunStepDriver, worker: WorkerState, run: SharedWorkerRun): RunStepDriver {
+		const key = workerKey(worker.session, worker.assignment.worker_id);
+		let dispatched = false;
+		return {
+			...driver,
+			dispatch: async (step, targetPid, observation, actions, options) => {
+				const entry = this.registry?.find(key);
+				if (entry === undefined || entry.lease !== worker.lease || entry.busy?.run !== run.run) {
+					throw new WorkerLeaseLost(worker.assignment.worker_id, dispatched);
+				}
+				const result = await driver.dispatch(step, targetPid, observation, actions, options);
+				if (step.type !== "reveal" && step.type !== "wait_for") dispatched = true;
+				return result;
+			},
+		};
 	}
 
 	/**
