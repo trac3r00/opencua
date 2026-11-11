@@ -50,6 +50,29 @@ describe("tool error normalization", () => {
 		expect(retryFor('{"reason":"window-missing"}')).toBe("unsafe");
 	});
 
+	it("#given an app that is not running #when normalizing #then nothing was sent and the agent is told to open it", () => {
+		const result = normalizeToolError({
+			isError: true,
+			content: [{ type: "text", text: '{"error":"No running app matched \\"Aside\\""}' }],
+		});
+		const text = result.content[0];
+		const payload = text?.type === "text" ? JSON.parse(text.text) : undefined;
+		expect(payload).toMatchObject({
+			ok: false,
+			code: "APP_NOT_RUNNING",
+			retry: "safe",
+			disposition: { retry: "safe" },
+		});
+		expect(payload.suggestion).toContain("open_app");
+		// Input that already went out keeps the post-dispatch envelope even when the app then vanished.
+		const after = normalizeToolError({
+			isError: true,
+			content: [{ type: "text", text: '{"actionDispatched":true,"error":"No running app matched pid 42"}' }],
+		});
+		const afterText = after.content[0];
+		expect(afterText?.type === "text" && JSON.parse(afterText.text).code).toBe("POST_ACTION_ERROR");
+	});
+
 	it("#given a report appended after the failure #when normalizing #then the error payload is the one annotated", () => {
 		const result = normalizeToolError({
 			isError: true,

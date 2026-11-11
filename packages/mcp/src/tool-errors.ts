@@ -57,6 +57,17 @@ function errorMetadata(
 			suggestion: "Observe the app again and use only that snapshot's refs and token.",
 		};
 	}
+	// App resolution fails before any read or input: the app is closed, not unusable. Without this the
+	// generic envelope told agents "delivery status unknown" for a read of a closed browser, and they
+	// gave up on that browser instead of opening it.
+	if (message.startsWith("No running app matched")) {
+		return {
+			code: "APP_NOT_RUNNING",
+			retry: "safe",
+			suggestion:
+				"Nothing was sent: the app is not running. Open it with open_app (list_apps shows what is installed and running), then observe it again.",
+		};
+	}
 	// The coordinator refuses these before any read or input, so nothing was sent and asking again is safe.
 	if (/^(?:app|worker) ".+" is already (?:owned|assigned)/.test(message)) {
 		return {
