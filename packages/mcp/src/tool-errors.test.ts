@@ -64,6 +64,17 @@ describe("tool error normalization", () => {
 			disposition: { retry: "safe" },
 		});
 		expect(payload.suggestion).toContain("open_app");
+		// get_app_state's real payload carries no actionDispatched (app resolution runs before any input);
+		// an explicit false reaches the same code.
+		const explicit = normalizeToolError({
+			isError: true,
+			content: [{ type: "text", text: '{"actionDispatched":false,"error":"No running app matched \\"Aside\\""}' }],
+		});
+		const explicitText = explicit.content[0];
+		expect(explicitText?.type === "text" && JSON.parse(explicitText.text)).toMatchObject({
+			code: "APP_NOT_RUNNING",
+			retry: "safe",
+		});
 		// Input that already went out keeps the post-dispatch envelope even when the app then vanished.
 		const after = normalizeToolError({
 			isError: true,

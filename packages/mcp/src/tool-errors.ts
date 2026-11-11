@@ -65,7 +65,7 @@ function errorMetadata(
 			code: "APP_NOT_RUNNING",
 			retry: "safe",
 			suggestion:
-				"Nothing was sent: the app is not running. Open it with open_app (list_apps shows what is installed and running), then observe it again.",
+				"Nothing was sent: the app is not running. Open it with open_app, which launches an installed app by name or bundle id, then observe it again.",
 		};
 	}
 	// The coordinator refuses these before any read or input, so nothing was sent and asking again is safe.
