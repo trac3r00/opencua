@@ -69,6 +69,11 @@ const CANDIDATES: readonly BrowserInstall[] = [
 		appPath: "/Applications/Chromium.app",
 		extensionsUrl: "chrome://extensions",
 	},
+	{
+		name: "Aside",
+		appPath: "/Applications/Aside.app",
+		extensionsUrl: "chrome://extensions",
+	},
 ];
 
 export function detectChromiumBrowsers(home = homedir()): readonly BrowserInstall[] {
@@ -199,7 +204,7 @@ export async function setupBrowser(
 	const instructions = browserSetupInstructions(selected, extensionPath);
 	report(instructions);
 	if (selected === undefined) {
-		report("No supported Chromium browser was found. Install Brave, Chrome, Edge, Arc, Vivaldi, or Chromium.");
+		report("No supported Chromium browser was found. Install Brave, Chrome, Edge, Arc, Vivaldi, Chromium, or Aside.");
 	} else if (!opened) {
 		report(`Open ${selected.extensionsUrl} manually in ${selected.name}.`);
 	}
@@ -222,7 +227,7 @@ export function registerBrowserCommands(program: Command, options: BrowserComman
 		.description("Build, install, and pair the background Chromium extension; prints the one human step")
 		.option("--no-wait", "print the setup step and exit instead of waiting for the extension to connect")
 		.option("--no-open", "do not open the browser's extensions page in the background")
-		.option("--browser <name>", "Brave, Google Chrome, Microsoft Edge, Arc, Vivaldi, or Chromium")
+		.option("--browser <name>", "Brave, Google Chrome, Microsoft Edge, Arc, Vivaldi, Chromium, or Aside")
 		.option("--extension <path>", "use this unpacked extension directory")
 		.action(async (flags: { wait: boolean; open: boolean; browser?: string; extension?: string }) => {
 			const report = options.isJsonOutput()
