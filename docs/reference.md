@@ -100,7 +100,7 @@ From then on one command covers the whole lifecycle:
 | Command | What it does |
 |---|---|
 | `opencua config` | Choose the apps agents may use and the MCP clients to register with; asks in a terminal, takes flags in scripts |
-| `opencua permissions grant` | Walk through Accessibility, Screen Recording and Automation for **opencua-mcp**: shows macOS's dialog, opens System Settings and waits until each switch is on |
+| `opencua permissions grant` | Walk through Accessibility, Screen Recording and Automation for **opencua-mcp**: shows macOS's dialog, opens System Settings with a panel attached to drag **opencua-mcp** into the list when it is missing there, and waits until each switch is on |
 | `opencua doctor [--fix]` | Check everything without raising a permission prompt; `--fix` repairs what is safe and asks before the rest |
 | `opencua update` | Fast-forward the checkout, rerun setup, re-apply the registrations, run the doctor |
 | `opencua uninstall` | Remove the registrations (backed up), the helper and its permissions, the command and its PATH line, `~/.opencua`, and the checkout the installer made |
@@ -215,7 +215,8 @@ Installed. One manual step remains, granting permissions to "opencua-mcp":
 
 `opencua doctor --fix` rebuilds missing or outdated native binaries and re-registers clients whose entry went stale.
 It asks before rebuilding a broken helper, because a rebuild is a new code identity that needs both permissions again
-(`--rebuild-helper` consents up front), and before lifting a stop. It runs the permission walk-through for anything
+(`--rebuild-helper` consents up front; for an ad-hoc signed helper that holds grants it warns which ones a rebuild
+drops and rebuilds only with `--rebuild-helper`), and before lifting a stop. It runs the permission walk-through for anything
 missing, also without a terminal (an agent running it): each pane opens and the walk moves on by itself as soon as the
 switch is on. On CI, on a locked screen or with `--no-wait` it only opens the first pane and lists the rest
 (`--no-open` never opens System Settings). It ends with what it fixed and what is left.
