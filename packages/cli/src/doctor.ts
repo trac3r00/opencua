@@ -83,7 +83,12 @@ export interface NativeBinaryFacts {
 export interface HelperFacts {
 	readonly app: string;
 	readonly present: boolean;
-	readonly signature: { readonly valid: boolean; readonly detail: string };
+	readonly signature: {
+		readonly valid: boolean;
+		readonly detail: string;
+		/** Signed ad hoc: every rebuild is a new app to macOS, so it loses the permissions granted to this build. */
+		readonly adHoc?: boolean | undefined;
+	};
 	readonly bundledNode: { readonly version: string } | { readonly error: string };
 	/** The inputs digest the helper was built from and the one this checkout would build now; undefined for a helper built before the stamp existed. */
 	readonly inputs?: { readonly built: string; readonly current: string | undefined } | undefined;
@@ -919,13 +924,18 @@ export function gatherDoctorFacts(layout: Layout = resolveLayout(), env: Environ
 	const launcher = layout.helperExecutable;
 	const bundledNodePath = join(layout.helperApp, "Contents/Resources/node");
 	const present = existsSync(launcher) && existsSync(bundledNodePath);
-	let signature = { valid: false, detail: "not checked" };
+	let signature: HelperFacts["signature"] = { valid: false, detail: "not checked" };
 	let bundledNode: HelperFacts["bundledNode"] = { error: "not checked" };
 	if (present) {
 		const verify = spawnSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", layout.helperApp], {
 			encoding: "utf8",
 		});
-		signature = { valid: verify.status === 0, detail: verify.status === 0 ? "valid" : processFailure(verify) };
+		const described = spawnSync("/usr/bin/codesign", ["-dv", layout.helperApp], { encoding: "utf8" });
+		signature = {
+			valid: verify.status === 0,
+			detail: verify.status === 0 ? "valid" : processFailure(verify),
+			adHoc: described.status === 0 && /^Signature=adhoc$/m.test(described.stderr),
+		};
 		const version = spawnSync(bundledNodePath, ["--version"], { encoding: "utf8", timeout: SELF_CHECK_TIMEOUT_MS });
 		bundledNode = version.status === 0 ? { version: version.stdout.trim() } : { error: processFailure(version) };
 	}

@@ -99,6 +99,22 @@ function paneFor(checkId: string): { readonly url: string; readonly pane: string
 }
 
 /**
+ * The permissions an ad-hoc signed helper holds now. Any rebuild of it is a new code identity to macOS, so all of
+ * them stop applying; empty when the helper is signed with a stable identity or holds nothing.
+ */
+export function grantsLostOnRebuild(facts: DoctorFacts): string[] {
+	if (facts.helper.signature.adHoc !== true || facts.selfCheck?.ok !== true) {
+		return [];
+	}
+	const { permissions } = facts.selfCheck.report;
+	return [
+		permissions.accessibility ? "Accessibility" : undefined,
+		permissions.screenRecording ? "Screen Recording" : undefined,
+		permissions.inputMonitoring === true ? "Input Monitoring" : undefined,
+	].filter((label) => label !== undefined);
+}
+
+/**
  * Repairs what is safe to repair, asks before what is not, and reports what is left. Every effect goes through
  * `deps`, so the plan and its consent rules are testable without touching the Mac.
  */
@@ -125,15 +141,25 @@ export async function runDoctorFix(options: FixOptions, deps: FixDependencies): 
 				break;
 			}
 			case "helper": {
+				const lost = grantsLostOnRebuild(facts);
+				if (lost.length > 0) {
+					deps.print(
+						`  warning: "${HELPER_DISPLAY_NAME}" is signed ad hoc and holds ${lost.join(", ")} now. Rebuilding it makes a new app to macOS, so those grants stop applying and you grant them again (${GRANT_COMMAND}). To keep grants across later rebuilds, create the signing identity first: scripts/create-signing-identity.sh in the checkout.`,
+					);
+				}
+				// Dropping grants a person already made takes --rebuild-helper; a yes to a general question is not enough.
 				const consent =
 					options.rebuildHelper ||
-					(options.interactive &&
+					(lost.length === 0 &&
+						options.interactive &&
 						(await deps.ask(
 							"Rebuild the helper app now (grants carry over with the opencua dev signing identity; with an ad-hoc build macOS asks for Screen Recording and Accessibility again)",
 						)));
 				if (!consent) {
 					deps.print(
-						"  skipped: rebuilding the helper needs your consent, because an ad-hoc build makes macOS ask for Screen Recording and Accessibility again. Run: opencua doctor --fix --rebuild-helper",
+						lost.length > 0
+							? "  skipped: rebuilding now drops the grants above, so it runs only with --rebuild-helper. Run: opencua doctor --fix --rebuild-helper"
+							: "  skipped: rebuilding the helper needs your consent, because an ad-hoc build makes macOS ask for Screen Recording and Accessibility again. Run: opencua doctor --fix --rebuild-helper",
 					);
 					skipped.push(`${repair.title} (needs your consent: opencua doctor --fix --rebuild-helper)`);
 					break;

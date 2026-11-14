@@ -79,7 +79,7 @@ jobs:
       - name: Native binaries are universal, target macOS 15, and build on this runner
         run: |
           check_natives() {
-            for binary in libsckit.dylib cursor-overlay history-recorder; do
+            for binary in libsckit.dylib cursor-overlay history-recorder permission-drag; do
               path="packages/core/native/$binary"
               lipo "$path" -verify_arch arm64 x86_64
               minos="$(otool -l "$path" | awk '$1 == "minos" { print $2; exit }')"

@@ -4,6 +4,8 @@
 #
 #   libsckit.dylib   ScreenCaptureKit capture shim.
 #   cursor-overlay   the agent cursor overlay.
+#   permission-drag  the panel `opencua permissions grant` attaches to System Settings, to drag the helper app
+#                    into a Privacy & Security list.
 #
 # Both target macOS 15.0, the oldest macOS opencua supports. Calling an API newer than that without an
 # @available check is a build error, which keeps the target true. The script ends by recording the hashes of
@@ -19,7 +21,7 @@ architectures=(-arch arm64 -arch x86_64)
 deployment_target=(-mmacosx-version-min=15.0)
 availability_errors=(-Werror=unguarded-availability -Werror=unguarded-availability-new)
 
-for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m; do
+for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m permission-drag.m; do
 	if [[ ! -f "${native_dir}/${source}" ]]; then
 		echo "error: missing ${native_dir}/${source}" >&2
 		exit 1
@@ -87,6 +89,19 @@ clang \
 	-o "${native_dir}/opencua-surface"
 echo "built ${native_dir}/opencua-surface ($(lipo -archs "${native_dir}/opencua-surface"))"
 
+clang \
+	"${architectures[@]}" \
+	-O2 \
+	-fobjc-arc \
+	"${deployment_target[@]}" \
+	"${availability_errors[@]}" \
+	-framework AppKit \
+	-framework Foundation \
+	-framework CoreGraphics \
+	"${native_dir}/permission-drag.m" \
+	-o "${native_dir}/permission-drag"
+echo "built ${native_dir}/permission-drag ($(lipo -archs "${native_dir}/permission-drag"))"
+
 # Copied into agent-owned guests (Apple virtual Macs, always arm64) by the isolated server; never run on the host.
 clang \
 	-arch arm64 \
@@ -100,7 +115,7 @@ clang \
 	-o "${native_dir}/guest-axdump"
 echo "built ${native_dir}/guest-axdump ($(lipo -archs "${native_dir}/guest-axdump"))"
 
-(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m >build-inputs.sha256)
+(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m permission-drag.m >build-inputs.sha256)
 echo "recorded input hashes in ${native_dir}/build-inputs.sha256"
 
 # Sign the helpers with the stable identity (see scripts/sign-native.sh): ad-hoc builds change
@@ -108,7 +123,8 @@ echo "recorded input hashes in ${native_dir}/build-inputs.sha256"
 bash "$native_dir/../../../scripts/sign-native.sh" \
 	"$native_dir/libsckit.dylib" \
 	"$native_dir/cursor-overlay" \
-	"$native_dir/opencua-surface"
+	"$native_dir/opencua-surface" \
+	"$native_dir/permission-drag"
 
 # The always-on history watcher runs as its own launchd process, so it would otherwise get its own
 # TCC entry and need Accessibility and Input Monitoring granted separately. Signing it with the
