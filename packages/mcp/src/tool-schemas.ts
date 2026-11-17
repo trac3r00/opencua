@@ -21,6 +21,12 @@ const MAX_FIND_RESULTS = 25;
 
 export const emptySchema = z.object({});
 
+export const runAppleScriptSchema = z.object({
+	source: z.string().min(1),
+	language: z.enum(["applescript", "javascript"]).optional(),
+	timeout_ms: z.number().int().min(1).max(120_000).optional(),
+});
+
 export const listWindowsSchema = z.object({
 	app: appSchema.optional().describe("Only this app's windows: name, bundle id or pid. Omit to list every app's."),
 });

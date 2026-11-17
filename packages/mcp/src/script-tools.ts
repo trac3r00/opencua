@@ -6,6 +6,7 @@ import { parseElementIndex } from "@opencua/core";
 import { activeSpaceId, managedDisplaySpaces, spaceTypeFor } from "@opencua/core";
 import type { DockAction, DockSnapshot, ElementQuery, GuardedComputerInterface, TopLevelWindow } from "@opencua/core";
 import { z } from "zod/v4";
+import type { AppleScriptGuardSession } from "./applescript-session.js";
 import type { DockGuardSession } from "./dock-session.js";
 import type { ExtrasGuardSession } from "./extras-session.js";
 import type { GuardedSession, RunPace, RunStepDriver, VerifyCheckRequest, VerifyRequest } from "./guarded-session.js";
@@ -59,7 +60,7 @@ Targets are observed ids or unique queries {role,label,label_contains,value_cont
 app.waitFor(target|{window_title},options); app.verify(checks,options); app.step(step); app.batch(steps,options); app.chain(steps) (fast; batch verifies intermediate targets by default); app.reveal(query,findOptions) only scrolls.
 Find options: scrollWithin,maxPages,vision,direction. OCR needs Screen Recording and finds click targets, not AX values.
 const dock=apple.dock(); await dock.observe(); dock.click/showMenu/cancel(target). Dock actions need explicit approval and attended delivery.
-apple.terminal(): run/read; approval required.
+apple.terminal(): run/read; approval required. apple.osascript(source,{language,args,timeoutMs}): AppleScript/JXA; screen-taking statements refused.
 apple.spaces(): active()/displays() read-only; apple.menubar(): observe(), press(observedId), guarded.
 Refusals throw ScriptActionError; read_only forbids mutations. Timeout/cancellation stop input. Attended actions serialize; background apps overlap. Returns {ok,value,log,actions}.`;
 
@@ -366,8 +367,29 @@ class ScriptRun {
 		private readonly dockSession?: DockGuardSession,
 		private readonly terminalSession?: TerminalGuardSession,
 		private readonly extrasSession?: ExtrasGuardSession,
+		private readonly appleScriptSession?: AppleScriptGuardSession,
 	) {
 		this.nextAction = 1;
+	}
+
+	osascript(source: unknown, options: unknown): Promise<unknown> {
+		return this.queue("osascript", async () => {
+			if (this.options.readOnly) throw this.refuseDock("read-only", "osascript is refused in a read-only run");
+			const appleScriptSession = this.appleScriptSession;
+			if (appleScriptSession === undefined)
+				throw this.refuseDock("applescript-unavailable", "AppleScript is unavailable in this server");
+			const fields = isRecord(options) ? options : {};
+			return await this.execTerminal(
+				"osascript",
+				async () =>
+					await appleScriptSession.run(source, {
+						language: fields["language"],
+						args: fields["args"],
+						timeoutMs: fields["timeoutMs"] ?? fields["timeout_ms"],
+					}),
+				"osascript",
+			);
+		});
 	}
 
 	terminalRun(command: unknown): Promise<unknown> {
@@ -476,7 +498,11 @@ class ScriptRun {
 		return next;
 	}
 
-	private async execTerminal(kind: string, call: () => Promise<ToolResult> | ToolResult): Promise<unknown> {
+	private async execTerminal(
+		kind: string,
+		call: () => Promise<ToolResult> | ToolResult,
+		app = "Terminal",
+	): Promise<unknown> {
 		const startedAt = Date.now();
 		const n = this.nextAction++;
 		const result = await call();
@@ -484,7 +510,7 @@ class ScriptRun {
 		const failure = describeFailure(result, isRecord(payload) ? payload : {});
 		this.actions.push({
 			n,
-			app: "Terminal",
+			app,
 			kind,
 			ms: Date.now() - startedAt,
 			status: failure === undefined ? "ok" : `refused:${failure.refused ?? "failed"}`,
@@ -1100,6 +1126,8 @@ async function perform(
 			return await run.terminalRun(first);
 		case "terminalRead":
 			return await run.terminalRead(first);
+		case "osascript":
+			return await run.osascript(first, second);
 		case "spacesActive":
 			return run.spacesActive();
 		case "spacesDisplays":
@@ -1198,6 +1226,7 @@ export function registerScriptTools(
 	dockSession?: DockGuardSession,
 	terminalSession?: TerminalGuardSession,
 	extrasSession?: ExtrasGuardSession,
+	appleScriptSession?: AppleScriptGuardSession,
 ): void {
 	warmWorker();
 	server.registerTool(
@@ -1230,6 +1259,7 @@ export function registerScriptTools(
 				dockSession,
 				terminalSession,
 				extrasSession,
+				appleScriptSession,
 			);
 			try {
 				const outcome = controller.signal.aborted

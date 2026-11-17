@@ -24,6 +24,7 @@ import type {
 	WindowProbe,
 } from "@opencua/core";
 import { resolveStateDir } from "@opencua/core/stop";
+import { AppleScriptGuardSession } from "./applescript-session.js";
 import { registerCapabilityTools, registerSkillResources } from "./capability-tools.js";
 import { registerDecisionTools } from "./decision-tools.js";
 import { elementQueryFromInput, registerDesktopMutationTools } from "./desktop-mutation-tools.js";
@@ -58,6 +59,7 @@ import {
 	getAppStateSchema,
 	listWindowsSchema,
 	openAppSchema,
+	runAppleScriptSchema,
 	verifyStateSchema,
 } from "./tool-schemas.js";
 import { ToolUsageRegistry, installToolTiming } from "./tool-timing.js";
@@ -79,6 +81,7 @@ class ComputerMcpServer extends McpServer {
 		private readonly session: GuardedSession,
 		private readonly dockSession: DockGuardSession,
 		private readonly terminalSession: TerminalGuardSession,
+		private readonly appleScriptSession: AppleScriptGuardSession,
 		private readonly extrasSession: ExtrasGuardSession,
 		private readonly stopChord: { stop(): void } | undefined,
 		private readonly workers: WorkerCoordinator,
@@ -94,6 +97,8 @@ class ComputerMcpServer extends McpServer {
 			});
 			this.dockSession.close();
 			this.terminalSession.close();
+			this.appleScriptSession.close();
+			this.appleScriptSession.close();
 			this.extrasSession.close();
 		};
 	}
@@ -103,6 +108,7 @@ class ComputerMcpServer extends McpServer {
 		this.session.invalidate();
 		this.dockSession.close();
 		this.terminalSession.close();
+		this.appleScriptSession.close();
 		this.extrasSession.close();
 		await super.close();
 		await this.workers.close();
@@ -165,6 +171,12 @@ export function createMcpServer(
 		...(options?.terminalRead === undefined ? {} : { readText: options.terminalRead }),
 		...(stopGate === undefined ? {} : { stopSwitch: stopGate }),
 	});
+	const appleScriptSession = new AppleScriptGuardSession({
+		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
+		delivery: resolvedComputer.delivery ?? "background",
+		...(options?.osascriptRunner === undefined ? {} : { runner: options.osascriptRunner }),
+		...(stopGate === undefined ? {} : { stopSwitch: stopGate }),
+	});
 	const extrasSession = new ExtrasGuardSession(options?.extrasSource, {
 		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
 		delivery: resolvedComputer.delivery ?? "background",
@@ -182,6 +194,7 @@ export function createMcpServer(
 		session,
 		dockSession,
 		terminalSession,
+		appleScriptSession,
 		extrasSession,
 		stopChord,
 		workers,
@@ -241,7 +254,7 @@ export function createMcpServer(
 		"list_windows",
 		{
 			description:
-				"Window inventory: id, pid, app, title, bounds, and space (current or other) with display, across every Space. Pass app to list one app's windows. Observe a window_id before input; listing authorizes none.",
+				"Windows on every Space: id, pid, app, title, bounds, space (current|other), display. app filters. Listing authorizes no input.",
 			inputSchema: listWindowsSchema,
 			annotations: READ_ONLY_ANNOTATIONS,
 		},
@@ -309,6 +322,20 @@ export function createMcpServer(
 
 	if (toolset === "full") {
 		registerDesktopMutationTools(server, session, resolvedComputer);
+		server.registerTool(
+			"run_applescript",
+			{
+				description:
+					"Run AppleScript/JXA (osascript) on apps' scripting objects; returns its result. Background refuses activate, keystroke, key code, click at.",
+				inputSchema: runAppleScriptSchema,
+				annotations: MUTATION_ANNOTATIONS,
+			},
+			async ({ source, language, timeout_ms }) =>
+				await appleScriptSession.run(source, {
+					...(language === undefined ? {} : { language }),
+					...(timeout_ms === undefined ? {} : { timeoutMs: timeout_ms }),
+				}),
+		);
 		registerHandsTools(server, session, resolvedComputer);
 		registerPowerTools(server, session, resolvedComputer);
 		registerDecisionTools(server, session);
@@ -318,7 +345,15 @@ export function createMcpServer(
 	}
 	registerHumanTools(server, session);
 	registerVisualTools(server, session);
-	registerScriptTools(server, session, resolvedComputer, dockSession, terminalSession, extrasSession);
+	registerScriptTools(
+		server,
+		session,
+		resolvedComputer,
+		dockSession,
+		terminalSession,
+		extrasSession,
+		appleScriptSession,
+	);
 	registerCapabilityTools(server, {
 		delivery: resolvedComputer.delivery,
 		probeHost: probeHostCapabilities,

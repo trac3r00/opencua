@@ -39,6 +39,9 @@ action is not permission to act. If an API, file or the browser skill can do the
 Input goes to the target app's own window. The user's pointer, frontmost app, keyboard focus and Space
 are left alone, and an action that would need the foreground is refused instead of taking over. Never
 work around a refusal with the raw CLI, AppleScript, shell input or another MCP server. Ask the user.
+For an app's own scripting objects (make a note, read reminders) use `run_applescript` or
+`apple.osascript` in `run_script`: they run under the same stop switch and app restriction, and refuse
+statements that take the screen (`activate`, `keystroke`, `key code`, `click at`).
 
 ## Platforms
 

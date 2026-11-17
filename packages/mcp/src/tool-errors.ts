@@ -10,6 +10,7 @@ const NEVER_RETRY_REASONS = new Set([
 	"screen-locked",
 	"app-not-approved",
 	"url-blocked",
+	"foreground-refused",
 ]);
 
 function errorMetadata(

@@ -369,6 +369,7 @@ const apple = Object.freeze({
 			run: (command: unknown) => call("terminalRun", undefined, [command]),
 			read: (windowId?: unknown) => call("terminalRead", undefined, [windowId]),
 		}),
+	osascript: (source: unknown, options?: unknown) => call("osascript", undefined, [source, options]),
 	spaces: () =>
 		Object.freeze({
 			active: () => call("spacesActive", undefined, []),

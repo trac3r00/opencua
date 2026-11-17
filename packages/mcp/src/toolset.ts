@@ -6,6 +6,7 @@
 export type ToolsetProfile = "full" | "lean";
 
 import type { DockSource, HostCapabilities, HotFrameSource } from "@opencua/core";
+import type { OsascriptRunner } from "./applescript-session.js";
 import type { ExtrasSource } from "./extras-session.js";
 import type { TerminalCommandSource, TerminalTextReader } from "./terminal-session.js";
 
@@ -19,6 +20,8 @@ export interface McpServerOptions {
 	readonly terminalHostProbe?: () => HostCapabilities;
 	readonly terminalDispatch?: TerminalCommandSource;
 	readonly terminalRead?: TerminalTextReader;
+	/** Runs osascript; tests inject a fake so no real script runs. */
+	readonly osascriptRunner?: OsascriptRunner;
 	readonly extrasSource?: ExtrasSource;
 	readonly extrasHostProbe?: () => HostCapabilities;
 	readonly extrasNow?: () => number;

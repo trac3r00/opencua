@@ -26,6 +26,7 @@ export type CallMethod =
 	| "dockAct"
 	| "terminalRun"
 	| "terminalRead"
+	| "osascript"
 	| "spacesActive"
 	| "spacesDisplays"
 	| "menubarObserve"
