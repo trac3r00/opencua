@@ -78,8 +78,10 @@ export {
 	type TopLevelWindow,
 	type TopLevelWindowOptions,
 	type WindowProbe,
+	type WindowSpace,
 	fillWindowTitles,
 	listTopLevelWindows,
+	placeOnSpaces,
 } from "./platform/macos-top-level-windows.js";
 export { type ListedWindow, listWindows } from "./platform/macos-ffi/window-list.js";
 export { captureWindowViaSck } from "./platform/macos-ffi/sckit.js";

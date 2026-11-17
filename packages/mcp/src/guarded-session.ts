@@ -439,6 +439,10 @@ export interface DecisionRunRequest {
 	readonly timeoutMs?: number;
 }
 
+/** What reaches a window parked on another Space, so an agent plans its route instead of learning by refusal. */
+const OFF_SPACE_NOTE =
+	'space "other": the window is on a Space not shown now. Clicks and accessibility actions still reach it in the background; keys reach it only while it is its app\'s focused window. Background delivery never brings it forward.';
+
 export class GuardedSession {
 	private readonly tokens = new Map<string, LiveToken>();
 	private readonly tokenByPid = new Map<LaneKey, string>();
@@ -477,7 +481,11 @@ export class GuardedSession {
 					? []
 					: // Every Space in either mode: attended input brings an off-Space window forward itself, so it is a target too.
 						(
-							await this.windowProbe({ titlesFor: pid === undefined ? "all" : [pid], includeOffscreen: true })
+							await this.windowProbe({
+								titlesFor: pid === undefined ? "all" : [pid],
+								includeOffscreen: true,
+								withSpaces: true,
+							})
 						).filter((window) => pid === undefined || window.ownerPid === pid);
 			const prompts = this.systemPromptProbe === undefined ? [] : this.systemPromptProbe();
 			return textResult(
@@ -489,7 +497,15 @@ export class GuardedSession {
 							app: window.ownerName,
 							title: window.title,
 							bounds: window.bounds,
+							...(window.space === undefined
+								? {}
+								: {
+										space: window.space.current ? "current" : "other",
+										space_ids: window.space.spaceIds,
+										...(window.space.display === undefined ? {} : { display: window.space.display }),
+									}),
 						})),
+						...(windows.some((window) => window.space?.current === false) ? { space_note: OFF_SPACE_NOTE } : {}),
 						...(prompts.length > 0
 							? { system_prompts: prompts.map(describeSystemPrompt), system_prompt_note: SYSTEM_PROMPT_NOTE }
 							: {}),

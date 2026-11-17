@@ -694,8 +694,9 @@ When a tree is capped the answer says so in `elementsTruncated`, and a walk at a
 is treated as a fresh baseline rather than diffed against a differently truncated one, so a diff
 never reports elements that were merely outside the budget as removed. `list_windows` names
 targetable top-level windows (including other Spaces in background delivery) with their id, pid,
-app, title and bounds so an agent can pick its target
-before observing instead of guessing. Drilling in with `subtree_of` costs what the branch costs:
+app, title and bounds, plus `space` (`current` or `other`), `space_ids` and `display` when the WindowServer
+places the window on a Space, so an agent can pick its target and its route before observing instead of guessing.
+When any window is on another Space the answer adds `space_note`, which says what reaches such a window. Drilling in with `subtree_of` costs what the branch costs:
 on a Finder window whose full tree is 718 elements, re-observing a row returned 10 elements in
 165 ms instead of roughly 810 ms for the window.
 

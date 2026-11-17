@@ -71,6 +71,71 @@ describe("window discovery #given a machine with on-screen windows #when the age
 		]);
 	});
 
+	it("says which Space and display each window is on, and what reaches a window on another Space", async () => {
+		const asked: (TopLevelWindowOptions | undefined)[] = [];
+		const harness = await createHarness(undefined, async (options?: TopLevelWindowOptions) => {
+			asked.push(options);
+			return [
+				{
+					id: 1,
+					ownerPid: 489,
+					ownerName: "Finder",
+					title: "here",
+					bounds: WINDOW_BOUNDS,
+					space: { spaceIds: [3], current: true, display: "main" },
+				},
+				{
+					id: 2,
+					ownerPid: 42729,
+					ownerName: "Calculator",
+					title: "Calculator",
+					bounds: WINDOW_BOUNDS,
+					space: { spaceIds: [4], current: false, display: "main" },
+				},
+			];
+		});
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(await harness.client.callTool({ name: "list_windows", arguments: {} }));
+
+		expect(asked).toEqual([expect.objectContaining({ includeOffscreen: true, withSpaces: true })]);
+		expect(payload["windows"]).toEqual([
+			{
+				window_id: 1,
+				pid: 489,
+				app: "Finder",
+				title: "here",
+				bounds: WINDOW_BOUNDS,
+				space: "current",
+				space_ids: [3],
+				display: "main",
+			},
+			{
+				window_id: 2,
+				pid: 42729,
+				app: "Calculator",
+				title: "Calculator",
+				bounds: WINDOW_BOUNDS,
+				space: "other",
+				space_ids: [4],
+				display: "main",
+			},
+		]);
+		expect(typeof payload["space_note"]).toBe("string");
+	});
+
+	it("a failed listing is a read-only failure: nothing was sent and retrying is safe", async () => {
+		const harness = await createHarness(undefined, async () => {
+			throw new Error("window list unreadable");
+		});
+		closeHarness = harness.close;
+
+		const result = await harness.client.callTool({ name: "list_windows", arguments: {} });
+
+		expect(result.isError).toBe(true);
+		expect(jsonPayload(result)).toMatchObject({ code: "TOOL_ERROR", retry: "safe" });
+	});
+
 	it("answers with an empty list instead of failing when no window probe is available", async () => {
 		const harness = await createHarness();
 		closeHarness = harness.close;
