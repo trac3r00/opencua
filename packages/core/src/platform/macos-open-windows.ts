@@ -1,5 +1,6 @@
 import { openWindows } from "get-windows";
 import { isSystemCallHost } from "./macos-call-helpers.js";
+import { onlineDisplayBounds } from "./macos-ffi/display-list.js";
 import type { ListedWindow } from "./macos-ffi/window-list.js";
 import { listWindows } from "./macos-ffi/window-list.js";
 import { findRunningApplication } from "./macos-ffi/workspace.js";
@@ -141,7 +142,33 @@ export async function openWindowsForTargeting(
 
 function listNativeAllSpacesWindows(): readonly MacOSWindowInfo[] | undefined {
 	const listed = listWindows({ onScreenOnly: false });
-	return listed === undefined ? undefined : targetableWindows(listed);
+	return listed === undefined
+		? undefined
+		: targetableWindows(withoutMenuBarStrips(listed, onlineDisplayBounds() ?? []));
+}
+
+/** The tallest strip treated as a display's menu bar backing; a real window is taller. */
+const MENU_BAR_STRIP_MAX_HEIGHT = 44;
+
+/**
+ * macOS keeps a few undrawn, untitled windows per app that span each display's menu bar. The all-Spaces listing
+ * reports them as ordinary layer-0 windows, so without this an app showed up with eight phantom targets beside its
+ * real window. A window counts as such a strip only while it is off screen and exactly covers a display's top edge.
+ */
+export function withoutMenuBarStrips(
+	listed: readonly ListedWindow[],
+	displays: readonly { readonly x: number; readonly y: number; readonly width: number }[],
+): readonly ListedWindow[] {
+	return listed.filter(
+		(window) =>
+			window.onScreen !== false ||
+			window.title !== "" ||
+			window.bounds.height > MENU_BAR_STRIP_MAX_HEIGHT ||
+			!displays.some(
+				(display) =>
+					window.bounds.x === display.x && window.bounds.y === display.y && window.bounds.width === display.width,
+			),
+	);
 }
 
 async function openWindowsWithRetry(): Promise<readonly MacOSWindowInfo[]> {

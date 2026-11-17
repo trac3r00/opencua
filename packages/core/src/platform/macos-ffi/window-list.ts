@@ -6,12 +6,14 @@ import {
 	cfArrayValueAt,
 	cfDictionaryValue,
 	cfRelease,
+	fromCFBoolean,
 	fromCFNumber,
 	fromCFString,
+	isCFBoolean,
 	isCFDictionary,
 	isCFNumber,
 	isCFString,
-	withCFString,
+	toCFString,
 } from "./corefoundation.js";
 import { koffi } from "./koffi.js";
 
@@ -24,6 +26,22 @@ export interface OnscreenWindow {
 const ON_SCREEN_ONLY = 1;
 const EXCLUDE_DESKTOP_ELEMENTS = 16;
 const NULL_WINDOW_ID = 0;
+
+/**
+ * The dictionary keys this file reads, created once: a listing reads several keys from each of a few hundred windows,
+ * and making and freeing a CFString per read was most of its cost. The set is fixed, so the strings live as long as
+ * the process.
+ */
+const keyReferences = new Map<string, ReturnType<typeof toCFString>>();
+
+function withKey<TResult>(key: string, callback: (reference: ReturnType<typeof toCFString>) => TResult): TResult {
+	let reference = keyReferences.get(key);
+	if (reference === undefined) {
+		reference = toCFString(key);
+		keyReferences.set(key, reference);
+	}
+	return callback(reference);
+}
 
 const coreGraphics = koffi.load("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics");
 
@@ -49,6 +67,7 @@ const WINDOW_LAYER_KEY = "kCGWindowLayer";
 const WINDOW_OWNER_NAME_KEY = "kCGWindowOwnerName";
 const WINDOW_NAME_KEY = "kCGWindowName";
 const WINDOW_BOUNDS_KEY = "kCGWindowBounds";
+const WINDOW_IS_ONSCREEN_KEY = "kCGWindowIsOnscreen";
 const ALL_WINDOWS = 0;
 
 export interface ListedWindow {
@@ -64,6 +83,8 @@ export interface ListedWindow {
 		readonly width: number;
 		readonly height: number;
 	};
+	/** Whether the WindowServer draws it now; absent when the listing did not say. */
+	readonly onScreen?: boolean;
 }
 
 /**
@@ -100,6 +121,7 @@ export function listWindows(options: { readonly onScreenOnly?: boolean } = {}): 
 					ownerName: readString(info, WINDOW_OWNER_NAME_KEY) ?? "",
 					title: readString(info, WINDOW_NAME_KEY) ?? "",
 					bounds: readBounds(info) ?? { x: 0, y: 0, width: 0, height: 0 },
+					onScreen: readBoolean(info, WINDOW_IS_ONSCREEN_KEY) ?? false,
 				});
 			}
 			return windows;
@@ -121,7 +143,7 @@ function copyWindowInfo(option: number): CFTypeRef | null {
 }
 
 function readString(info: CFTypeRef, key: string): string | undefined {
-	return withCFString(key, (keyReference) => {
+	return withKey(key, (keyReference) => {
 		const value = cfDictionaryValue(info, keyReference);
 		if (value === null || !isCFString(value)) {
 			return undefined;
@@ -130,8 +152,15 @@ function readString(info: CFTypeRef, key: string): string | undefined {
 	});
 }
 
+function readBoolean(info: CFTypeRef, key: string): boolean | undefined {
+	return withKey(key, (keyReference) => {
+		const value = cfDictionaryValue(info, keyReference);
+		return value !== null && isCFBoolean(value) ? fromCFBoolean(value) : undefined;
+	});
+}
+
 function readBounds(info: CFTypeRef): ListedWindow["bounds"] | undefined {
-	return withCFString(WINDOW_BOUNDS_KEY, (keyReference) => {
+	return withKey(WINDOW_BOUNDS_KEY, (keyReference) => {
 		const value = cfDictionaryValue(info, keyReference);
 		if (value === null || !isCFDictionary(value)) {
 			return undefined;
@@ -148,7 +177,7 @@ function readBounds(info: CFTypeRef): ListedWindow["bounds"] | undefined {
 }
 
 function readDictionaryNumber(dictionary: CFTypeRef, key: string): number | undefined {
-	return withCFString(key, (keyReference) => {
+	return withKey(key, (keyReference) => {
 		const value = cfDictionaryValue(dictionary, keyReference);
 		if (value === null || !isCFNumber(value)) {
 			return undefined;
@@ -202,7 +231,7 @@ function readOnscreenWindows(): readonly OnscreenWindow[] | null {
 }
 
 function readInteger(info: CFTypeRef, key: string): number | undefined {
-	return withCFString(key, (keyReference) => {
+	return withKey(key, (keyReference) => {
 		const value = cfDictionaryValue(info, keyReference);
 		if (value === null || !isCFNumber(value)) {
 			return undefined;

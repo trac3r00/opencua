@@ -11,6 +11,7 @@ import {
 	openWindowsForTargeting,
 	setOpenWindowsSourceForTesting,
 	targetableWindows,
+	withoutMenuBarStrips,
 } from "./macos-open-windows.js";
 import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { registerOwnedSurface } from "./owned-surfaces.js";
@@ -222,5 +223,38 @@ describe("#given a window one level below normal windows #when it is mapped for 
 			else process.env["OPENCUA_STATE_DIR"] = previous;
 			rmSync(stateDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("withoutMenuBarStrips #given the undrawn menu bar windows macOS keeps per app on each display", () => {
+	const displays = [
+		{ x: 0, y: 0, width: 2560 },
+		{ x: 2560, y: 0, width: 2560 },
+	];
+	const listed = (id: number, bounds: ListedWindow["bounds"], extra: Partial<ListedWindow> = {}): ListedWindow => ({
+		id,
+		ownerPid: 7,
+		layer: 0,
+		ownerName: "Calculator",
+		title: "",
+		bounds,
+		onScreen: false,
+		...extra,
+	});
+
+	it("#when listing every Space #then only those strips are dropped and every real or look-alike window stays", () => {
+		const { onScreen: _unknown, ...unknownOnScreen } = listed(8, { x: 0, y: 0, width: 2560, height: 30 });
+		const windows = [
+			listed(1, { x: 0, y: 0, width: 2560, height: 30 }),
+			listed(2, { x: 2560, y: 0, width: 2560, height: 30 }),
+			listed(3, { x: 740, y: 400, width: 230, height: 408 }),
+			listed(4, { x: 0, y: 0, width: 2560, height: 30 }, { onScreen: true }),
+			listed(5, { x: 0, y: 0, width: 2560, height: 30 }, { title: "Toolbar" }),
+			listed(6, { x: 0, y: 0, width: 2560, height: 1440 }),
+			listed(7, { x: 10, y: 0, width: 2560, height: 30 }),
+			unknownOnScreen,
+		];
+
+		expect(withoutMenuBarStrips(windows, displays).map((window) => window.id)).toEqual([3, 4, 5, 6, 7, 8]);
 	});
 });
