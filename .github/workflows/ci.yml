@@ -73,8 +73,9 @@ jobs:
       - name: Setup, non-interactive, the way a user runs it
         run: ./scripts/setup.sh --yes --no-doctor
 
-      - name: Lint, typecheck and test
-        run: pnpm check
+      # Biome already ran once in preflight; the macOS runners only typecheck and test.
+      - name: Typecheck and test
+        run: pnpm -r typecheck && pnpm typecheck:tests && pnpm test
 
       - name: Native binaries are universal, target macOS 15, and build on this runner
         run: |

@@ -8,6 +8,9 @@ set -uo pipefail
 
 # The agent's drawn cursor is on by default; a unit test must never spawn the real overlay helper on this desktop.
 export OPENCUA_CURSOR=off
+# Unit tests run on fakes, so the gesture pacing meant for real apps only spends wall-clock time; a focus wait that
+# polls a fake for its full bound took a second per case. Each test that checks pacing sets its own values.
+export OPENCUA_GESTURE_FOCUS_SETTLE_MS=1 OPENCUA_GESTURE_HOVER_MS=1 OPENCUA_GESTURE_PRIMER_TO_CLICK_MS=1 OPENCUA_GESTURE_CLICK_DRAIN_MS=1
 
 log="$(mktemp -t opencua-bun-test)"
 trap 'rm -f "$log"' EXIT
