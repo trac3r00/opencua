@@ -45,7 +45,7 @@ describe("snapshot refs", () => {
 			elements: [{ id: 9, role: "AXButton" }],
 			element_rows: ["20\tTextField\tName"],
 			matches: [{ element_index: 21 }],
-			element_refs: { 9: "@snapshot-a:e9", 20: "@snapshot-a:e20", 21: "@snapshot-a:e21" },
+			element_ref_format: "@snapshot-a:e{id}",
 		});
 	});
 
@@ -54,7 +54,7 @@ describe("snapshot refs", () => {
 		expect(withSnapshotRefs(result)).toEqual(result);
 	});
 
-	it("#given a compact diff #when projecting refs #then removed and previous identities receive no current refs", () => {
+	it("#given a compact diff #when projecting refs #then the template names the current observation", () => {
 		const result = withSnapshotRefs(
 			textResult(
 				JSON.stringify({
@@ -69,10 +69,6 @@ describe("snapshot refs", () => {
 			),
 		);
 		const text = result.content[0];
-		expect(text?.type === "text" && JSON.parse(text.text).element_refs).toEqual({
-			9: "@snapshot-b:e9",
-			6: "@snapshot-b:e6",
-			20: "@snapshot-b:e20",
-		});
+		expect(text?.type === "text" && JSON.parse(text.text).element_ref_format).toBe("@snapshot-b:e{id}");
 	});
 });

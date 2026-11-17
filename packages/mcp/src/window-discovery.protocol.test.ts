@@ -124,6 +124,25 @@ describe("window discovery #given a machine with on-screen windows #when the age
 		expect(typeof payload["space_note"]).toBe("string");
 	});
 
+	it("lists only the named app's windows when app is given", async () => {
+		const harness = await createHarness(
+			undefined,
+			probeWith([
+				{ id: 1, ownerPid: 1234, ownerName: "Finder", title: "here", bounds: WINDOW_BOUNDS },
+				{ id: 2, ownerPid: 5678, ownerName: "Other", title: "there", bounds: WINDOW_BOUNDS },
+			]),
+		);
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(
+			await harness.client.callTool({ name: "list_windows", arguments: { app: "Finder" } }),
+		);
+
+		expect(payload["windows"]).toEqual([
+			{ window_id: 1, pid: 1234, app: "Finder", title: "here", bounds: WINDOW_BOUNDS },
+		]);
+	});
+
 	it("a failed listing is a read-only failure: nothing was sent and retrying is safe", async () => {
 		const harness = await createHarness(undefined, async () => {
 			throw new Error("window list unreadable");
@@ -242,5 +261,25 @@ describe("screen recording #given the server lacks the permission #when the agen
 		expect((result.content as { type: string }[]).some((block) => block.type === "image")).toBe(false);
 		expect(String(payload["screenshotNote"])).toContain("Screen Recording");
 		expect(payload["observation_token"]).toEqual(expect.any(String));
+	});
+});
+
+describe("list_apps #given running apps #when the agent lists them #then each entry carries only what tells apps apart", () => {
+	it("leaves out the always-true running flag and marks only the app in front", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.listApps = async () => [
+			{ name: "Finder", bundleId: "com.apple.finder", pid: 1234, isRunning: true, isFrontmost: true },
+			{ name: "Other", bundleId: "com.example.other", pid: 5678, isRunning: true, isFrontmost: false },
+		];
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+
+		const result = await harness.client.callTool({ name: "list_apps", arguments: {} });
+		const texts = (result.content as { type: string; text?: string }[]).filter((item) => item.type === "text");
+
+		expect(JSON.parse(texts.at(-1)?.text ?? "null")).toEqual([
+			{ name: "Finder", bundleId: "com.apple.finder", pid: 1234, isFrontmost: true },
+			{ name: "Other", bundleId: "com.example.other", pid: 5678 },
+		]);
 	});
 });

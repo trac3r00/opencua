@@ -466,7 +466,16 @@ export class GuardedSession {
 	) {}
 
 	listApps(): Promise<ToolResult> {
-		return this.enqueue(undefined, async () => textResult(JSON.stringify(await this.computer.listApps(), null, 2)));
+		return this.enqueue(undefined, async () =>
+			textResult(
+				JSON.stringify(
+					// Every listed app runs; only the one in front says so, which keeps the list a third smaller.
+					(await this.computer.listApps()).map(({ isRunning: _running, isFrontmost, ...app }) =>
+						isFrontmost === true ? { ...app, isFrontmost } : app,
+					),
+				),
+			),
+		);
 	}
 
 	/**
@@ -489,30 +498,26 @@ export class GuardedSession {
 						).filter((window) => pid === undefined || window.ownerPid === pid);
 			const prompts = this.systemPromptProbe === undefined ? [] : this.systemPromptProbe();
 			return textResult(
-				JSON.stringify(
-					{
-						windows: windows.map((window) => ({
-							window_id: window.id,
-							pid: window.ownerPid,
-							app: window.ownerName,
-							title: window.title,
-							bounds: window.bounds,
-							...(window.space === undefined
-								? {}
-								: {
-										space: window.space.current ? "current" : "other",
-										space_ids: window.space.spaceIds,
-										...(window.space.display === undefined ? {} : { display: window.space.display }),
-									}),
-						})),
-						...(windows.some((window) => window.space?.current === false) ? { space_note: OFF_SPACE_NOTE } : {}),
-						...(prompts.length > 0
-							? { system_prompts: prompts.map(describeSystemPrompt), system_prompt_note: SYSTEM_PROMPT_NOTE }
-							: {}),
-					},
-					null,
-					2,
-				),
+				JSON.stringify({
+					windows: windows.map((window) => ({
+						window_id: window.id,
+						pid: window.ownerPid,
+						app: window.ownerName,
+						title: window.title,
+						bounds: window.bounds,
+						...(window.space === undefined
+							? {}
+							: {
+									space: window.space.current ? "current" : "other",
+									space_ids: window.space.spaceIds,
+									...(window.space.display === undefined ? {} : { display: window.space.display }),
+								}),
+					})),
+					...(windows.some((window) => window.space?.current === false) ? { space_note: OFF_SPACE_NOTE } : {}),
+					...(prompts.length > 0
+						? { system_prompts: prompts.map(describeSystemPrompt), system_prompt_note: SYSTEM_PROMPT_NOTE }
+						: {}),
+				}),
 			);
 		});
 	}

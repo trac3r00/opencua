@@ -90,7 +90,7 @@ describe("agent-facing errors and refs", () => {
 					value: "updated",
 				},
 			});
-			expect(state["element_refs"]).toMatchObject({ 20: `@${state["observation_token"]}:e20` });
+			expect(state["element_ref_format"]).toBe(`@${state["observation_token"]}:e{id}`);
 			expect(result.isError).not.toBe(true);
 			expect(harness.computer.effects).toContainEqual({ kind: "setValue", pid: 1234, id: 20, value: "updated" });
 		},
@@ -187,7 +187,7 @@ describe("agent-facing errors and refs", () => {
 				arguments: { app: "Finder", query: { label: "Open" } },
 			}),
 		);
-		expect(state["element_refs"]).toMatchObject({ 9: `@${state["observation_token"]}:e9` });
+		expect(state["element_ref_format"]).toBe(`@${state["observation_token"]}:e{id}`);
 	});
 });
 

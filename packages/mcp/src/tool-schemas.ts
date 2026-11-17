@@ -21,6 +21,10 @@ const MAX_FIND_RESULTS = 25;
 
 export const emptySchema = z.object({});
 
+export const listWindowsSchema = z.object({
+	app: appSchema.optional().describe("Only this app's windows: name, bundle id or pid. Omit to list every app's."),
+});
+
 export const iosObserveSchema = z.object({});
 export const iosScreenshotSchema = z.object({ path: z.string().min(1).optional() });
 const phoneToken = { observation_token: observationTokenSchema };
