@@ -30,7 +30,7 @@ describe("agent-facing errors and refs", () => {
 		expect(jsonPayload(result)).toMatchObject({ ok: false, code: "INVALID_ARGUMENT", retry: "never" });
 	});
 
-	it("#given a native failure #when observing #then delivery is not assumed safe", async () => {
+	it("#given a native failure #when observing #then the agent is told nothing was sent and may observe again", async () => {
 		const harness = await createHarness();
 		closeHarness = harness.close;
 		harness.computer.stateError = new Error("capture failed");
@@ -39,8 +39,17 @@ describe("agent-facing errors and refs", () => {
 			ok: false,
 			error: "capture failed",
 			code: "TOOL_ERROR",
-			retry: "unsafe",
+			retry: "safe",
 		});
+		// A mutation's unexplained failure still leaves delivery unknown.
+		const token = await observe(harness);
+		harness.computer.stateError = undefined;
+		harness.computer.inputError = new Error("post failed");
+		const click = await harness.client.callTool({
+			name: "click",
+			arguments: { app: "Finder", observation_token: token, x: 10, y: 10 },
+		});
+		expect(jsonPayload(click)).toMatchObject({ ok: false, retry: "unsafe" });
 	});
 
 	it("#given a human stop refusal #when dispatch is attempted #then automatic retry is forbidden", async () => {

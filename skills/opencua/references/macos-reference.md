@@ -372,6 +372,11 @@ human consent. The server cannot infer the user's intent or classify every UI co
 
 ## Phone and FaceTime call banners
 
+Menu bar apps (LSUIElement, such as Raycast or a dev build of a status-bar tool) are targets like any app when
+they live outside /System: name them, give their bundle id, or their pid. One with no window open answers
+`No visible target window`; open its window first. Apple's own accessory processes (permission, password and
+alert prompts) stay out of reach unless listed below.
+
 On macOS 26, the top-right "Click to Call" banner is composited by
 `com.apple.notificationcenterui`, with background FaceTime helpers behind it.
 Use `list_windows` and `list_apps` to identify the on-screen host, then observe
