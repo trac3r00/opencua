@@ -346,8 +346,16 @@ const keySequenceEntrySchema = z.union([
 	}),
 ]);
 
+/** A sequence of combos, or one combo ("cmd+shift+a"), the way agents most often write it. */
+const keySequenceSchema = z.union([z.string().min(1), z.array(keySequenceEntrySchema).min(1)]);
+
+/** The combos a keys argument names, in order. */
+export function keySequenceEntries<Entry>(keys: string | readonly Entry[]): readonly (string | Entry)[] {
+	return typeof keys === "string" ? [keys] : keys;
+}
+
 const pressKeysFields = {
-	keys: z.array(keySequenceEntrySchema).min(1),
+	keys: keySequenceSchema,
 	hold_seconds: z.number().nonnegative().optional(),
 	interval_seconds: z.number().nonnegative().optional(),
 };

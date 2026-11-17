@@ -21,6 +21,7 @@ import type {
 } from "@opencua/core";
 import { observedPointToScreen, validateElement, validatePoint } from "./guarded-session.js";
 import type { ActionDelivery, ActionDispatch } from "./tool-result.js";
+import { keySequenceEntries } from "./tool-schemas.js";
 import type { ClickActionInput, DragActionInput, PressKeysActionInput, SelectTextActionInput } from "./tool-schemas.js";
 
 export function validateClick(input: ClickActionInput, observation: InputObservation): void {
@@ -402,7 +403,11 @@ export async function pressKeys(
 	input: PressKeysActionInput,
 ): Promise<ActionDispatch> {
 	await withTargetedApp(computer, targetPid, async () => {
-		await pressKeySequence(computer, input.keys.map(keySequenceEntryFromInput), keySequenceOptions(input));
+		await pressKeySequence(
+			computer,
+			keySequenceEntries(input.keys).map(keySequenceEntryFromInput),
+			keySequenceOptions(input),
+		);
 	});
 	return { route: "synthetic_events", delivery: syntheticDelivery(computer) };
 }
