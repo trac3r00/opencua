@@ -6,6 +6,7 @@ import {
 	pressElement,
 	pressKeySequence,
 	scrollElement,
+	typingRhythm,
 	withTargetedApp,
 } from "@opencua/core";
 import type {
@@ -372,8 +373,13 @@ export async function typeText(
 		text: string,
 		options?: { readonly settleWrite?: boolean },
 	) => Promise<boolean> = computer.typeIntoFocused.bind(computer);
-	// Attended delivery types through the HID tap into the focused element; background writes it through accessibility.
-	if (computer.delivery !== "attended" && (await typeIntoFocused(targetPid, text, options))) {
+	// Attended delivery types through the HID tap. Background delivery types key by key at the caret like a person;
+	// only the constant rhythm writes the whole text into the focused element through accessibility at once.
+	if (
+		computer.delivery !== "attended" &&
+		typingRhythm() === "constant" &&
+		(await typeIntoFocused(targetPid, text, options))
+	) {
 		return { route: "accessibility", delivery: "background" };
 	}
 	await withTargetedApp(computer, targetPid, async () => {

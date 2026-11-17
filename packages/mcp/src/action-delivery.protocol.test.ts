@@ -159,6 +159,8 @@ describe("action delivery #given attended delivery #when click_target resolves a
 
 describe("action delivery #given background delivery #when the same tools run #then the accessibility shortcuts stay", () => {
 	it("presses an element id, writes text through accessibility first, and scrolls by page action", async () => {
+		// The one-shot accessibility write is the constant rhythm's route.
+		process.env["OPENCUA_TYPE_RHYTHM"] = "constant";
 		const { computer, harness } = await deliveryHarness("background");
 
 		const clicked = await callWithToken(harness, "click", { element_index: "9" });
@@ -176,5 +178,17 @@ describe("action delivery #given background delivery #when the same tools run #t
 		expect(computer.effects.some((effect) => effect.kind === "click" || effect.kind === "scroll")).toBe(false);
 		expect(clicked).toMatchObject({ route: "accessibility", delivery: "background" });
 		expect(scrolled).toMatchObject({ route: "accessibility", delivery: "background" });
+		Reflect.deleteProperty(process.env, "OPENCUA_TYPE_RHYTHM");
+	});
+
+	it("types text key by key at the caret by default, the way a person does", async () => {
+		Reflect.deleteProperty(process.env, "OPENCUA_TYPE_RHYTHM");
+		const { computer, harness } = await deliveryHarness("background");
+
+		const typed = await callWithToken(harness, "type_text", { text: "hello" });
+
+		expect(computer.typeOptions).toHaveLength(0);
+		expect(computer.effects).toContainEqual(expect.objectContaining({ kind: "type", text: "hello" }));
+		expect(typed).toMatchObject({ route: "synthetic_events" });
 	});
 });
