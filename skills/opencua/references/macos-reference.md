@@ -277,7 +277,7 @@ when the needed target cannot be established.
    `--background`; `OPENCUA_DELIVERY=attended` opts out): input goes to the app's own window,
    the frontmost app and the person's cursor are left alone, `open_app` launches without bringing
    the app forward, and an action that would need the foreground is refused rather than taking
-   over the machine. A running app is left untouched and a new one launches hidden. Background work draws no cursor, highlight, or click ripple. Attended
+   over the machine. A running app is left untouched and a new one launches hidden. Background work draws the agent's own cursor and frames the window it drives, without touching the real pointer. Attended
    delivery can show an adaptive agent cursor without moving the real pointer for semantic
    actions (`OPENCUA_CURSOR=off` hides that feedback).
 

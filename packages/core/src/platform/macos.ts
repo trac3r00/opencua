@@ -54,7 +54,6 @@ import {
 	scrollToVisibleByIndex,
 	setValueByIndex,
 	typeIntoFocusedAXElement,
-	windowMinimizedForPid,
 	windowTitlesForPid,
 } from "./macos-ffi/accessibility.js";
 import type { AccessibilityTreeOptions } from "./macos-ffi/accessibility.js";
@@ -111,6 +110,7 @@ import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveOcrCrop } from "./ocr-region.js";
 import { isOwnedSurfacePid, surfaceAudioState } from "./owned-surfaces.js";
 import { currentSystemPrompts } from "./system-prompts.js";
+import { windowMinimizedState, windowOnHiddenSpace } from "./window-minimized.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -657,6 +657,19 @@ export class MacOSHostComputer extends HostComputer {
 		}
 	}
 
+	/** The app's frontmost window that sits on a Space no display shows, if it has one. */
+	private async windowOnHiddenSpaceFor(pid: number): Promise<number | undefined> {
+		const listed = await openWindowsForTargeting(undefined, { includeOffscreen: true }).catch(() => []);
+		const onscreen = new Set(currentOnscreenWindowIds() ?? []);
+		return listed.find(
+			(window) =>
+				window.owner?.processId === pid &&
+				(window.layer ?? 0) === 0 &&
+				!onscreen.has(window.id) &&
+				windowOnHiddenSpace(window.id) === true,
+		)?.id;
+	}
+
 	private async resolveObservationWindow(
 		pid: number,
 		requestedWindowId?: number,
@@ -701,6 +714,25 @@ export class MacOSHostComputer extends HostComputer {
 				raiseWindowInApp(app.pid, hiddenWindowId);
 			}
 		}
+		// An inactive app whose window sits on a Space no display shows has no window on screen and none over
+		// accessibility. Background delivery works on it where it is: its pixels and their text are the observation,
+		// and nothing switches the person's Space.
+		if (
+			options?.requireWindow === true &&
+			targetWindow === undefined &&
+			this.delivery === "background" &&
+			options.windowId === undefined
+		) {
+			const parkedId = await this.windowOnHiddenSpaceFor(app.pid);
+			if (parkedId !== undefined) {
+				targetWindow = await this.input.rememberTargetWindow(app.pid, parkedId);
+			}
+		}
+		const onHiddenSpace =
+			this.delivery === "background" &&
+			targetWindow !== undefined &&
+			currentOnscreenWindowIds()?.includes(targetWindow.id) !== true &&
+			windowOnHiddenSpace(targetWindow.id) === true;
 		// A window that was just opened (open_app, a new document, a reopened app) can take a moment to
 		// reach the window server. Wait a bounded time for it instead of failing the first observation.
 		const windowDeadline = Date.now() + WINDOW_APPEAR_WAIT_MILLISECONDS;
@@ -741,7 +773,8 @@ export class MacOSHostComputer extends HostComputer {
 		const walkOptions = {
 			...(options?.maxElements === undefined ? {} : { maxElements: options.maxElements }),
 			...(options?.includeMenuBar === undefined ? {} : { includeMenuBar: options.includeMenuBar }),
-			...(targetWindow === undefined ? {} : { windowId: targetWindow.id }),
+			// macOS hides a hidden-Space window from accessibility: the app's own root is what can still be read.
+			...(targetWindow === undefined || onHiddenSpace ? {} : { windowId: targetWindow.id }),
 			...(options?.subtreeOf === undefined ? {} : { subtreeOf: options.subtreeOf }),
 			...(options?.visibleOnly === true ? { visibleOnly: true } : {}),
 		};
@@ -797,7 +830,7 @@ export class MacOSHostComputer extends HostComputer {
 			});
 		}
 		const ocrText =
-			tree?.windowContentUnavailable === true && targetWindow !== undefined
+			(tree?.windowContentUnavailable === true || onHiddenSpace) && targetWindow !== undefined
 				? await this.readWindowText(screenshot, size, targetWindow)
 				: undefined;
 		const displays = displayInventory;
@@ -819,9 +852,14 @@ export class MacOSHostComputer extends HostComputer {
 			this.lastViewportByPid.set(app.pid, viewport);
 			windowBounds = viewport.windowBounds;
 			elements = tree === undefined ? [] : remapElementFramesToScreenshot(tree.elements, viewport);
-			if (!this.highlightedApps.has(app.pid) && (this.delivery !== "background" || cursorBackgroundCuesEnabled())) {
-				this.highlightedApps.add(app.pid);
-				this.overlay.highlight(viewport.windowBounds, app.pid);
+			if (this.delivery !== "background" || cursorBackgroundCuesEnabled()) {
+				// The window stays marked while the agent works in it; an overlay without frames flashes it once.
+				if (this.overlay.frame !== undefined) {
+					this.overlay.frame(viewport.windowBounds, app.pid);
+				} else if (!this.highlightedApps.has(app.pid)) {
+					this.highlightedApps.add(app.pid);
+					this.overlay.highlight(viewport.windowBounds, app.pid);
+				}
 			}
 		} else {
 			this.lastViewportByPid.delete(app.pid);
@@ -874,6 +912,7 @@ export class MacOSHostComputer extends HostComputer {
 			...(targetWindowTitle !== undefined ? { windowTitle: targetWindowTitle } : {}),
 			...(windowCandidates !== undefined ? { windowCandidates } : {}),
 			...(tree?.windowContentUnavailable === true ? { windowContentUnavailable: true } : {}),
+			...(onHiddenSpace ? { windowOnHiddenSpace: true } : {}),
 			...(ocrText !== undefined ? { ocrText } : {}),
 			...(screenshotUnavailable !== undefined
 				? { screenshotUnavailable }
@@ -1133,7 +1172,7 @@ export class MacOSHostComputer extends HostComputer {
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`set_value on element ${elementIndex}`,
 		);
-		this.showElement(targetPid, elementIndex, false);
+		await this.showElement(targetPid, elementIndex, false);
 		setValueByIndex(targetPid, elementIndex, value);
 		this.input.showKeyboard();
 		await this.settleAccessibilityWrite(targetPid);
@@ -1144,7 +1183,7 @@ export class MacOSHostComputer extends HostComputer {
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`select_text on element ${elementIndex}`,
 		);
-		this.showElement(targetPid, elementIndex, false);
+		await this.showElement(targetPid, elementIndex, false);
 		selectTextByIndex(targetPid, elementIndex, options);
 		this.input.showKeyboard();
 	}
@@ -1157,7 +1196,7 @@ export class MacOSHostComputer extends HostComputer {
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`${action} on element ${elementIndex}`,
 		);
-		this.showElement(targetPid, elementIndex, !action.startsWith("AXScroll"), action.startsWith("AXScroll"));
+		await this.showElement(targetPid, elementIndex, !action.startsWith("AXScroll"), action.startsWith("AXScroll"));
 		// Pressing or focusing an element can make its app activate itself (Safari does for a web
 		// field); background delivery hands the front back to the person's app when that happens.
 		const observation = this.inputObservations.get(targetPid);
@@ -1206,7 +1245,8 @@ export class MacOSHostComputer extends HostComputer {
 	 * centre first to keep every action visible. The frame lookup is display only: when it fails the
 	 * action still runs and reports its own error, so a lookup failure is not surfaced here.
 	 */
-	private showElement(targetPid: number, elementIndex: number, press: boolean, scroll = false): void {
+	/** Glide the drawn cursor onto the element and wait for it, so the action happens where the cursor is. */
+	private async showElement(targetPid: number, elementIndex: number, press: boolean, scroll = false): Promise<void> {
 		let frame: Rect | undefined;
 		try {
 			frame = elementFrameByIndex(targetPid, elementIndex);
@@ -1218,6 +1258,7 @@ export class MacOSHostComputer extends HostComputer {
 			if (scroll) {
 				this.input.showScrollPointer(position, targetPid);
 			} else {
+				await this.input.glidePointer(position, targetPid);
 				this.input.showPointer(position, press, targetPid);
 			}
 		}
@@ -1441,7 +1482,7 @@ async function queryVisibleTargetWindow(pid: number, windowId?: number, allowOff
 		if (requested.kind !== "resolved") {
 			return undefined;
 		}
-		if (allowOffscreen && !onscreen?.includes(windowId) && windowMinimizedForPid(pid, windowId) !== false) {
+		if (allowOffscreen && !onscreen?.includes(windowId) && windowMinimizedState(pid, windowId) !== false) {
 			return undefined;
 		}
 		return requested.window;

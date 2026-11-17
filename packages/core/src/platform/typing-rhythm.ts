@@ -1,12 +1,26 @@
 export type TypingRhythm = "constant" | "human";
 
 /**
- * Selects the human rhythm only for OPENCUA_TYPE_RHYTHM=human (trimmed, case-insensitive); anything else is constant,
- * matching the default behavior of typeCharacterDelayMilliseconds.
+ * Text is typed the way a person types unless OPENCUA_TYPE_RHYTHM=constant (trimmed, case-insensitive) asks for the
+ * fixed dropped-keystroke guard alone.
  */
 export function typingRhythm(environment: NodeJS.ProcessEnv = process.env): TypingRhythm {
 	const value = environment["OPENCUA_TYPE_RHYTHM"]?.trim().toLowerCase();
-	return value === "human" ? "human" : "constant";
+	return value === "constant" ? "constant" : "human";
+}
+
+/**
+ * About how long one human-paced text may take. A short entry is typed at a typist's pace; a long one speeds up so a
+ * paragraph still lands within a script's time budget instead of taking a minute.
+ */
+export const HUMAN_TEXT_BUDGET_MILLISECONDS = 6_000;
+/** Average transition factor (word boundaries, same-hand runs), so the budget covers the whole text. */
+const AVERAGE_TRANSITION_FACTOR = 1.3;
+
+/** The human base interval for a text of `length` characters: a typist's pace, faster for long text, never under the guard. */
+export function humanBaseForText(length: number, pacing: number): number {
+	const budgeted = Math.floor(HUMAN_TEXT_BUDGET_MILLISECONDS / (Math.max(1, length) * AVERAGE_TRANSITION_FACTOR));
+	return Math.max(pacing, Math.min(HUMAN_BASE_MILLISECONDS, budgeted));
 }
 
 const HUMAN_INTERVAL_CEILING_MILLISECONDS = 300;
@@ -17,10 +31,6 @@ const HUMAN_INTERVAL_CEILING_MILLISECONDS = 300;
  */
 export const HUMAN_BASE_MILLISECONDS = 60;
 
-/** The base the human rhythm scales: the configured pacing when it is slower, otherwise a typist's interval. */
-export function humanBaseMilliseconds(pacing: number): number {
-	return Math.max(pacing, HUMAN_BASE_MILLISECONDS);
-}
 const JITTER_LOW = 0.75;
 const JITTER_SPAN = 0.5;
 

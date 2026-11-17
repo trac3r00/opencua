@@ -163,6 +163,8 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	windowBounds = { x: 300, y: 150, width: 1000, height: 800 };
 	/** macOS dialogs the fake reports on screen, as the native driver does with systemPrompts. */
 	systemPrompts: readonly SystemPrompt[] = [];
+	/** Fields merged into every observed state, for states the plain fake never produces. */
+	stateExtras: Partial<AppState> = {};
 	/** When true, the fake behaves like a server without Screen Recording: no image, and why. */
 	screenCaptureDenied = false;
 	/**
@@ -282,6 +284,7 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 						...(axChanges === undefined ? {} : { axChanges }),
 					}
 				: {}),
+			...this.stateExtras,
 		};
 		if (captureTree && !probe) {
 			this.generation += 1;

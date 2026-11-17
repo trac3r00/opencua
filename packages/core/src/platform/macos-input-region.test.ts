@@ -15,6 +15,7 @@ const WINDOW = { id: 99, owner: { processId: 1234 }, bounds: { x: 10, y: 20, wid
 vi.mock("get-windows", () => ({ openWindows: () => Promise.resolve([WINDOW]) }));
 // Deterministic accessibility: no live Accessibility state decides how these keyboard and pointer paths route.
 vi.mock("./macos-ffi/accessibility.js", () => ({
+	focusedCaretFrame: () => undefined,
 	focusedElementFrame: () => undefined,
 	focusedElementInWebArea: () => false,
 	focusedWindowIdForPid: () => 99,

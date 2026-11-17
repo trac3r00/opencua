@@ -57,6 +57,7 @@ vi.mock("./macos-ffi/window-list.js", () => ({
 }));
 
 vi.mock("./macos-ffi/accessibility.js", () => ({
+	focusedCaretFrame: () => undefined,
 	focusedElementInWebArea: vi.fn(() => false),
 	focusedWindowIdForPid: native.focusedWindowIdForPid,
 	focusedWindowIsModal: vi.fn(() => false),

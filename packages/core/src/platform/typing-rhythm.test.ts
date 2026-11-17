@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { HUMAN_BASE_MILLISECONDS, humanBaseMilliseconds, humanCharacterDelay, typingRhythm } from "./typing-rhythm.js";
+import {
+	HUMAN_BASE_MILLISECONDS,
+	HUMAN_TEXT_BUDGET_MILLISECONDS,
+	humanBaseForText,
+	humanCharacterDelay,
+	typingRhythm,
+} from "./typing-rhythm.js";
 
 function seededRandom(seed: number): () => number {
 	let state = seed >>> 0;
@@ -19,16 +25,16 @@ function delaysFor(text: string, base: number, random: () => number): number[] {
 	return characters.map((character, index) => humanCharacterDelay(characters[index - 1], character, base, random));
 }
 
-describe("#given the OPENCUA_TYPE_RHYTHM setting #when it is read #then only an exact human value selects the human rhythm", () => {
-	it("selects constant when the setting is unset or unrecognized", () => {
-		expect(typingRhythm({})).toBe("constant");
-		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: "garbage" })).toBe("constant");
-		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: "humanlike" })).toBe("constant");
+describe("#given the OPENCUA_TYPE_RHYTHM setting #when it is read #then text is typed like a person unless constant is asked for", () => {
+	it("selects human when the setting is unset or anything but constant", () => {
+		expect(typingRhythm({})).toBe("human");
+		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: "garbage" })).toBe("human");
+		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: "human" })).toBe("human");
 	});
 
-	it("selects human for human, ignoring surrounding space and letter case", () => {
-		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: "human" })).toBe("human");
-		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: " HUMAN " })).toBe("human");
+	it("selects constant for constant, ignoring surrounding space and letter case", () => {
+		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: "constant" })).toBe("constant");
+		expect(typingRhythm({ OPENCUA_TYPE_RHYTHM: " CONSTANT " })).toBe("constant");
 	});
 });
 
@@ -69,15 +75,25 @@ describe("#given any previous character, next character, base and random value #
 	});
 });
 
-describe("#given the default 4 ms pacing #when the human base is chosen #then a typist's interval is used and slower pacing is kept", () => {
-	it("raises fast pacing to the typist base and keeps slower pacing", () => {
-		expect(humanBaseMilliseconds(4)).toBe(HUMAN_BASE_MILLISECONDS);
-		expect(humanBaseMilliseconds(0)).toBe(HUMAN_BASE_MILLISECONDS);
-		expect(humanBaseMilliseconds(90)).toBe(90);
+describe("#given a text length #when the human base is chosen #then short text gets a typist's pace and long text fits the budget", () => {
+	it("types a short entry at the typist base and keeps slower configured pacing", () => {
+		expect(humanBaseForText(20, 4)).toBe(HUMAN_BASE_MILLISECONDS);
+		expect(humanBaseForText(1, 0)).toBe(HUMAN_BASE_MILLISECONDS);
+		expect(humanBaseForText(20, 90)).toBe(90);
+	});
+
+	it("speeds up long text so its nominal total stays within the budget, never under the pacing guard", () => {
+		// Above the pacing guard; at a few thousand characters the guard is the floor (checked below).
+		for (const length of [100, 400, 1_000]) {
+			const base = humanBaseForText(length, 4);
+			expect(base).toBeLessThan(HUMAN_BASE_MILLISECONDS);
+			expect(base * length * 1.3).toBeLessThanOrEqual(HUMAN_TEXT_BUDGET_MILLISECONDS);
+		}
+		expect(humanBaseForText(100_000, 4)).toBe(4);
 	});
 
 	it("separates a word-boundary pause from a mid-word keystroke at the default pacing", () => {
-		const base = humanBaseMilliseconds(4);
+		const base = humanBaseForText(20, 4);
 		expect(humanCharacterDelay(" ", "n", base, () => 0.5)).toBeGreaterThan(
 			humanCharacterDelay("e", "n", base, () => 0.5),
 		);
@@ -86,7 +102,7 @@ describe("#given the default 4 ms pacing #when the human base is chosen #then a 
 
 describe("#given the typist base above the configured pacing #when fast transitions are drawn #then they run below the base but never below the pacing", () => {
 	it("lets a repeated key and a same-hand pair run faster than the base while staying at or above the floor", () => {
-		const base = humanBaseMilliseconds(4);
+		const base = humanBaseForText(20, 4);
 		const repeat = humanCharacterDelay("e", "e", base, () => 0.5, 4);
 		const sameHand = humanCharacterDelay("a", "s", base, () => 0.5, 4);
 		const crossHand = humanCharacterDelay("a", "k", base, () => 0.5, 4);

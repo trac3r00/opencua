@@ -36,6 +36,9 @@ const OMITTED_ELEMENTS_NOTE =
 const WINDOW_CONTENT_UNAVAILABLE_NOTE =
 	"this session does not own the Mac's physical screen (Screen Sharing or fast user switching), so the app's window content is not reachable over accessibility: ocrText is the window read from pixels, with screen frames. Keyboard input (type_text, press_keys) still reaches the app; pointer clicks and window-level menu items such as Save do not. Use keyboard routes, and call ask_user when a step needs a click or Save.";
 
+const HIDDEN_SPACE_NOTE =
+	"this window is on another Space and its app is inactive: macOS hides its controls from accessibility, and capture of its pixels may be refused (see screenshotNote). It was read where it is; nothing switched the person's Space. ocrText, when present, is its text with screen frames; click by coordinates inside windowBounds. Keys reach it only while it is its app's focused window. To work on its controls, ask the person to bring it to their Space.";
+
 const SCREENSHOT_UNAVAILABLE_NOTE =
 	"no image: the process running opencua lacks macOS Screen Recording permission, so no capture was attempted (it would raise a permission prompt over the person's screen). Elements and ids are complete and actions work. If pixels are needed, ask the user to grant Screen Recording to the app that launches this server and restart it.";
 
@@ -789,6 +792,10 @@ function stateToolResult(
 	}
 	if (state.windowContentUnavailable === true) {
 		payload["windowContentNote"] = WINDOW_CONTENT_UNAVAILABLE_NOTE;
+	}
+	if (state.windowOnHiddenSpace === true) {
+		payload["windowSpace"] = "other";
+		payload["windowSpaceNote"] = HIDDEN_SPACE_NOTE;
 	}
 	if (state.axUnavailable !== undefined) {
 		payload["axNote"] = axUnavailableNote(state.axUnavailable, process.execPath);

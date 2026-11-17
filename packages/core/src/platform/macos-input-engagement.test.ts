@@ -18,6 +18,7 @@ const native = vi.hoisted(() => {
 
 vi.mock("node:timers/promises", () => ({ setTimeout: () => Promise.resolve() }));
 vi.mock("./macos-ffi/accessibility.js", () => ({
+	focusedCaretFrame: () => undefined,
 	focusedWindowIdForPid: () => native.focused,
 }));
 vi.mock("./macos-ffi/skylight.js", () => ({

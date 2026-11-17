@@ -283,3 +283,20 @@ describe("list_apps #given running apps #when the agent lists them #then each en
 		]);
 	});
 });
+
+describe("get_app_state #given an inactive app whose window is on a Space no display shows #when it is observed #then the agent is told where it is and what works", () => {
+	it("marks the window as on another Space and says how to act on it", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.stateExtras = { windowOnHiddenSpace: true };
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(
+			await harness.client.callTool({ name: "get_app_state", arguments: { app: "Finder" } }),
+		);
+
+		expect(payload["windowSpace"]).toBe("other");
+		expect(typeof payload["windowSpaceNote"]).toBe("string");
+		expect(typeof payload["observation_token"]).toBe("string");
+	});
+});

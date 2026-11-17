@@ -630,8 +630,11 @@ floating overlay that glides to every action — pointer clicks, accessibility p
 writes, text selection, typing and scrolls — ripples on each press, and pulses while the agent
 reads an observation. Keyboard input shows a keyboard glyph beside the pointer, including
 keyboard-only actions; the menu bar indicator also names the keyboard mode.
-It is drawn, not your real cursor. Background delivery stays visually silent,
-without cursor artwork or highlights. Set `OPENCUA_CURSOR=off` to hide the attended cursor. Verified on a live session against Cua Driver 0.28.2: a background
+It is drawn, not your real cursor. Background delivery draws it too, on its own layer: it glides to a
+target and arrives before the press, sits on the text caret while it types (one key at a time at a
+typist's pace, faster for long text; `OPENCUA_TYPE_RHYTHM=constant` types back to back), and the window
+being driven keeps a blue frame with an OpenCUA badge until the agent's cursor goes away.
+`OPENCUA_CURSOR_BACKGROUND_CUES=off` keeps background work undrawn; `OPENCUA_CURSOR=off` hides the cursor everywhere. Verified on a live session against Cua Driver 0.28.2: a background
 click landed with the frontmost app and the real cursor untouched, and the action answer cost
 1.4 KB instead of 121 KB because the post-action image is now opt-in (`include_screenshot: true`).
 
@@ -704,8 +707,13 @@ on a Finder window whose full tree is 718 elements, re-observing a row returned 
 
 In background delivery, `list_windows` can enumerate windows outside the current Mission Control
 Space. Observe the intended `window_id` explicitly; observations and subsequent input stay bound
-to that window rather than selecting another document at the same screen position. Capture uses
-the window's own pixels, so another Space does not need to become visible.
+to that window rather than selecting another document at the same screen position.
+
+An inactive app whose window sits on a Space no display shows is observed where it is: macOS hides
+that window from accessibility, so `get_app_state` answers with `windowSpace: "other"` and a note
+instead of waiting for a window to appear, and nothing switches the person's Space. Its pixels may be
+refused too: on macOS 26 ScreenCaptureKit does not offer such a window to OpenCUA's helper, so the
+answer then carries no image and no `ocrText`.
 
 Off-Space input uses direct process/window routes. It does not raise a window or select a Window
 menu entry to make it key. Keyboard input requires the observed window to already be the app's

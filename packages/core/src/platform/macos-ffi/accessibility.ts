@@ -49,6 +49,8 @@ export const K_AX_SELECTED_TEXT_RANGE_ATTRIBUTE = "AXSelectedTextRange";
 const AX_SUCCESS = 0;
 const AX_VALUE_CG_POINT = 1;
 const AX_VALUE_CG_SIZE = 2;
+const AX_VALUE_CG_RECT = 3;
+const AX_VALUE_CF_RANGE = 4;
 const DOUBLE_SIZE = 8;
 const CG_PAIR_SIZE = DOUBLE_SIZE * 2;
 
@@ -199,6 +201,33 @@ const AXUIElementSetAttributeValue = applicationServices.func("AXUIElementSetAtt
 const AXUIElementCopyAttributeValue = applicationServices.func(
 	"int32_t AXUIElementCopyAttributeValue(void *element, void *attribute, _Out_ void **value)",
 ) as KoffiFunc<(element: AXUIElementRef, attribute: CFStringRef, value: Array<CFTypeRef | null>) => number>;
+
+/** Bound on first use: only the caret lookup needs them, so the rest of this module loads without them. */
+let caretBindings:
+	| {
+			readonly copyParameterized: KoffiFunc<
+				(
+					element: AXUIElementRef,
+					attribute: CFStringRef,
+					parameter: CFTypeRef,
+					value: Array<CFTypeRef | null>,
+				) => number
+			>;
+			readonly createValue: KoffiFunc<(type: number, value: Buffer) => CFTypeRef | null>;
+	  }
+	| undefined;
+
+function caretFunctions(): NonNullable<typeof caretBindings> {
+	caretBindings ??= {
+		copyParameterized: applicationServices.func(
+			"int32_t AXUIElementCopyParameterizedAttributeValue(void *element, void *attribute, void *parameter, _Out_ void **value)",
+		) as NonNullable<typeof caretBindings>["copyParameterized"],
+		createValue: applicationServices.func("AXValueCreate", "void *", ["int32_t", "void *"]) as NonNullable<
+			typeof caretBindings
+		>["createValue"],
+	};
+	return caretBindings;
+}
 
 const AXUIElementCopyActionNames = applicationServices.func(
 	"int32_t AXUIElementCopyActionNames(void *element, _Out_ void **actions)",
@@ -685,6 +714,127 @@ export function focusedElementFrame(pid: number): AXElementFrame | undefined {
 		}
 	} finally {
 		releaseAXElement(app);
+	}
+}
+
+/**
+ * Where the text caret is, in screen points: the bounds of the empty range at the insertion point, or, when the app
+ * answers that with an empty box, the character just before it. Undefined when the focused element has no text range.
+ */
+export function focusedCaretFrame(pid: number): AXElementFrame | undefined {
+	if (!AXIsProcessTrusted() || !isRunning(pid)) {
+		return undefined;
+	}
+	const app = createApplicationElement(pid);
+	let focused: AXUIElementRef | null = null;
+	try {
+		focused = copyOptionalAttributeValue(app, K_AX_FOCUSED_UI_ELEMENT_ATTRIBUTE);
+		if (focused === null) {
+			return undefined;
+		}
+		const range = copyRangeAttribute(focused, K_AX_SELECTED_TEXT_RANGE_ATTRIBUTE);
+		if (range === null) {
+			return undefined;
+		}
+		const insertion = range.location + range.length;
+		const atCaret = boundsForRange(focused, { location: insertion, length: 0 });
+		const before = insertion > 0 ? boundsForRange(focused, { location: insertion - 1, length: 1 }) : undefined;
+		return caretFrameFrom(atCaret, before);
+	} catch {
+		return undefined;
+	} finally {
+		if (focused !== null) releaseAXElement(focused);
+		releaseAXElement(app);
+	}
+}
+
+/**
+ * The caret box from the insertion point's bounds and the character before it. Apps (Notes) answer the empty range at
+ * the end of a line with the right x but the line above, so when the caret sits on the right edge of the character
+ * before it, that character's line wins. After a newline the two differ, and the insertion point's box is kept.
+ */
+export function caretFrameFrom(
+	atCaret: AXElementFrame | undefined,
+	before: AXElementFrame | undefined,
+): AXElementFrame | undefined {
+	const sameLine =
+		atCaret !== undefined && before !== undefined && Math.abs(atCaret.x - (before.x + before.width)) < 2;
+	if (sameLine && before.height > 0) {
+		return { x: before.x + before.width, y: before.y, width: 1, height: before.height };
+	}
+	if (atCaret !== undefined && atCaret.height > 0) {
+		return { x: atCaret.x, y: atCaret.y, width: Math.max(1, atCaret.width), height: atCaret.height };
+	}
+	if (before !== undefined && before.height > 0) {
+		return { x: before.x + before.width, y: before.y, width: 1, height: before.height };
+	}
+	return undefined;
+}
+
+function copyRangeAttribute(
+	element: AXUIElementRef,
+	attribute: string,
+): { readonly location: number; readonly length: number } | null {
+	const value = copyOptionalAttributeValue(element, attribute);
+	if (value === null) {
+		return null;
+	}
+	try {
+		if (!isAXValue(value) || AXValueGetType(value) !== AX_VALUE_CF_RANGE) {
+			return null;
+		}
+		const buffer = Buffer.alloc(CG_PAIR_SIZE);
+		if (!AXValueGetValue(value, AX_VALUE_CF_RANGE, buffer)) {
+			return null;
+		}
+		return { location: Number(buffer.readBigInt64LE(0)), length: Number(buffer.readBigInt64LE(DOUBLE_SIZE)) };
+	} finally {
+		cfRelease(value);
+	}
+}
+
+function boundsForRange(
+	element: AXUIElementRef,
+	range: { readonly location: number; readonly length: number },
+): AXElementFrame | undefined {
+	const input = Buffer.alloc(CG_PAIR_SIZE);
+	input.writeBigInt64LE(BigInt(range.location), 0);
+	input.writeBigInt64LE(BigInt(range.length), DOUBLE_SIZE);
+	const { copyParameterized, createValue } = caretFunctions();
+	const parameter = createValue(AX_VALUE_CF_RANGE, input);
+	if (parameter === null) {
+		return undefined;
+	}
+	try {
+		return withCFString("AXBoundsForRange", (attributeReference) => {
+			const out: Array<CFTypeRef | null> = [null];
+			if (copyParameterized(element, attributeReference, parameter, out) !== AX_SUCCESS) {
+				return undefined;
+			}
+			const value = out[0];
+			if (value === null || value === undefined) {
+				return undefined;
+			}
+			try {
+				if (!isAXValue(value) || AXValueGetType(value) !== AX_VALUE_CG_RECT) {
+					return undefined;
+				}
+				const rect = Buffer.alloc(CG_PAIR_SIZE * 2);
+				if (!AXValueGetValue(value, AX_VALUE_CG_RECT, rect)) {
+					return undefined;
+				}
+				return {
+					x: rect.readDoubleLE(0),
+					y: rect.readDoubleLE(DOUBLE_SIZE),
+					width: rect.readDoubleLE(DOUBLE_SIZE * 2),
+					height: rect.readDoubleLE(DOUBLE_SIZE * 3),
+				};
+			} finally {
+				cfRelease(value);
+			}
+		});
+	} finally {
+		cfRelease(parameter);
 	}
 }
 

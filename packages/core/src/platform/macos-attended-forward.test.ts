@@ -68,6 +68,7 @@ vi.mock("./macos-ffi/screenshot.js", () => ({
 	screenCaptureAllowed: () => true,
 }));
 vi.mock("./macos-ffi/accessibility.js", () => ({
+	focusedCaretFrame: () => undefined,
 	extractAccessibilityTree: () => ({
 		axAvailable: true,
 		truncated: false,

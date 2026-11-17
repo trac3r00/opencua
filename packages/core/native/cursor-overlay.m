@@ -38,6 +38,9 @@ static NSMutableDictionary<NSNumber *, NSView *> *gMarkerViews = nil;
 static NSMutableDictionary<NSNumber *, NSNumber *> *gMarkerModes = nil;
 static NSMutableDictionary<NSNumber *, NSTimer *> *gMarkerTimers = nil;
 static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerHighlights = nil;
+// The window each app's agent is working in: a lasting border with an OpenCUA
+// badge, so the person can tell at a glance which window is being driven.
+static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerFrames = nil;
 static NSMutableDictionary<NSNumber *, NSTimer *> *gMarkerHighlightTimers = nil;
 static NSWindow *gHighlightWindow = nil;
 static NSTimer *gHighlightTimer = nil;
@@ -1044,12 +1047,16 @@ static void stack_marker(NSWindow *window, NSNumber *key) {
 // The user can raise, hide or move the target app at any time; re-stack every
 // marker and per-app highlight so each stays just above its own app.
 static void restack_markers(void) {
-  if (gMarkerWindows.count == 0 && gMarkerHighlights.count == 0) {
+  if (gMarkerWindows.count == 0 && gMarkerHighlights.count == 0 &&
+      gMarkerFrames.count == 0) {
     return;
   }
   NSArray<NSDictionary *> *windows = onscreen_windows();
   for (NSNumber *key in gMarkerHighlights.allKeys) {
     stack_marker_window(gMarkerHighlights[key], key, windows);
+  }
+  for (NSNumber *key in gMarkerFrames.allKeys) {
+    stack_marker_window(gMarkerFrames[key], key, windows);
   }
   for (NSNumber *key in gMarkerWindows.allKeys) {
     stack_marker_window(gMarkerWindows[key], key, windows);
@@ -1167,6 +1174,53 @@ static void start_ripple(NSPoint windowOrigin) {
   [outline setLineWidth:5.0];
   [[NSColor colorWithSRGBRed:0.39 green:0.78 blue:1.0 alpha:0.9] setStroke];
   [outline stroke];
+}
+@end
+
+// How far the badge rises above the window's top edge; the frame window is
+// that much taller than the window it marks.
+static const CGFloat kFrameBadgeRise = 11.0;
+
+@interface FrameView : NSView
+@end
+
+@implementation FrameView
+- (void)drawRect:(NSRect)dirtyRect {
+  (void)dirtyRect;
+  NSColor *accent = [NSColor colorWithSRGBRed:0.20 green:0.55 blue:1.0 alpha:0.9];
+  NSRect marked = NSMakeRect(0, 0, NSWidth(self.bounds),
+                             NSHeight(self.bounds) - kFrameBadgeRise);
+  NSBezierPath *outline =
+      [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(marked, 1.5, 1.5)
+                                      xRadius:10.0
+                                      yRadius:10.0];
+  [outline setLineWidth:3.0];
+  [accent setStroke];
+  [outline stroke];
+  NSDictionary *attributes = @{
+    NSFontAttributeName : [NSFont systemFontOfSize:11.0
+                                            weight:NSFontWeightSemibold],
+    NSForegroundColorAttributeName : NSColor.whiteColor
+  };
+  NSString *label = @"OpenCUA";
+  NSSize text = [label sizeWithAttributes:attributes];
+  CGFloat height = 2.0 * kFrameBadgeRise;
+  CGFloat width = text.width + 28.0;
+  // The badge sits across the top edge near the right corner, clear of the
+  // traffic lights and over as little of the window's own content as it can.
+  NSRect pill = NSMakeRect(NSMaxX(marked) - width - 14.0,
+                           NSMaxY(marked) - kFrameBadgeRise, width, height);
+  [accent setFill];
+  [[NSBezierPath bezierPathWithRoundedRect:pill
+                                   xRadius:height / 2.0
+                                   yRadius:height / 2.0] fill];
+  [NSColor.whiteColor setFill];
+  [[NSBezierPath
+      bezierPathWithOvalInRect:NSMakeRect(NSMinX(pill) + 9.0,
+                                          NSMidY(pill) - 3.0, 6.0, 6.0)] fill];
+  [label drawAtPoint:NSMakePoint(NSMinX(pill) + 19.0,
+                                 NSMidY(pill) - text.height / 2.0)
+      withAttributes:attributes];
 }
 @end
 
@@ -1358,6 +1412,37 @@ static void apply_highlight(double x, double y, double w, double h,
     gMarkerHighlightTimers[key] = fade;
 }
 
+// Mark the window an app's agent works in until that agent's cursor is hidden
+// or the overlay goes idle; repeated frames only follow the window.
+static void apply_frame(double x, double y, double w, double h, NSNumber *key) {
+  if (key == nil || w <= 0.0 || h <= 0.0) {
+    return;
+  }
+  NSWindow *window = gMarkerFrames[key];
+  if (window == nil) {
+    window = [[NSWindow alloc] initWithContentRect:NSZeroRect
+                                         styleMask:NSWindowStyleMaskBorderless
+                                           backing:NSBackingStoreBuffered
+                                             defer:NO];
+    [window setOpaque:NO];
+    [window setBackgroundColor:[NSColor clearColor]];
+    [window setHasShadow:NO];
+    [window setIgnoresMouseEvents:YES];
+    [window setCollectionBehavior:gHighlightWindow.collectionBehavior];
+    [window setContentView:[[FrameView alloc] initWithFrame:NSZeroRect]];
+    gMarkerFrames[key] = window;
+  }
+  CGFloat screenHeight = primary_screen_height();
+  NSRect frame =
+      NSMakeRect(x, screenHeight - y - h, w, h + kFrameBadgeRise);
+  if (!NSEqualRects(window.frame, frame)) {
+    [window setFrame:frame display:YES];
+    [window.contentView setNeedsDisplay:YES];
+  }
+  [window setAlphaValue:1.0];
+  stack_marker(window, key);
+}
+
 static void apply_hide(NSNumber *markerKey) {
   if (markerKey != nil) {
     OverlayPointerView *view = (OverlayPointerView *)gMarkerViews[markerKey];
@@ -1368,6 +1453,8 @@ static void apply_hide(NSNumber *markerKey) {
     [gMarkerHighlightTimers removeObjectForKey:markerKey];
     [gMarkerHighlights[markerKey] orderOut:nil];
     [gMarkerHighlights removeObjectForKey:markerKey];
+    [gMarkerFrames[markerKey] orderOut:nil];
+    [gMarkerFrames removeObjectForKey:markerKey];
     [gMarkerTimers[markerKey] invalidate];
     [gMarkerTimers removeObjectForKey:markerKey];
     NSWindow *window = marker_window(markerKey, NO);
@@ -1769,6 +1856,15 @@ static int dispatch_command_line(const char *line, int replyFd) {
       }
       reset_idle_timer();
     });
+  } else if (sscanf(command, "frame %lf %lf %lf %lf", &x, &y, &w, &h) == 4) {
+    if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) {
+      return 0;
+    }
+    NSNumber *markerKey = key;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      apply_frame(x, y, w, h, markerKey);
+      reset_idle_timer();
+    });
   } else if (sscanf(command, "highlight %lf %lf %lf %lf", &x, &y, &w, &h) ==
              4) {
     if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) {
@@ -2029,6 +2125,7 @@ int main(int argc, const char *argv[]) {
     gMarkerTimers = [NSMutableDictionary dictionary];
     gMarkerHighlights = [NSMutableDictionary dictionary];
     gMarkerHighlightTimers = [NSMutableDictionary dictionary];
+    gMarkerFrames = [NSMutableDictionary dictionary];
 
     NSRect frame = NSMakeRect(0, 0, kOverlaySize, kOverlaySize);
     gWindow = [[NSWindow alloc] initWithContentRect:frame

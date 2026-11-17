@@ -46,6 +46,7 @@ vi.mock("./macos-ffi/skylight.js", () => ({
 vi.mock("./macos-ffi/window-list.js", () => ({ listWindows: () => [], listOnscreenWindows: () => [] }));
 vi.mock("./macos-ffi/lock-screen.js", () => ({ isScreenLocked: () => false }));
 vi.mock("./macos-ffi/accessibility.js", () => ({
+	focusedCaretFrame: () => undefined,
 	focusedElementFrame: () => undefined,
 	focusedElementInWebArea: () => false,
 	focusedWindowIdForPid: () => 31,

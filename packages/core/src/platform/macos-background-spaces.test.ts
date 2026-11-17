@@ -48,6 +48,7 @@ vi.mock("./macos-window-target-fallback.js", () => ({
 	selectSystemEventsTargetWindow: vi.fn(async () => undefined),
 }));
 vi.mock("./macos-ffi/accessibility.js", () => ({
+	focusedCaretFrame: () => undefined,
 	currentObservationKey: vi.fn(() => "0:background-space-test"),
 	accessibilitySnapshotPids: vi.fn<() => readonly number[]>(() => []),
 	releaseSnapshotsForExitedPids: vi.fn<() => number>(() => 0),

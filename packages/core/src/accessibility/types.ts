@@ -155,6 +155,11 @@ export interface AppState {
 	 * on over accessibility, only the menu bar can. {@link ocrText} is the window read from pixels.
 	 */
 	windowContentUnavailable?: boolean;
+	/**
+	 * The window sits on a Space no display shows, and its app is inactive: macOS hides it from accessibility, so the
+	 * observation is its pixels and {@link ocrText}, read where it is without switching the person's Space.
+	 */
+	windowOnHiddenSpace?: boolean;
 	/** Text recognized in the window image with its screen frame, present when window content is unavailable. */
 	ocrText?: readonly OcrTextEntry[];
 	/**

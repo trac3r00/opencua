@@ -25,6 +25,7 @@ import type {
 } from "../types/index.js";
 import { readRealCursorPosition } from "./macos-cursor.js";
 import {
+	focusedCaretFrame,
 	focusedElementFrame,
 	focusedElementInWebArea,
 	focusedWindowIdForPid,
@@ -32,7 +33,6 @@ import {
 	focusedWindowShowsFilePanel,
 	raiseWindowInApp,
 	windowIdsAtScreenPoint,
-	windowMinimizedForPid,
 	windowTitlesForPid,
 } from "./macos-ffi/accessibility.js";
 import {
@@ -75,7 +75,8 @@ import { selectSystemEventsTargetWindow } from "./macos-window-target-fallback.j
 import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveTargetWindow, toTargetWindow, visibleWindowsForPid } from "./macos-window-target.js";
 import { isOwnedSurfacePid } from "./owned-surfaces.js";
-import { humanBaseMilliseconds, humanCharacterDelay, typingRhythm } from "./typing-rhythm.js";
+import { humanBaseForText, humanCharacterDelay, typingRhythm } from "./typing-rhythm.js";
+import { windowMinimizedState } from "./window-minimized.js";
 
 /**
  * On-screen window ids in the WindowServer's front-to-back order. A window that is minimized or
@@ -90,6 +91,12 @@ export function currentOnscreenWindowIds(): readonly number[] | undefined {
 }
 
 let focusedFrameSource: (pid: number) => Rect | undefined = focusedElementFrame;
+let caretFrameSource: (pid: number) => Rect | undefined = focusedCaretFrame;
+
+/** Test seam for where the text caret is; production asks the app over accessibility. */
+export function setCaretFrameSourceForTesting(source: ((pid: number) => Rect | undefined) | undefined): void {
+	caretFrameSource = source ?? focusedCaretFrame;
+}
 
 /** Replaces the focused-element frame reader the region check uses; pass undefined to restore the native one. */
 export function setFocusedFrameSourceForTesting(source: ((pid: number) => Rect | undefined) | undefined): void {
@@ -246,6 +253,8 @@ export function typeCharacterDelayMilliseconds(environment: NodeJS.ProcessEnv = 
 }
 
 const TYPE_CHARACTER_DELAY_MS_DEFAULT = 4;
+/** While typing, the drawn cursor re-reads the caret after a newline and every this many characters. */
+const CARET_FOLLOW_INTERVAL = 24;
 
 /** How often a held key checks whether its call was stopped, so a long hold is released soon after a stop. */
 const HOLD_CHECK_MILLISECONDS = 50;
@@ -826,6 +835,7 @@ export class MacOSInputController {
 			this.beforeInput();
 			const targetWindow = await this.pointerWindow(call, position);
 			this.requirePointerWindow(call, targetWindow);
+			this.frameWindow(call.pid, targetWindow);
 			// Read after waiting for the gesture before this one and for the window lookup: nothing goes down once stopped.
 			this.checkpoint(call);
 			const post = this.clickPost(call);
@@ -837,6 +847,7 @@ export class MacOSInputController {
 					this.markPointer(position);
 				} else if (targetWindow !== undefined) {
 					if (this.isBackground || isOwnedSurfacePid(call.pid)) {
+						await this.glidePointer(position, call.pid);
 						await postClick(post, position, button, 1, targetWindow, flags);
 						this.showPointer(position, true, call.pid);
 						return;
@@ -865,6 +876,7 @@ export class MacOSInputController {
 					this.markPointer(position);
 				} else if (targetWindow !== undefined) {
 					if (this.isBackground || isOwnedSurfacePid(call.pid)) {
+						await this.glidePointer(position, call.pid);
 						await postDoubleClick(post, position, targetWindow, flags);
 						this.showPointer(position, true, call.pid);
 						return;
@@ -887,6 +899,9 @@ export class MacOSInputController {
 		const targetWindow = await this.requireSessionWindow(call, "keyboard");
 		const keyboardPid = this.keyboardPid(call);
 		assertFocusInInputRegion(() => (keyboardPid === undefined ? undefined : focusedFrameSource(keyboardPid)));
+		this.frameWindow(call.pid, targetWindow);
+		// The drawn cursor goes to the line being typed on first, the way a person looks at where they type.
+		await this.followCaret(keyboardPid, call.pid, true);
 		this.showKeyboard();
 		// Pace keystrokes: posting characters back-to-back outruns the target app's
 		// event processing and drops characters ("https://example.com" -> "https://e").
@@ -895,6 +910,7 @@ export class MacOSInputController {
 		const pacing = typeCharacterDelayMilliseconds();
 		const rhythm = typingRhythm();
 		const segments = Array.from(text);
+		const humanBase = humanBaseForText(segments.length, pacing);
 		for (let i = 0; i < segments.length; i++) {
 			const segment = segments[i];
 			if (segment === undefined) {
@@ -912,8 +928,11 @@ export class MacOSInputController {
 			// The wait after this character is the transition into the next one.
 			const delay =
 				rhythm === "human" && next !== undefined
-					? humanCharacterDelay(segment, next, humanBaseMilliseconds(pacing), Math.random, pacing)
+					? humanCharacterDelay(segment, next, humanBase, Math.random, pacing)
 					: pacing;
+			if (segment === "\n" || (i + 1) % CARET_FOLLOW_INTERVAL === 0) {
+				await this.followCaret(keyboardPid, call.pid, false);
+			}
 			if (delay > 0 && i < segments.length - 1) {
 				await delayMilliseconds(delay);
 			}
@@ -1160,6 +1179,43 @@ export class MacOSInputController {
 		}
 	}
 
+	/**
+	 * Move the drawn cursor to `position` and wait until it is there, so the input that follows lands under it the
+	 * way a person's click follows their hand. Without a drawn cursor only the logical pointer moves.
+	 */
+	/** Keep the window being driven marked, at its current bounds, while input goes to it. */
+	private frameWindow(pid: number | undefined, window: SkyLightTargetWindow | undefined): void {
+		if (pid === undefined || window === undefined || (this.isBackground && !this.backgroundCues)) return;
+		this.overlay.frame?.(window.bounds, pid);
+	}
+
+	async glidePointer(position: Point, pid: number | undefined): Promise<void> {
+		const pointer = this.pointerFor(pid);
+		const from = pointer.position();
+		pointer.moveTo(position);
+		if (this.isBackground && !this.backgroundCues) return;
+		this.overlay.setMode("pointer", pid);
+		if (this.overlay.glide === undefined) {
+			this.overlay.set(position, pid);
+			return;
+		}
+		await this.overlay.glide(position, from, pid);
+	}
+
+	/** Put the drawn cursor on the text caret: glide there before typing, then keep up with it while typing. */
+	private async followCaret(keyboardPid: number | undefined, pid: number | undefined, wait: boolean): Promise<void> {
+		if (keyboardPid === undefined || (this.isBackground && !this.backgroundCues)) return;
+		const caret = caretFrameSource(keyboardPid);
+		if (caret === undefined) return;
+		const position = { x: caret.x, y: caret.y + caret.height / 2 };
+		if (wait) {
+			await this.glidePointer(position, pid);
+			return;
+		}
+		this.pointerFor(pid).moveTo(position);
+		this.overlay.set(position, pid);
+	}
+
 	showScrollPointer(position: Point, pid = this.currentTargetPid, direction?: ScrollDirection): void {
 		if (!this.isBackground || this.backgroundCues) {
 			if (direction !== undefined && this.overlay.setScrollMode !== undefined) {
@@ -1323,7 +1379,7 @@ export class MacOSInputController {
 		const resolution = resolveTargetWindow(allSpaces, pid, onscreenIds, undefined, windowId, {
 			allowOffscreen: true,
 		});
-		if (resolution.kind !== "resolved" || windowMinimizedForPid(pid, windowId) !== false) {
+		if (resolution.kind !== "resolved" || windowMinimizedState(pid, windowId) !== false) {
 			return undefined;
 		}
 		return resolution.window;

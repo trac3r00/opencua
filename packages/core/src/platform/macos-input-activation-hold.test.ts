@@ -104,7 +104,8 @@ beforeEach(() => {
 	log.latency = 0;
 	log.failOn = undefined;
 	process.env["OPENCUA_TYPE_CHARACTER_DELAY_MS"] = "0";
-	Reflect.deleteProperty(process.env, "OPENCUA_TYPE_RHYTHM");
+	// Activation holding is under test here, not the typing rhythm: keystrokes go back to back.
+	process.env["OPENCUA_TYPE_RHYTHM"] = "constant";
 	input.setOnscreenWindowIdsSourceForTesting(() => [WINDOW.id]);
 	input.setScreenLayoutSourceForTesting(() => ({ displays: [MAIN_DISPLAY], windows: [WINDOW.bounds] }));
 	input.setFocusStealWatcherForTesting(() => undefined);
