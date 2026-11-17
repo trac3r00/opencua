@@ -61,8 +61,9 @@ cursorMotionFromEnvironment({ [CURSOR_MOTION_ENV]: '{"style":"signature_arc","gl
 
 ### Menu bar item
 
-The shared overlay daemon shows one `opencua` menu bar item while it is active (mode and motion style in its menu). It
-appears on cursor activity, and disappears when the cursor is hidden, the daemon quits, or it has been idle for 15
+The shared overlay daemon shows one `opencua` menu bar item while it is active (mode and motion style in its menu), but
+only when no other opencua item is up: while an MCP server's Stop/Resume item or cua-history's menu is shown, the
+cursor adds none, so the menu bar never carries two opencua items. It appears on cursor activity, and disappears when the cursor is hidden, the daemon quits, or it has been idle for 15
 seconds. The daemon can outlive a short-lived process, so the item may linger briefly. A disabled caller never starts or
 updates the overlay; another active client can still keep the shared item visible.
 

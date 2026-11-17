@@ -81,6 +81,27 @@ describe("#given several opencua servers #when each starts its menu helper #then
 	});
 });
 
+describe("#given a menu helper or cua-history shows opencua #when the drawing overlay moves #then it adds no second item", () => {
+	it("hides the drawing overlay's item while another opencua item is shown and shows it when none is", async () => {
+		if (scratch === undefined) throw new Error("missing scratch directory");
+		const state = join(scratch, "drawing");
+
+		const alone = await hold([helper, "drawing"], state);
+		expect(alone.answer).toBe("shown");
+		await alone.release();
+
+		const menu = await hold([helper, "visible"], state);
+		const besideMenu = await hold([helper, "drawing"], state);
+		expect([menu.answer, besideMenu.answer]).toEqual(["shown", "hidden"]);
+		await Promise.all([menu.release(), besideMenu.release()]);
+
+		const history = await hold([recorder, "menubar", state], state);
+		const besideHistory = await hold([helper, "drawing"], state);
+		expect([history.answer, besideHistory.answer]).toEqual(["held", "hidden"]);
+		await Promise.all([history.release(), besideHistory.release()]);
+	});
+});
+
 describe("#given cua-history running #when a menu helper starts #then the history menu is the only opencua item", () => {
 	it("hides the helper while the recorder holds the menu bar and shows it again after", async () => {
 		if (scratch === undefined) throw new Error("missing scratch directory");

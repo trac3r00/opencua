@@ -385,6 +385,28 @@ static BOOL stop_menu_visible(void) {
   return hold_stop_menu_lock() && !history_menu_running();
 }
 
+// Whether another process holds stop-menu.lock, that is, a status-only helper
+// already shows opencua's menu bar item.
+static BOOL stop_menu_held_elsewhere(void) {
+  if (gStopMenuLock >= 0) {
+    return NO;
+  }
+  int fd = open_state_lock(@"stop-menu.lock");
+  if (fd < 0) {
+    return NO;
+  }
+  BOOL held = flock(fd, LOCK_EX | LOCK_NB) != 0;
+  close(fd);
+  return held;
+}
+
+// A drawing overlay adds its own item only when neither a status-only helper
+// nor cua-history shows opencua's control, so the menu bar never carries two
+// opencua items while an agent acts.
+static BOOL drawing_status_visible(void) {
+  return !stop_menu_held_elsewhere() && !history_menu_running();
+}
+
 static void ensure_status_item(void);
 static void remove_status_item(void);
 
@@ -448,6 +470,10 @@ static void update_status_item(void) {
 }
 
 static void ensure_status_item(void) {
+  if (!gStatusOnly && !drawing_status_visible()) {
+    remove_status_item();
+    return;
+  }
   if (gStatusItem == nil) {
     gStatusItem = [[NSStatusBar systemStatusBar]
         statusItemWithLength:NSVariableStatusItemLength];

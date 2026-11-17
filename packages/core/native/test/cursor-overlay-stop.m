@@ -33,6 +33,15 @@ int main(int argc, const char *argv[]) {
       }
       return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "drawing") == 0) {
+      // Decide as a drawing overlay does whether it adds its own item.
+      printf("%s\n", drawing_status_visible() ? "shown" : "hidden");
+      fflush(stdout);
+      char buffer[16];
+      while (fread(buffer, 1, sizeof(buffer), stdin) > 0) {
+      }
+      return 0;
+    }
     if (argc != 2 || strcmp(argv[1], "menu") != 0) {
       return 2;
     }
