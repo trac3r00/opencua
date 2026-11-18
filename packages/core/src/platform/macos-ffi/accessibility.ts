@@ -1564,6 +1564,22 @@ export function focusWebAreaOfElement(pid: number, elementIndex: number): boolea
 	}
 }
 
+/** True when the app's keyboard focus is inside a web page. */
+export function appFocusInWebArea(pid: number): boolean {
+	const app = createApplicationElement(pid);
+	try {
+		const focused = copyOptionalAttributeValue(app, K_AX_FOCUSED_UI_ELEMENT_ATTRIBUTE);
+		if (focused === null) return false;
+		try {
+			return isInsideWebArea(focused as AXUIElementRef);
+		} finally {
+			releaseAXElement(focused as AXUIElementRef);
+		}
+	} finally {
+		releaseAXElement(app);
+	}
+}
+
 /** True when the element sits inside a web page, whose input handlers only see real key events. */
 function isInsideWebArea(element: AXUIElementRef): boolean {
 	let current: CFTypeRef | null = cfRetain(element);

@@ -36,6 +36,7 @@ import { InputLock } from "./input-lock.js";
 import { type KeyboardFenceClock, awaitAccessibilityWriteSettled, awaitKeyboardFence } from "./keyboard-fence.js";
 import {
 	accessibilitySnapshotPids,
+	appFocusInWebArea,
 	currentObservationKey,
 	elementFrameByIndex,
 	extractAccessibilityTree,
@@ -113,6 +114,9 @@ import { isOwnedSurfacePid, surfaceAudioState } from "./owned-surfaces.js";
 import { currentSystemPrompts } from "./system-prompts.js";
 import { windowMinimizedState, windowOnHiddenSpace } from "./window-minimized.js";
 
+/** How long a background web click waits for the page to take keyboard focus, and how often it looks. */
+const WEB_FOCUS_SETTLE_LIMIT_MILLISECONDS = 400;
+const WEB_FOCUS_POLL_MILLISECONDS = 15;
 const execFileAsync = promisify(execFile);
 
 const FINDER_DESKTOP_BOUNDS_TIMEOUT_MILLISECONDS = 2_000;
@@ -1238,7 +1242,13 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async focusWebPage(targetPid: number, elementIndex: number): Promise<boolean> {
-		return focusWebAreaOfElement(targetPid, elementIndex);
+		if (!focusWebAreaOfElement(targetPid, elementIndex)) return false;
+		// The browser applies the focus change asynchronously; a click sent before it lands is still spent on focus.
+		const deadline = Date.now() + WEB_FOCUS_SETTLE_LIMIT_MILLISECONDS;
+		while (!appFocusInWebArea(targetPid) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, WEB_FOCUS_POLL_MILLISECONDS));
+		}
+		return true;
 	}
 
 	async pressAtPosition(targetPid: number, position: Point): Promise<boolean> {
