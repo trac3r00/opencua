@@ -59,6 +59,7 @@ vi.mock("./macos-ffi/accessibility.js", () => ({
 }));
 
 const { runInInputScope } = await import("../computer/input-scope.js");
+const { NOOP_POINTER_OVERLAY } = await import("./macos-ffi/cursor-overlay.js");
 const {
 	MacOSInputController,
 	setFocusStealWatcherForTesting,
@@ -136,5 +137,41 @@ describe("#given background delivery #when the agent only types into a target ap
 		expect(bindings.postToHidEventTap).not.toHaveBeenCalled();
 		expect(skyLight.postAuthenticatedSkyLightEventToPid.mock.calls.every(([pid]) => pid === PID)).toBe(true);
 		expect(skyLight.postSkyLightEventToPid.mock.calls.every(([pid]) => pid === PID)).toBe(true);
+	});
+});
+
+describe("#given a click aimed ahead of time #when the click follows #then the hand does not travel twice", () => {
+	it("glides once and sends the click only after the aimed glide arrived", async () => {
+		const order: string[] = [];
+		const glides: { readonly x: number; readonly y: number }[] = [];
+		const overlay = {
+			...NOOP_POINTER_OVERLAY,
+			glide: async (point: { readonly x: number; readonly y: number }) => {
+				glides.push(point);
+				order.push("glide");
+				await Promise.resolve();
+				order.push("arrived");
+			},
+		};
+		skyLight.postSkyLightEventToPid.mockImplementation(() => {
+			order.push("post");
+		});
+		skyLight.postAuthenticatedSkyLightEventToPid.mockImplementation(() => {
+			order.push("post");
+			return true;
+		});
+		const controller = new MacOSInputController(PID, overlay, () => false, undefined, "background", true, true);
+		try {
+			await runInInputScope({ target: { pid: PID, windowId: 31 } }, async () => {
+				controller.aimPointer({ x: 200, y: 200 }, PID);
+				await controller.click({ x: 200, y: 200 });
+			});
+		} finally {
+			controller.close();
+		}
+
+		expect(glides).toEqual([{ x: 200, y: 200 }]);
+		const firstPost = order.indexOf("post");
+		expect(firstPost).toBeGreaterThan(order.indexOf("arrived"));
 	});
 });

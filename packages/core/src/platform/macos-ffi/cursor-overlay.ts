@@ -118,12 +118,13 @@ export function createCursorOverlay(
 ): PointerOverlay {
 	const environmentMotion = process.env[CURSOR_MOTION_ENV]?.trim();
 	// Default the renderer, not the shared parser used by persisted CLI settings.
-	const configuration =
+	const configuration = agentPaced(
 		motion !== undefined
 			? parseCursorMotion(motion)
 			: environmentMotion === undefined || environmentMotion === ""
 				? { style: "adaptive" as const }
-				: cursorMotionFromEnvironment();
+				: cursorMotionFromEnvironment(),
+	);
 	const transportsByIdentity = new Map<string | undefined, OverlayTransport | undefined>();
 	const pidsByIdentity = new Map<string | undefined, Set<number>>();
 	const factory: OverlayTransportFactory =
@@ -231,6 +232,19 @@ function safeTransport(
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * How long the drawn cursor takes to reach a target when the configuration names no duration. Each action waits
+ * for the cursor to arrive before its input goes out, so this sets the floor of every click; the glide stays
+ * visible without slowing the agent the way a human-paced (Fitts) glide of 300 to 450 ms did.
+ */
+export const AGENT_GLIDE_MILLISECONDS = 160;
+
+/** A motion with no explicit duration glides at agent pace; an explicit duration or fixed timing is kept. */
+export function agentPaced(motion: CursorMotionConfig | undefined): CursorMotionConfig | undefined {
+	if (motion === undefined || motion.glideDurationMs !== undefined || motion.timing === "fixed") return motion;
+	return { ...motion, glideDurationMs: AGENT_GLIDE_MILLISECONDS };
 }
 
 /** The longest an action waits for the drawn cursor to reach its target. */

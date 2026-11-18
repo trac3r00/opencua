@@ -39,6 +39,7 @@ import {
 	currentObservationKey,
 	elementFrameByIndex,
 	extractAccessibilityTree,
+	focusWebAreaOfElement,
 	focusedElementFrame,
 	focusedWindowIdsForObservationPid,
 	focusedWindowIsModal,
@@ -1230,6 +1231,14 @@ export class MacOSHostComputer extends HostComputer {
 
 	async isWebElement(targetPid: number, elementIndex: number): Promise<boolean> {
 		return isWebElementByIndex(targetPid, elementIndex);
+	}
+
+	aimPointer(targetPid: number, point: Point): void {
+		this.input.aimPointer(point, targetPid);
+	}
+
+	async focusWebPage(targetPid: number, elementIndex: number): Promise<boolean> {
+		return focusWebAreaOfElement(targetPid, elementIndex);
 	}
 
 	async pressAtPosition(targetPid: number, position: Point): Promise<boolean> {

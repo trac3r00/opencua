@@ -16,7 +16,9 @@ const source = ts.createSourceFile(
 const declarations = source.statements.filter(
 	(statement) =>
 		ts.isFunctionDeclaration(statement) &&
-		(statement.name?.text === "createCursorOverlay" || statement.name?.text === "safeTransport"),
+		(statement.name?.text === "createCursorOverlay" ||
+			statement.name?.text === "safeTransport" ||
+			statement.name?.text === "agentPaced"),
 );
 const compiled = ts.transpileModule(declarations.map((node) => node.getText(source)).join("\n"), {
 	compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -50,6 +52,7 @@ describe("#given named agents #when cursor transports are created #then ownershi
 				exports: {},
 				process: { env: {} },
 				CURSOR_MOTION_ENV: "OPENCUA_CURSOR_MOTION",
+				AGENT_GLIDE_MILLISECONDS: 160,
 				denyHostInteraction,
 				currentCursorIdentity,
 				currentCursorOwner,

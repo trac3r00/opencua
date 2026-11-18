@@ -16,7 +16,18 @@ function webComputer(webIds: readonly number[] = [9]) {
 	computer.delivery = "background";
 	computer.elementFrames.set(9, { x: 320, y: 190, width: 60, height: 80 });
 	computer.elementFrames.set(20, { x: 320, y: 190, width: 60, height: 80 });
+	const pageFocus: { readonly id: number; readonly effectsBefore: number }[] = [];
+	const aims: { readonly effectsBefore: number; readonly preflightsBefore: number }[] = [];
 	return Object.assign(computer, {
+		pageFocus,
+		aims,
+		aimPointer(): void {
+			aims.push({ effectsBefore: computer.effects.length, preflightsBefore: computer.preflightExpected.length });
+		},
+		async focusWebPage(_pid: number, id: number): Promise<boolean> {
+			pageFocus.push({ id, effectsBefore: computer.effects.length });
+			return true;
+		},
 		async pressAtPosition(): Promise<boolean> {
 			return true;
 		},
@@ -113,6 +124,67 @@ describe("#given a background web element #when click_target defaults to auto #t
 		expect(jsonPayload(result)).toMatchObject({ route: "synthetic_events", delivery: "background" });
 		expect(computer.effects).toContainEqual({ kind: "click", point: { x: 350, y: 230 } });
 		expect(computer.effects.some((effect) => effect.kind === "performAction")).toBe(false);
+	});
+});
+
+describe("#given a background web element #when it is clicked #then its page gets focus before the click", () => {
+	it("focuses the page first for click by id and for click_target", async () => {
+		const computer = webComputer();
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		await harness.client.callTool({
+			name: "click",
+			arguments: { app: "Finder", observation_token: token, element_index: "9" },
+		});
+		await harness.client.callTool({ name: "click_target", arguments: { app: "Finder", query: { label: "Open" } } });
+
+		const clicks = computer.effects.flatMap((effect, index) => (effect.kind === "click" ? [index] : []));
+		expect(computer.pageFocus.map((focus) => focus.id)).toEqual([9, 9]);
+		expect(computer.pageFocus.map((focus) => focus.effectsBefore)).toEqual(clicks);
+	});
+});
+
+describe("#given a click whose target is known #when the checks run #then the cursor is already on its way", () => {
+	it("aims before click_target's preflight and before its click", async () => {
+		const computer = webComputer();
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const preflightsBefore = computer.preflightExpected.length;
+
+		await harness.client.callTool({ name: "click_target", arguments: { app: "Finder", query: { label: "Open" } } });
+
+		expect(computer.aims).toEqual([{ effectsBefore: 0, preflightsBefore }]);
+		expect(computer.preflightExpected.length).toBeGreaterThan(preflightsBefore);
+		expect(computer.effects.findIndex((effect) => effect.kind === "click")).toBeGreaterThanOrEqual(0);
+	});
+
+	it("aims each chained click before that step's window guard and click", async () => {
+		const computer = webComputer([9, 20]);
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_steps",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				steps: [
+					{ type: "click", element_index: "9" },
+					{ type: "click", element_index: "20" },
+				],
+			},
+		});
+
+		expect(result.isError).not.toBe(true);
+		const clicks = computer.effects.flatMap((effect, index) => (effect.kind === "click" ? [index] : []));
+		expect(computer.aims.map((aim) => aim.effectsBefore)).toEqual(clicks);
+		// The second step's window guard runs a preflight; the aim came before it.
+		const [first, second] = computer.aims;
+		expect(second?.preflightsBefore).toBe(first?.preflightsBefore);
+		expect(computer.preflightExpected.length).toBeGreaterThan(second?.preflightsBefore ?? Number.POSITIVE_INFINITY);
 	});
 });
 

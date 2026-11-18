@@ -685,13 +685,16 @@ export class GuardedSession {
 				if (stopped !== undefined) {
 					return refusalResult(stopped.reason, stopped.message);
 				}
+				// Hand and eyes together: the cursor heads for the target while the window listing and preflight run.
+				this.aimAt(targetPid, observation, target.frame);
+				const beforeActionPromise = this.captureWindowBaseline();
 				const preflight = await this.computer.preflightInput(observation);
 				if (!preflight.ok) {
 					this.clearTokenFor(targetPid);
 					return refusalResult(preflight.reason);
 				}
 				this.assertOpen();
-				const beforeAction = await this.captureWindowBaseline();
+				const beforeAction = await beforeActionPromise;
 				// Read again right before the input goes out: the preflight and the window baseline both awaited.
 				const halted = this.inputHalt(undefined);
 				if (halted !== undefined) {
@@ -729,11 +732,13 @@ export class GuardedSession {
 						request.expect === undefined
 							? undefined
 							: (await this.pollVerification(targetPid, request.expect)).verification;
+					// The post-action listing and the AX outcome are independent; overlap them.
+					const windowEventsPromise = this.describeWindowSideEffects(beforeAction, targetPid);
 					const outcome = await this.readOutcome(targetPid, observation, {
 						fullState: request.fullState === true,
 						includeScreenshot,
 					});
-					const windowEvents = await this.describeWindowSideEffects(beforeAction, targetPid);
+					const windowEvents = await windowEventsPromise;
 					return observedActionResult(
 						outcome.state,
 						outcome.contextUnchanged,
@@ -1125,6 +1130,7 @@ export class GuardedSession {
 					| { readonly id: number; readonly role: string; readonly label: string | null }
 					| undefined;
 				let foundEvidence: FindEvidence | undefined;
+				let aimFrame: Rect | undefined;
 				const target = driver.target(step);
 				if (target?.find !== undefined) {
 					const searched = await this.searchByScrolling(chain, expected, step, target, target.find, control);
@@ -1139,6 +1145,7 @@ export class GuardedSession {
 					foundEvidence = searched.evidence;
 					if (searched.found.kind === "element") {
 						const element = searched.found.element;
+						aimFrame = element.frame;
 						targetActions = element.actions;
 						resolvedElement = { id: element.id, role: element.role, label: element.label };
 						// A control that does not advertise AXPress (a Finder row's name field) takes no accessibility
@@ -1170,6 +1177,7 @@ export class GuardedSession {
 						break;
 					}
 					const match = located.found;
+					aimFrame = match.element.frame;
 					targetActions = match.element.actions;
 					resolvedElement = { id: match.element.id, role: match.element.role, label: match.element.label };
 					runnable = driver.resolve(step, match.element.id);
@@ -1198,6 +1206,12 @@ export class GuardedSession {
 						break;
 					}
 					targetActions = located.found.actions;
+					aimFrame = located.found.frame;
+				}
+
+				// The hand starts toward the target while the guard below still checks the window.
+				if (step.type === "click") {
+					this.aimAt(expected.pid, expected.observation, aimFrame);
 				}
 
 				if (guardNeeded) {
@@ -2279,6 +2293,17 @@ export class GuardedSession {
 	 * still the same window (and, for steps that aim at screen points, the same bounds), the app is still approved
 	 * and running, and the observation was not replaced. A reason means refuse.
 	 */
+	/** Point the drawn cursor at a click target as soon as it is known; nothing is sent to the app. */
+	private aimAt(pid: number, observation: InputObservation, frame: Rect | undefined): void {
+		if (this.computer.aimPointer === undefined || frame === undefined || !(frame.width > 0 && frame.height > 0)) {
+			return;
+		}
+		this.computer.aimPointer(
+			pid,
+			observedPointToScreen(observation, { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 }),
+		);
+	}
+
 	private async chainGuard(
 		pid: number,
 		observed: InputObservation,

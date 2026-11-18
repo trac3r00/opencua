@@ -41,6 +41,9 @@ static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerHighlights = nil;
 // The window each app's agent is working in: a lasting border with an OpenCUA
 // badge, so the person can tell at a glance which window is being driven.
 static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerFrames = nil;
+// The frame's badge sits this far above the window it marks.
+static const CGFloat kFrameBadgeRise = 11.0;
+static CGFloat primary_screen_height(void);
 static NSMutableDictionary<NSNumber *, NSTimer *> *gMarkerHighlightTimers = nil;
 static NSWindow *gHighlightWindow = nil;
 static NSTimer *gHighlightTimer = nil;
@@ -995,26 +998,66 @@ static NSBezierPath *drag_anchor_path(void) {
 // any window the user brings in front of that app also covers its cursor, and a
 // target with no on-screen window (hidden, minimized, another Space) hides it.
 // `windows` is a front-to-back CGWindowListCopyWindowInfo result.
+// The app window a marker belongs to, in Quartz coordinates (top-left origin):
+// the frontmost of the app's normal windows that holds the marker's centre, or
+// for a frame, the window whose bounds the frame was drawn around. A frame
+// whose window is gone (a dialog that closed) has no target and is hidden.
 static CGWindowID marker_target_window(NSArray<NSDictionary *> *windows,
-                                       pid_t pid) {
+                                       pid_t pid, NSRect markerRect,
+                                       BOOL exactBounds) {
   if (pid <= 0) {
     return kCGNullWindowID;
   }
+  NSPoint centre = NSMakePoint(NSMidX(markerRect), NSMidY(markerRect));
+  CGWindowID frontmost = kCGNullWindowID;
   for (NSDictionary *info in windows) {
     NSNumber *owner = info[(__bridge NSString *)kCGWindowOwnerPID];
     NSNumber *layer = info[(__bridge NSString *)kCGWindowLayer];
     NSNumber *number = info[(__bridge NSString *)kCGWindowNumber];
+    NSDictionary *boundsInfo = info[(__bridge NSString *)kCGWindowBounds];
     if (![owner isKindOfClass:[NSNumber class]] ||
         ![layer isKindOfClass:[NSNumber class]] ||
-        ![number isKindOfClass:[NSNumber class]]) {
+        ![number isKindOfClass:[NSNumber class]] ||
+        ![boundsInfo isKindOfClass:[NSDictionary class]]) {
       continue;
     }
-    if (owner.intValue == pid && layer.intValue == 0 &&
-        number.unsignedIntValue != kCGNullWindowID) {
+    if (owner.intValue != pid || layer.intValue != 0 ||
+        number.unsignedIntValue == kCGNullWindowID) {
+      continue;
+    }
+    CGRect bounds;
+    if (!CGRectMakeWithDictionaryRepresentation(
+            (__bridge CFDictionaryRef)boundsInfo, &bounds)) {
+      continue;
+    }
+    if (exactBounds) {
+      if (fabs(bounds.origin.x - markerRect.origin.x) <= 2.0 &&
+          fabs(bounds.origin.y - markerRect.origin.y) <= 2.0 &&
+          fabs(bounds.size.width - markerRect.size.width) <= 2.0 &&
+          fabs(bounds.size.height - markerRect.size.height) <= 2.0) {
+        return (CGWindowID)number.unsignedIntValue;
+      }
+      continue;
+    }
+    if (frontmost == kCGNullWindowID) {
+      frontmost = (CGWindowID)number.unsignedIntValue;
+    }
+    if (CGRectContainsPoint(bounds, NSPointToCGPoint(centre))) {
       return (CGWindowID)number.unsignedIntValue;
     }
   }
-  return kCGNullWindowID;
+  return exactBounds ? kCGNullWindowID : frontmost;
+}
+
+// A marker window's rect in Quartz coordinates; a frame's rect is the target
+// window's bounds, without the badge that rises above it.
+static NSRect marker_quartz_rect(NSWindow *window, BOOL isFrame) {
+  NSRect frame = window.frame;
+  CGFloat height = isFrame ? frame.size.height - kFrameBadgeRise
+                           : frame.size.height;
+  return NSMakeRect(frame.origin.x,
+                    primary_screen_height() - frame.origin.y - height,
+                    frame.size.width, height);
 }
 
 static void stack_marker_window(NSWindow *window, NSNumber *key,
@@ -1022,16 +1065,18 @@ static void stack_marker_window(NSWindow *window, NSNumber *key,
   if (window == nil || key == nil) {
     return;
   }
-  CGWindowID target = marker_target_window(windows, (pid_t)key.intValue);
+  BOOL isFrame = [gMarkerFrames.allValues containsObject:window];
+  CGWindowID target =
+      marker_target_window(windows, (pid_t)key.intValue,
+                           marker_quartz_rect(window, isFrame), isFrame);
   if (target == kCGNullWindowID) {
     [window orderOut:nil];
     return;
   }
-  // Background input lands in a window that is usually behind the person's own
-  // app. Stacked just above that window the marker would be hidden with it, so
-  // it floats above every app window instead (it ignores the mouse).
-  [window setLevel:NSFloatingWindowLevel];
-  [window orderFrontRegardless];
+  // Stacked just above the window the agent works in: visible exactly where
+  // that window is, and covered with it by whatever the person keeps in front.
+  [window setLevel:NSNormalWindowLevel];
+  [window orderWindow:NSWindowAbove relativeTo:(NSInteger)target];
 }
 
 static NSArray<NSDictionary *> *onscreen_windows(void) {
@@ -1179,7 +1224,6 @@ static void start_ripple(NSPoint windowOrigin) {
 
 // How far the badge rises above the window's top edge; the frame window is
 // that much taller than the window it marks.
-static const CGFloat kFrameBadgeRise = 11.0;
 
 @interface FrameView : NSView
 @end

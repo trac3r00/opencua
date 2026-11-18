@@ -314,6 +314,8 @@ export class MacOSInputController {
 	private readonly displaySleep: DisplaySleepAssertion;
 	private globalGestureChain: Promise<void> = Promise.resolve();
 	private readonly appGestureChains = new Map<number | string, Promise<void>>();
+	/** Glides started ahead of their click, by pid: where each is heading and when it gets there. */
+	private readonly aims = new Map<number, { readonly point: Point; readonly arrival: Promise<void> }>();
 	private readonly delivery: InputDelivery;
 	/** Whether background delivery may tell an app behind the person's that it is active (see activateBehind). */
 	private readonly backgroundActivation: boolean;
@@ -1189,7 +1191,27 @@ export class MacOSInputController {
 		this.overlay.frame?.(window.bounds, pid);
 	}
 
+	/**
+	 * Start the drawn cursor toward `position` now, like a hand that moves while the eyes still check: the target
+	 * read and the safety checks then run during the flight, and the click that follows waits only for what is left
+	 * of it. Nothing is sent to the app; only the drawn cursor moves.
+	 */
+	aimPointer(position: Point, pid: number): void {
+		if (!this.isBackground) return;
+		const current = this.aims.get(pid);
+		if (current !== undefined && Math.hypot(current.point.x - position.x, current.point.y - position.y) < 2) return;
+		this.aims.set(pid, { point: position, arrival: this.glidePointer(position, pid).catch(() => undefined) });
+	}
+
 	async glidePointer(position: Point, pid: number | undefined): Promise<void> {
+		const aim = pid === undefined ? undefined : this.aims.get(pid);
+		if (pid !== undefined && aim !== undefined) {
+			this.aims.delete(pid);
+			if (Math.hypot(aim.point.x - position.x, aim.point.y - position.y) < 2) {
+				await aim.arrival;
+				return;
+			}
+		}
 		const pointer = this.pointerFor(pid);
 		const from = pointer.position();
 		pointer.moveTo(position);

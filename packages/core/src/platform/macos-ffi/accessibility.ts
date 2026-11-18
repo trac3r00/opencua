@@ -1525,6 +1525,45 @@ export function isWebElementByIndex(pid: number, elementIndex: number): boolean 
 	}
 }
 
+/**
+ * Give keyboard focus to the web page holding an observed control, when focus is elsewhere in its app (the address
+ * bar after typing a URL). A browser in the background spends a pointer click that moves focus into the page on the
+ * move itself, so the click never reaches the page. The page's own AXFocused stays true while the address bar has
+ * focus, so the app's focused element decides. Focusing the page over accessibility does not activate the app.
+ * True when focus was moved.
+ */
+export function focusWebAreaOfElement(pid: number, elementIndex: number): boolean {
+	const element = refetchElement(pid, elementIndex);
+	let webArea: CFTypeRef | null = cfRetain(element);
+	try {
+		for (let depth = 0; webArea !== null && depth < MAX_WEB_AREA_ANCESTORS; depth++) {
+			if (copyStringAttribute(webArea as AXUIElementRef, K_AX_ROLE_ATTRIBUTE) === "AXWebArea") break;
+			const parent = copyOptionalAttributeValue(webArea as AXUIElementRef, "AXParent");
+			cfRelease(webArea);
+			webArea = parent;
+		}
+		if (webArea === null || copyStringAttribute(webArea as AXUIElementRef, K_AX_ROLE_ATTRIBUTE) !== "AXWebArea") {
+			return false;
+		}
+		const app = createApplicationElement(pid);
+		try {
+			const focused = copyOptionalAttributeValue(app, K_AX_FOCUSED_UI_ELEMENT_ATTRIBUTE);
+			const focusInPage = focused !== null && isInsideWebArea(focused as AXUIElementRef);
+			if (focused !== null) releaseAXElement(focused as AXUIElementRef);
+			if (focusInPage) return false;
+			setAttributeValue(webArea as AXUIElementRef, "AXFocused", cfBooleanTrue());
+			return true;
+		} catch {
+			return false;
+		} finally {
+			releaseAXElement(app);
+		}
+	} finally {
+		cfRelease(webArea);
+		releaseAXElement(element);
+	}
+}
+
 /** True when the element sits inside a web page, whose input handlers only see real key events. */
 function isInsideWebArea(element: AXUIElementRef): boolean {
 	let current: CFTypeRef | null = cfRetain(element);

@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
 import { withCursorIdentity } from "../../computer/cursor-scope.js";
-import { type OverlayTransport, createCursorOverlay } from "./cursor-overlay.js";
+import {
+	AGENT_GLIDE_MILLISECONDS,
+	type OverlayTransport,
+	agentPaced,
+	createCursorOverlay,
+	glideWaitMilliseconds,
+} from "./cursor-overlay.js";
 
 function fakeTransport(): OverlayTransport & { sends: string[]; closed: boolean } {
 	const state = { sends: [] as string[], closed: false };
@@ -148,5 +154,23 @@ describe("#given invalid core motion options #when creating the overlay #then va
 
 		expect(() => createCursorOverlay(factory, { style: "signature_arc", arcSize: 2 })).toThrow(/arcSize/);
 		expect(factory).not.toHaveBeenCalled();
+	});
+});
+
+describe("#given a motion style with no duration #when an action glides #then it waits at agent pace", () => {
+	const from = { x: 0, y: 0 };
+	const to = { x: 300, y: 0 };
+
+	it("glides a human-paced style in the agent glide time", () => {
+		expect(glideWaitMilliseconds({ style: "spring_settle" }, from, to)).toBeGreaterThan(AGENT_GLIDE_MILLISECONDS);
+		const paced = agentPaced({ style: "spring_settle" });
+		const wait = paced === undefined ? Number.POSITIVE_INFINITY : glideWaitMilliseconds(paced, from, to);
+		expect(wait).toBeGreaterThan(0);
+		expect(wait).toBeLessThanOrEqual(AGENT_GLIDE_MILLISECONDS);
+	});
+
+	it("keeps a duration the person configured", () => {
+		const configured = { style: "spring_settle", glideDurationMs: 400 } as const;
+		expect(agentPaced(configured)).toBe(configured);
 	});
 });

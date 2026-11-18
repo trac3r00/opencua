@@ -67,6 +67,8 @@ export async function click(
 			(await computer.isWebElement(targetPid, index))
 		) {
 			const centre = await elementCentre(computer, targetPid, index, "click");
+			// A background browser spends a click into a page that lacks keyboard focus on focusing it.
+			await computer.focusWebPage?.(targetPid, index);
 			return await clickScreenPoint(computer, targetPid, centre, button, pressCount, modifiers, false);
 		}
 		try {
@@ -260,6 +262,10 @@ export async function clickResolvedTarget(
 	const centreScreen = webElementRoute
 		? await elementCentre(computer, targetPid, target.elementIndex, "click")
 		: observedPointToScreen(observation, centre);
+	if (webElementRoute) {
+		// A background browser spends a click into a page that lacks keyboard focus on focusing it.
+		await computer.focusWebPage?.(targetPid, target.elementIndex);
+	}
 	if (target.hoverFirst === true) {
 		await computer.move(centreScreen);
 	}
