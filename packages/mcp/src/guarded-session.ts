@@ -38,6 +38,7 @@ import type {
 import { latestDecisionFrame } from "./decision-frame.js";
 import { settleDeferredOutcome } from "./deferred-settle.js";
 import type { ResolvedTargetClick } from "./mutation-actions.js";
+import type { AppRules } from "./rules-profile.js";
 import {
 	type FindEvidence,
 	type ScrollFindChain,
@@ -523,6 +524,13 @@ export class GuardedSession {
 	}
 
 	/** `app`'s open windows, titled, for binding a script handle to one of them by its title. */
+	private appRules: ((app: { readonly name?: string; readonly bundleId?: string }) => AppRules) | undefined;
+
+	/** Per-app rules from the rules profile (pace of batches); undefined leaves every default in force. */
+	useAppRules(rules: ((app: { readonly name?: string; readonly bundleId?: string }) => AppRules) | undefined): void {
+		this.appRules = rules;
+	}
+
 	async windowsOf(app: string): Promise<{ readonly pid: number; readonly windows: readonly TopLevelWindow[] }> {
 		this.assertOpen();
 		const pid = await this.resolvePid(app);
@@ -1066,7 +1074,8 @@ export class GuardedSession {
 			// Fast pace keeps the chain's one read until a wait or a miss makes it stale. Either pace runs the window
 			// guard before every step once something has run: a verified read of the tree proves the element, not that
 			// the window, its bounds or the app's approval still hold.
-			const fast = control.pace === "fast";
+			const fast =
+				(control.pace ?? this.appRules?.({ name: app, bundleId: expected.observation.bundleId }).pace) === "fast";
 			const chain: ChainTree = {
 				keep: fast,
 				elements: undefined,

@@ -653,7 +653,8 @@ export OPENCUA_CURSOR_MOTION=comet_swoop              # override for subsequentl
 ```
 
 - **Styles:** `signature_arc`, `spring_settle`, `magnetic`, `comet_swoop`, `adaptive`, `classic`.
-- **Timing:** `native` (the chosen Cua style's timing), `fitts` or `fixed`.
+- **Timing:** `native` (the chosen Cua style's timing), `fitts` or `fixed`. A motion that names no `glideDurationMs`
+  and no `fixed` timing glides at agent pace (160 ms), since every click waits for the cursor to arrive.
 - **Fields** (JSON object; only `style` is required, unknown fields and non-finite numbers are rejected): `glideDurationMs`
   0 to 5000, `startHandle` and `endHandle` 0 to 1, `arcSize` 0 to 1, `arcFlow` -1 to 1, `spring` 0.3 to 1,
   `turnRadius` 1 to 1000.
@@ -666,6 +667,28 @@ export OPENCUA_CURSOR_MOTION=comet_swoop              # override for subsequentl
 The upstream planner (MIT, version 0.1.0, pinned to commit `a7524cf`) is vendored in `packages/core/vendor`. OpenCUA
 uses it for paths and timing only: it keeps its own native pointer artwork and click, scroll and thinking cues
 and does not import the upstream canvas themes or effect rendering.
+
+#### Rules profile
+
+Per-app rules for speed and verification live in `~/.opencua/rules.json` (or the file `OPENCUA_RULES` names). The MCP
+server re-reads the file when it changes, so an edit applies to the next call.
+
+```json
+{
+  "default": { "pace": "verified" },
+  "apps": {
+    "Google Chrome": { "pace": "fast" },
+    "com.apple.MobileSMS": { "pace": "fast" }
+  }
+}
+```
+
+- **`pace`** (`verified` or `fast`): the default pace of a `run_steps` batch (and `app.batch` in `run_script`) on the
+  app. A pace named in the call wins; `app.chain` is always fast.
+- **Matching:** app keys are app names or bundle ids, compared without case; an app's entry overrides `default`.
+- **Locked rules:** rules that protect the person (background delivery, the foreground, the real cursor, approvals, the
+  allowed apps) cannot be set here. A file that names one, or any unknown rule, is ignored as a whole and the reason
+  is written to the server's stderr.
 
 #### Menu bar indicator
 

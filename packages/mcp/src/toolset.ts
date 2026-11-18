@@ -8,6 +8,7 @@ export type ToolsetProfile = "full" | "lean";
 import type { DockSource, HostCapabilities, HotFrameSource } from "@opencua/core";
 import type { OsascriptRunner } from "./applescript-session.js";
 import type { ExtrasSource } from "./extras-session.js";
+import type { RulesProfile } from "./rules-profile.js";
 import type { TerminalCommandSource, TerminalTextReader } from "./terminal-session.js";
 
 export interface McpServerOptions {
@@ -28,6 +29,8 @@ export interface McpServerOptions {
 	readonly extrasTtlMs?: number;
 	/** Speculative frame refresher to share; tests inject a controllable source. */
 	readonly hotFramesSource?: HotFrameSource;
+	/** Per-app rules; defaults to the rules profile file for the native host and to none otherwise. */
+	readonly rulesProfile?: () => RulesProfile;
 }
 
 export interface ResolvedServerOptions {

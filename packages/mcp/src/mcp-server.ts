@@ -49,6 +49,7 @@ import { registerParallelTools } from "./parallel-tools.js";
 import { PhoneGuardSession, type PhoneToolSource } from "./phone-session.js";
 import { registerPhoneTools } from "./phone-tools.js";
 import { registerPowerTools } from "./power-tools.js";
+import { rulesForApp, rulesProfileLoader, rulesProfilePath } from "./rules-profile.js";
 import { registerScriptTools } from "./script-tools.js";
 import { SERVER_INFO } from "./server-info.js";
 import { SUPERVISED_CHILD_FLAG } from "./supervisor.js";
@@ -174,6 +175,11 @@ export function createMcpServer(
 		stopGate,
 		options?.hotFramesSource,
 	);
+	const loadRules =
+		options?.rulesProfile ?? (computer === undefined ? rulesProfileLoader(rulesProfilePath()) : undefined);
+	if (loadRules !== undefined) {
+		session.useAppRules((app) => rulesForApp(loadRules(), app));
+	}
 	const dockSession = new DockGuardSession(options?.dockSource, {
 		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
 		delivery: resolvedComputer.delivery ?? "background",
