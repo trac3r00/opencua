@@ -9,12 +9,15 @@ import {
 	StopSwitch,
 	UTM,
 	currentSystemPrompts,
+	listWindows,
 	probeHostCapabilities,
 	readHidModifierFlags,
 	setSessionCursorName,
 	spawnOpenLauncher,
+	startNativeForegroundKeeper,
 	startStopChordDetector,
 	startStopMenu,
+	unhideApplication,
 } from "@opencua/core";
 import type {
 	AppOpenLauncher,
@@ -146,8 +149,22 @@ export function createMcpServer(
 					},
 				};
 	let launcher = appLauncher;
+	const foregroundKeeper =
+		computer === undefined && resolvedComputer.delivery === "background" ? startNativeForegroundKeeper() : undefined;
 	if (launcher === undefined && computer === undefined) {
-		launcher = spawnOpenLauncher({ background: resolvedComputer.delivery === "background" });
+		launcher = spawnOpenLauncher({
+			...(foregroundKeeper === undefined
+				? {}
+				: {
+						opened: (pid: number, frontBefore: number | undefined) =>
+							foregroundKeeper.noteTouched(pid, frontBefore),
+					}),
+			background: resolvedComputer.delivery === "background",
+			reveal: unhideApplication,
+			hasWindows: (pid) =>
+				listWindows({ onScreenOnly: true })?.some((window) => window.ownerPid === pid && window.layer === 0) ??
+				true,
+		});
 	}
 	const session = new GuardedSession(
 		resolvedComputer,

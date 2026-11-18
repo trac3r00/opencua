@@ -54,6 +54,7 @@ const workspaceClass = requireClass("NSWorkspace");
 
 const activationPolicySelector = requireSelector("activationPolicy");
 const activateWithOptionsSelector = requireSelector("activateWithOptions:");
+const unhideSelector = requireSelector("unhide");
 const allocSelector = requireSelector("alloc");
 const bundleIdentifierSelector = requireSelector("bundleIdentifier");
 const bundleUrlSelector = requireSelector("bundleURL");
@@ -105,6 +106,24 @@ export function activateApplication(pid: number): boolean {
 			return false;
 		}
 		return msgBoolUnsignedInteger(application, activateWithOptionsSelector, ACTIVATE_IGNORING_OTHER_APPS);
+	});
+}
+
+/**
+ * Un-hide an app without activating it: its windows become visible behind the app in front, and the person's focus
+ * does not move. False when the app is not running.
+ */
+export function unhideApplication(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid <= 0) {
+		return false;
+	}
+	return withAutoreleasePool(() => {
+		const application = msgPointerProcessIdentifier(
+			runningApplicationClass,
+			runningApplicationWithProcessIdentifierSelector,
+			pid,
+		);
+		return application === null ? false : msgBool(application, unhideSelector);
 	});
 }
 
