@@ -1049,14 +1049,19 @@ export class GuardedSession {
 			// batch waits or dispatches: from then on the UI is what the batch itself made of it.
 			let canReuseRead = true;
 			let treeReads = 0;
+			// The last tree this batch read, kept so the cursor can head for a step's target before its fresh read.
+			let lastSeen: Awaited<ReturnType<GuardedSession["readFieldBaseline"]>>["elements"] | undefined;
 			const readBaseline = async (): ReturnType<GuardedSession["readFieldBaseline"]> => {
 				const reusable = canReuseRead ? this.takeReusableRead(expected.observation) : undefined;
 				canReuseRead = false;
 				if (reusable !== undefined) {
+					lastSeen = reusable;
 					return { elements: reusable, changed: false };
 				}
 				treeReads += 1;
-				return await this.readFieldBaseline(expected.pid);
+				const read = await this.readFieldBaseline(expected.pid);
+				lastSeen = read.elements;
+				return read;
 			};
 			// Fast pace keeps the chain's one read until a wait or a miss makes it stale. Either pace runs the window
 			// guard before every step once something has run: a verified read of the tree proves the element, not that
@@ -1132,6 +1137,15 @@ export class GuardedSession {
 				let foundEvidence: FindEvidence | undefined;
 				let aimFrame: Rect | undefined;
 				const target = driver.target(step);
+				// Eyes and hand together: while this step's fresh read runs, the cursor already heads for where its
+				// target was in the last read, and turns if the fresh read finds it elsewhere.
+				if (step.type === "click" && lastSeen !== undefined && target?.find === undefined) {
+					this.aimAt(
+						expected.pid,
+						expected.observation,
+						lastSeenFrame(lastSeen, step, target, driver, expected.elements),
+					);
+				}
 				if (target?.find !== undefined) {
 					const searched = await this.searchByScrolling(chain, expected, step, target, target.find, control);
 					if ("missing" in searched) {
@@ -2885,6 +2899,24 @@ function withinHalfOpen(value: number, start: number, extent: number): number {
 	if (value < end) return value;
 	const last = previousDouble(end);
 	return last >= start ? last : start;
+}
+
+/** Where a click step's target sat in an earlier read of the tree, if it can be found there. */
+function lastSeenFrame(
+	elements: Parameters<ElementFinder<unknown>>[0],
+	step: RunStep,
+	target: ReturnType<RunStepDriver["target"]>,
+	driver: RunStepDriver,
+	identities: ObservedElementIdentity | undefined,
+): Rect | undefined {
+	if (target !== undefined) {
+		const located = findQueryTarget(target)(elements);
+		return "found" in located ? located.found.element.frame : undefined;
+	}
+	const index = driver.elementIndex(step);
+	if (index === undefined) return undefined;
+	const located = findObservedElement(index, identities?.get(index))(elements);
+	return "found" in located ? located.found.frame : undefined;
 }
 
 export function observedPointToScreen(observation: InputObservation, point: Point): Point {

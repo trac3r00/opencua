@@ -112,6 +112,7 @@ import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveOcrCrop } from "./ocr-region.js";
 import { isOwnedSurfacePid, surfaceAudioState } from "./owned-surfaces.js";
 import { currentSystemPrompts } from "./system-prompts.js";
+import { settleWebFocus } from "./web-focus-settle.js";
 import { windowMinimizedState, windowOnHiddenSpace } from "./window-minimized.js";
 
 /** How long a background web click waits for the page to take keyboard focus, and how often it looks. */
@@ -1244,10 +1245,10 @@ export class MacOSHostComputer extends HostComputer {
 	async focusWebPage(targetPid: number, elementIndex: number): Promise<boolean> {
 		if (!focusWebAreaOfElement(targetPid, elementIndex)) return false;
 		// The browser applies the focus change asynchronously; a click sent before it lands is still spent on focus.
-		const deadline = Date.now() + WEB_FOCUS_SETTLE_LIMIT_MILLISECONDS;
-		while (!appFocusInWebArea(targetPid) && Date.now() < deadline) {
-			await new Promise((resolve) => setTimeout(resolve, WEB_FOCUS_POLL_MILLISECONDS));
-		}
+		await settleWebFocus(() => appFocusInWebArea(targetPid), {
+			limitMs: WEB_FOCUS_SETTLE_LIMIT_MILLISECONDS,
+			pollMs: WEB_FOCUS_POLL_MILLISECONDS,
+		});
 		return true;
 	}
 

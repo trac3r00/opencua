@@ -17,12 +17,17 @@ function webComputer(webIds: readonly number[] = [9]) {
 	computer.elementFrames.set(9, { x: 320, y: 190, width: 60, height: 80 });
 	computer.elementFrames.set(20, { x: 320, y: 190, width: 60, height: 80 });
 	const pageFocus: { readonly id: number; readonly effectsBefore: number }[] = [];
-	const aims: { readonly effectsBefore: number; readonly preflightsBefore: number }[] = [];
+	const aims: { readonly effectsBefore: number; readonly preflightsBefore: number; readonly readsBefore: number }[] =
+		[];
 	return Object.assign(computer, {
 		pageFocus,
 		aims,
 		aimPointer(): void {
-			aims.push({ effectsBefore: computer.effects.length, preflightsBefore: computer.preflightExpected.length });
+			aims.push({
+				effectsBefore: computer.effects.length,
+				preflightsBefore: computer.preflightExpected.length,
+				readsBefore: computer.stateCalls,
+			});
 		},
 		async focusWebPage(_pid: number, id: number): Promise<boolean> {
 			pageFocus.push({ id, effectsBefore: computer.effects.length });
@@ -155,7 +160,7 @@ describe("#given a click whose target is known #when the checks run #then the cu
 
 		await harness.client.callTool({ name: "click_target", arguments: { app: "Finder", query: { label: "Open" } } });
 
-		expect(computer.aims).toEqual([{ effectsBefore: 0, preflightsBefore }]);
+		expect(computer.aims).toMatchObject([{ effectsBefore: 0, preflightsBefore }]);
 		expect(computer.preflightExpected.length).toBeGreaterThan(preflightsBefore);
 		expect(computer.effects.findIndex((effect) => effect.kind === "click")).toBeGreaterThanOrEqual(0);
 	});
@@ -180,11 +185,37 @@ describe("#given a click whose target is known #when the checks run #then the cu
 
 		expect(result.isError).not.toBe(true);
 		const clicks = computer.effects.flatMap((effect, index) => (effect.kind === "click" ? [index] : []));
-		expect(computer.aims.map((aim) => aim.effectsBefore)).toEqual(clicks);
-		// The second step's window guard runs a preflight; the aim came before it.
-		const [first, second] = computer.aims;
-		expect(second?.preflightsBefore).toBe(first?.preflightsBefore);
-		expect(computer.preflightExpected.length).toBeGreaterThan(second?.preflightsBefore ?? Number.POSITIVE_INFINITY);
+		// Every click was preceded by an aim at it, and the second step's aims came before its window guard's preflight.
+		expect([...new Set(computer.aims.map((aim) => aim.effectsBefore))]).toEqual(clicks);
+		const secondStep = computer.aims.filter((aim) => aim.effectsBefore === clicks[1]);
+		const firstStep = computer.aims.filter((aim) => aim.effectsBefore === clicks[0]);
+		expect(secondStep.every((aim) => aim.preflightsBefore === firstStep.at(-1)?.preflightsBefore)).toBe(true);
+	});
+
+	it("heads for the next step's target before that step's fresh read finishes", async () => {
+		const computer = webComputer([9, 20]);
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_steps",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				steps: [
+					{ type: "click", element_index: "9" },
+					{ type: "click", element_index: "20" },
+				],
+			},
+		});
+
+		expect(result.isError).not.toBe(true);
+		const clicks = computer.effects.flatMap((effect, index) => (effect.kind === "click" ? [index] : []));
+		const secondStep = computer.aims.filter((aim) => aim.effectsBefore === clicks[1]);
+		// The first aim at step two came from the earlier read; a fresh read ran before the aim that confirmed it.
+		expect(secondStep.length).toBe(2);
+		expect(secondStep[0]?.readsBefore).toBeLessThan(secondStep[1]?.readsBefore ?? 0);
 	});
 });
 

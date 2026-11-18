@@ -41,6 +41,9 @@ static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerHighlights = nil;
 // The window each app's agent is working in: a lasting border with an OpenCUA
 // badge, so the person can tell at a glance which window is being driven.
 static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerFrames = nil;
+// The window rect (Quartz, top-left) each frame was asked to mark; the frame's own
+// window animates in and its size is not the marked window's.
+static NSMutableDictionary<NSNumber *, NSValue *> *gMarkerFrameTargets = nil;
 // The frame's badge sits this far above the window it marks.
 static const CGFloat kFrameBadgeRise = 11.0;
 static CGFloat primary_screen_height(void);
@@ -1065,10 +1068,12 @@ static void stack_marker_window(NSWindow *window, NSNumber *key,
   if (window == nil || key == nil) {
     return;
   }
-  BOOL isFrame = [gMarkerFrames.allValues containsObject:window];
-  CGWindowID target =
-      marker_target_window(windows, (pid_t)key.intValue,
-                           marker_quartz_rect(window, isFrame), isFrame);
+  BOOL isFrame = gMarkerFrames[key] == window;
+  NSValue *marked = isFrame ? gMarkerFrameTargets[key] : nil;
+  CGWindowID target = marker_target_window(
+      windows, (pid_t)key.intValue,
+      marked != nil ? marked.rectValue : marker_quartz_rect(window, isFrame),
+      isFrame);
   if (target == kCGNullWindowID) {
     [window orderOut:nil];
     return;
@@ -1097,14 +1102,19 @@ static void restack_markers(void) {
     return;
   }
   NSArray<NSDictionary *> *windows = onscreen_windows();
+  // Only markers on screen are restacked: a marker window created ahead of its
+  // first position (a mode change) would otherwise appear at the screen origin.
   for (NSNumber *key in gMarkerHighlights.allKeys) {
-    stack_marker_window(gMarkerHighlights[key], key, windows);
+    if (gMarkerHighlights[key].isVisible)
+      stack_marker_window(gMarkerHighlights[key], key, windows);
   }
   for (NSNumber *key in gMarkerFrames.allKeys) {
-    stack_marker_window(gMarkerFrames[key], key, windows);
+    if (gMarkerFrames[key].isVisible)
+      stack_marker_window(gMarkerFrames[key], key, windows);
   }
   for (NSNumber *key in gMarkerWindows.allKeys) {
-    stack_marker_window(gMarkerWindows[key], key, windows);
+    if (gMarkerWindows[key].isVisible)
+      stack_marker_window(gMarkerWindows[key], key, windows);
   }
 }
 
@@ -1476,6 +1486,10 @@ static void apply_frame(double x, double y, double w, double h, NSNumber *key) {
     [window setContentView:[[FrameView alloc] initWithFrame:NSZeroRect]];
     gMarkerFrames[key] = window;
   }
+  if (gMarkerFrameTargets == nil) {
+    gMarkerFrameTargets = [NSMutableDictionary dictionary];
+  }
+  gMarkerFrameTargets[key] = [NSValue valueWithRect:NSMakeRect(x, y, w, h)];
   CGFloat screenHeight = primary_screen_height();
   NSRect frame =
       NSMakeRect(x, screenHeight - y - h, w, h + kFrameBadgeRise);
@@ -1499,6 +1513,7 @@ static void apply_hide(NSNumber *markerKey) {
     [gMarkerHighlights removeObjectForKey:markerKey];
     [gMarkerFrames[markerKey] orderOut:nil];
     [gMarkerFrames removeObjectForKey:markerKey];
+    [gMarkerFrameTargets removeObjectForKey:markerKey];
     [gMarkerTimers[markerKey] invalidate];
     [gMarkerTimers removeObjectForKey:markerKey];
     NSWindow *window = marker_window(markerKey, NO);
