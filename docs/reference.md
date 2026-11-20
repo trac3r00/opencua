@@ -209,7 +209,7 @@ opencua doctor
   ok    ScreenCaptureKit capture loads in the helper
   ok    omo: registered in ~/.omo/agent/mcp.json
   ok    stop switch: not stopped (Control+Option+Command or `opencua stop` stops every agent)
-  ok    rtk 1.2.1: agents read compressed shell output
+  ok    rtk 1.2.1 on PATH (rtk init --show lists the agents it is hooked into)
 
 Installed. One manual step remains, granting permissions to "opencua-mcp":
   1. Grant Screen Recording to "opencua-mcp": run opencua permissions grant, which shows macOS's dialog, opens System Settings > Privacy & Security > Screen & System Audio Recording and waits until it is on. ...

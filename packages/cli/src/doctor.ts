@@ -664,7 +664,7 @@ function rtkChecks(facts: DoctorFacts): DoctorCheck[] {
 	}
 	return facts.rtk.version === undefined
 		? [check("rtk", "warn", "rtk not found: agents read full shell output, which costs more tokens", INSTALL_RTK)]
-		: [check("rtk", "ok", `rtk ${facts.rtk.version}: agents read compressed shell output`)];
+		: [check("rtk", "ok", `rtk ${facts.rtk.version} on PATH (rtk init --show lists the agents it is hooked into)`)];
 }
 
 /** Turns gathered facts into a verdict. Pure, so every outcome is testable without touching the Mac. */
@@ -827,6 +827,14 @@ function sha256(path: string): string | undefined {
 	}
 }
 
+/** Looks rtk up on PATH by running `rtk --version`; the version is undefined when it is missing or fails. */
+export function readRtk(
+	run: (file: string, args: readonly string[]) => string | undefined = commandOutput,
+): DoctorFacts["rtk"] {
+	const output = run("rtk", ["--version"]);
+	return { version: output === undefined || output === "" ? undefined : output.replace(/^rtk\s+/, "") };
+}
+
 /** Compares packages/core/native/build-inputs.sha256 (written by build.sh) with the sources it names. */
 export function readNativeInputs(nativeDir: string): DoctorFacts["nativeInputs"] {
 	let recorded: string;
@@ -983,7 +991,7 @@ export function gatherDoctorFacts(layout: Layout = resolveLayout(), env: Environ
 		selfCheck,
 		stop: new StopSwitch().status(),
 		historyInstalled: existsSync(historyLaunchAgentPath(home)),
-		rtk: { version: commandOutput("rtk", ["--version"])?.replace(/^rtk\s+/, "") },
+		rtk: readRtk(),
 		config: readConfigFacts(layout, env),
 		showPath: (path) => displayPath(path, home),
 	};

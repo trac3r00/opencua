@@ -10,6 +10,7 @@ import {
 	macosSupported,
 	parseSelfCheckOutput,
 	readNativeInputs,
+	readRtk,
 } from "./doctor.js";
 
 const nativeDir = join(dirname(fileURLToPath(import.meta.url)), "../../core/native");
@@ -323,7 +324,7 @@ describe("#given rtk on PATH or not #when the doctor evaluates it #then a missin
 
 		const rtk = report.checks.find((item) => item.id === "rtk");
 		expect(rtk?.status).toBe("ok");
-		expect(rtk?.summary).toContain("rtk 1.2.1");
+		expect(rtk?.summary).toContain("rtk 1.2.1 on PATH");
 		expect(report.ready).toBe(true);
 	});
 
@@ -336,6 +337,19 @@ describe("#given rtk on PATH or not #when the doctor evaluates it #then a missin
 		expect(report.ready).toBe(true);
 		expect(report.nextSteps).toHaveLength(1);
 		expect(report.nextSteps[0]).toBe(rtk?.fix);
+	});
+
+	it("looks rtk up by running rtk --version and keeps only the version", () => {
+		const calls: string[] = [];
+		const found = readRtk((file, args) => {
+			calls.push([file, ...args].join(" "));
+			return "rtk 1.2.1";
+		});
+
+		expect(calls).toEqual(["rtk --version"]);
+		expect(found).toEqual({ version: "1.2.1" });
+		expect(readRtk(() => undefined)).toEqual({ version: undefined });
+		expect(readRtk(() => "")).toEqual({ version: undefined });
 	});
 
 	it("adds no rtk check when rtk was not looked up", () => {
