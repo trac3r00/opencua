@@ -101,7 +101,7 @@ import {
 	pressMenuItem,
 	waitForKeyEquivalentEnabled,
 } from "./macos-menu.js";
-import { type OpenUrlReport, openUrlInApp } from "./macos-open-url.js";
+import { type OpenUrlReport, openUrlInApp, openableUrl } from "./macos-open-url.js";
 import { observedWindowForPid, openWindowsForTargeting } from "./macos-open-windows.js";
 import { selectSystemEventsTargetWindow } from "./macos-window-target-fallback.js";
 import { resolveTargetWindow, visibleWindowsForPid } from "./macos-window-target.js";
@@ -327,6 +327,21 @@ export class MacOSHostComputer extends HostComputer {
 		await this.input.pressKey(key, options);
 	}
 
+	/** Open `url` in the running app `targetPid` belongs to, in the background; see {@link openUrlInApp}. */
+	async openUrl(targetPid: number, url: string): Promise<OpenUrlReport> {
+		this.assertInputAvailable(targetPid);
+		const app = await findRunningApp(targetPid);
+		if (app === undefined) {
+			throw new Error(`No running app matched pid ${targetPid}`);
+		}
+		return await openUrlInApp(app, url, { blocklist: this.urlBlocklist });
+	}
+
+	/** Throws when `url` is not an absolute URL or this host's blocklist covers it; opens nothing. */
+	assertUrlAllowed(url: string): void {
+		openableUrl(url, this.urlBlocklist);
+	}
+
 	/**
 	 * Invoke a menu path. Edit > Select All, Copy, Cut and Paste are done on the focused native text
 	 * field through accessibility: AppKit validates those items only while their menu is shown, so
@@ -335,15 +350,6 @@ export class MacOSHostComputer extends HostComputer {
 	 * was last observed in: a menu command acts on the app's key window, and an app in the background is
 	 * told it is active when that is what keeps the command disabled (see invokeWindowMenu).
 	 */
-	/** Open `url` in the running app `targetPid` belongs to, in the background; see {@link openUrlInApp}. */
-	async openUrl(targetPid: number, url: string): Promise<OpenUrlReport> {
-		const app = await findRunningApp(targetPid);
-		if (app === undefined) {
-			throw new Error(`No running app matched pid ${targetPid}`);
-		}
-		return await openUrlInApp(app, url, { blocklist: this.urlBlocklist });
-	}
-
 	async invokeMenu(targetPid: number, path: readonly string[]): Promise<InvokeMenuResult> {
 		this.assertInputAvailable(targetPid);
 		const normalized = normalizeMenuPath(path);

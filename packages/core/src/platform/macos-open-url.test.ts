@@ -25,6 +25,22 @@ describe("#given a running app and a URL #when the URL is opened in that app #th
 		expect(run).not.toHaveBeenCalled();
 	});
 
+	it("checks and opens the parsed URL, so case, spaces and control characters cannot slip past the blocklist", async () => {
+		for (const variant of ["ZOOMMTG://zoom.us/join", "  zoommtg://zoom.us/join", "zoom\tmtg://zoom.us/join"]) {
+			const run = vi.fn(async (_file: string, _args: readonly string[]) => undefined);
+
+			await expect(openUrlInApp(ZOOM, variant, { blocklist: ["zoommtg://*"], run })).rejects.toThrow(
+				"Computer Use is not allowed to open this URL",
+			);
+			expect(run).not.toHaveBeenCalled();
+		}
+		const run = vi.fn(async (_file: string, _args: readonly string[]) => undefined);
+
+		await openUrlInApp(ZOOM, "  HTTPS://Example.COM/a", { blocklist: [], run });
+
+		expect(run).toHaveBeenCalledWith("/usr/bin/open", ["-g", "-b", "us.zoom.xos", "https://example.com/a"]);
+	});
+
 	it("refuses text that is not an absolute URL without running anything", async () => {
 		const run = vi.fn(async (_file: string, _args: readonly string[]) => undefined);
 

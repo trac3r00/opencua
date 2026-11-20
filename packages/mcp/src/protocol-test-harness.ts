@@ -420,6 +420,13 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 		return { resolvedPath: path, action: "AXPress" };
 	}
 
+	/** The fake host blocks every `blocked:` URL, standing in for a configured urlBlocklist. */
+	assertUrlAllowed(url: string): void {
+		if (url.startsWith("blocked:")) {
+			throw new Error(`Computer Use is not allowed to open this URL: ${url}`);
+		}
+	}
+
 	async openUrl(pid: number, url: string): Promise<{ readonly bundleId: string; readonly url: string }> {
 		this.dispatch({ kind: "openUrl", pid, url });
 		return { bundleId: "com.apple.finder", url };

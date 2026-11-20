@@ -229,13 +229,20 @@ async function dispatchStep(
 }
 
 export function createRunStepDriver(computer: GuardedComputerInterface): RunStepDriver {
+	// The host's URL blocklist is checked with the rest of the batch, so a blocked open_url stops it before any step runs.
+	const host: GuardedComputerInterface & { assertUrlAllowed?(url: string): void } = computer;
 	return {
 		elementIndex: stepElementIndex,
 		target: stepTarget,
 		wait: stepWait,
 		resolve: resolveStepElement,
 		resolveAtPoint: resolveStepAtPoint,
-		validate: validateStep,
+		validate: (step, observation) => {
+			validateStep(step, observation);
+			if (step.type === "open_url") {
+				host.assertUrlAllowed?.(step.url);
+			}
+		},
 		dispatch: async (step, targetPid, observation, actions, options) =>
 			await dispatchStep(computer, step, targetPid, observation, actions, options),
 	};
