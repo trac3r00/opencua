@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
-import { openUrlInApp } from "./macos-open-url.js";
+import { UrlBlockedError, openUrlInApp } from "./macos-open-url.js";
+import { OWNED_SURFACE_BUNDLE_ID } from "./owned-surfaces.js";
 
 const ZOOM = { bundleId: "us.zoom.xos" };
 const LINK = "zoommtg://zoom.us/join?action=join&confno=123";
@@ -46,6 +47,23 @@ describe("#given a running app and a URL #when the URL is opened in that app #th
 
 		await expect(openUrlInApp(ZOOM, "zoom.us/join", { blocklist: [], run })).rejects.toThrow(
 			"open_url needs an absolute URL with a scheme",
+		);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("raises a UrlBlockedError for a blocked URL, so callers can report it as url-blocked", async () => {
+		const error = await openUrlInApp(ZOOM, LINK, { blocklist: ["zoommtg://*"], run: async () => undefined }).catch(
+			(caught: unknown) => caught,
+		);
+
+		expect(error).toBeInstanceOf(UrlBlockedError);
+	});
+
+	it("refuses an opencua surface window, which has no app behind it to take a URL", async () => {
+		const run = vi.fn(async (_file: string, _args: readonly string[]) => undefined);
+
+		await expect(openUrlInApp({ bundleId: OWNED_SURFACE_BUNDLE_ID }, LINK, { blocklist: [], run })).rejects.toThrow(
+			"cannot target an opencua surface window",
 		);
 		expect(run).not.toHaveBeenCalled();
 	});

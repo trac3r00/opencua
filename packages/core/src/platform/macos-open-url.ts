@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { blockedUrl } from "../permission/url-blocklist.js";
+import { OWNED_SURFACE_BUNDLE_ID } from "./owned-surfaces.js";
 
 const execFileAsync = promisify(execFile);
 const OPEN_TIMEOUT_MILLISECONDS = 10_000;
@@ -11,6 +12,9 @@ export interface OpenUrlOptions {
 	/** Runs a command to completion; tests replace it so nothing is launched. */
 	readonly run?: (file: string, args: readonly string[]) => Promise<unknown>;
 }
+
+/** The host's URL blocklist covers the URL: a policy refusal a person must lift, not a stale observation. */
+export class UrlBlockedError extends Error {}
 
 export interface OpenUrlReport {
 	readonly bundleId: string;
@@ -34,7 +38,7 @@ export function openableUrl(url: string, blocklist: readonly string[]): string {
 	}
 	const parsed = new URL(url).href;
 	if (blockedUrl(url.trim(), blocklist) || blockedUrl(parsed, blocklist)) {
-		throw new Error(`Computer Use is not allowed to open this URL: ${parsed}`);
+		throw new UrlBlockedError(`Computer Use is not allowed to open this URL: ${parsed}`);
 	}
 	return parsed;
 }
@@ -50,6 +54,9 @@ export async function openUrlInApp(
 	options: OpenUrlOptions,
 ): Promise<OpenUrlReport> {
 	const parsed = openableUrl(url, options.blocklist);
+	if (app.bundleId === OWNED_SURFACE_BUNDLE_ID) {
+		throw new Error("open_url cannot target an opencua surface window: no app behind it can take a URL");
+	}
 	if (app.bundleId.length === 0) {
 		throw new Error("the target app has no bundle id, so the URL cannot be kept in that app");
 	}

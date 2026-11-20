@@ -1,3 +1,4 @@
+import { UrlBlockedError } from "@opencua/core";
 import { currentInputScope } from "@opencua/core";
 import type {
 	AXTreeElement,
@@ -423,7 +424,7 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	/** The fake host blocks every `blocked:` URL, standing in for a configured urlBlocklist. */
 	assertUrlAllowed(url: string): void {
 		if (url.startsWith("blocked:")) {
-			throw new Error(`Computer Use is not allowed to open this URL: ${url}`);
+			throw new UrlBlockedError(`Computer Use is not allowed to open this URL: ${url}`);
 		}
 	}
 

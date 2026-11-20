@@ -144,6 +144,7 @@ describe("run_steps #given a link the target app handles #when open_url and wait
 		});
 
 		expect(result.isError).toBe(true);
+		expect(jsonPayload(result)).toMatchObject({ actionDispatched: false, reason: "url-blocked" });
 		expect(inputEffects(harness.computer.effects)).toEqual([]);
 	});
 

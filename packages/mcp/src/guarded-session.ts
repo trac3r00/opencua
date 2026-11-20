@@ -5,6 +5,7 @@ import {
 	HandsCoordinator,
 	HotFrameSource,
 	InputInterrupted,
+	UrlBlockedError,
 	currentCursorIdentity,
 	describeQuery,
 	describeUserStop,
@@ -2153,7 +2154,11 @@ export class GuardedSession {
 		try {
 			validate(active.observation);
 		} catch (error: unknown) {
-			throw new InputRefusal("element-not-observed", error instanceof Error ? error.message : undefined);
+			// A blocked URL is host policy a person must lift, not a stale observation to re-read.
+			throw new InputRefusal(
+				error instanceof UrlBlockedError ? "url-blocked" : "element-not-observed",
+				error instanceof Error ? error.message : undefined,
+			);
 		}
 		const preflight = await timed("preflightInput", () =>
 			this.computer.preflightInput(active.observation, { requireSameBounds: screenPoints }),

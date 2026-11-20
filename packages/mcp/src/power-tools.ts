@@ -93,8 +93,9 @@ export async function dispatchPowerStep(
 				throw new Error("this computer cannot open URLs in an app");
 			}
 			const report = await powerComputer.openUrl(targetPid, step.url);
-			// Launch Services delivers the URL: neither an accessibility action nor synthetic input events.
-			return { route: "unknown", delivery: "background", detail: report };
+			// Launch Services delivers the URL (neither an accessibility action nor synthetic input). It opens in the
+			// background, but the app may still activate itself, so the desktop is not known to be untouched.
+			return { route: "unknown", delivery: "unknown", detail: report };
 		}
 		default:
 			return undefined;
