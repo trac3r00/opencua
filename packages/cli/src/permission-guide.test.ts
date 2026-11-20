@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AutomationStatus } from "@opencua/core";
 import { PRIVACY_PANES } from "./doctor.js";
+import type { DragPanelLauncher } from "./permission-drag.js";
 import { type GrantDependencies, type HelperPermissions, grantPermissions } from "./permission-guide.js";
 
 interface FakeMac {
@@ -14,6 +15,26 @@ interface FakeMac {
 	readonly onRequest: Record<string, () => void>;
 	/** Whether the person switches it on while the guide waits, per wait. */
 	readonly switchesOn: boolean[];
+}
+
+/** A drag panel launcher that records what it shows; `available: false` acts as a missing native binary. */
+function fakeDragPanel(calls: string[], available: boolean): DragPanelLauncher {
+	return {
+		show: (app) => {
+			if (!available) {
+				return undefined;
+			}
+			calls.push(`show panel ${app}`);
+			return {
+				close: () => {
+					calls.push("close panel");
+				},
+			};
+		},
+		reveal: (app) => {
+			calls.push(`reveal ${app}`);
+		},
+	};
 }
 
 function fake(mac: FakeMac) {
@@ -353,12 +374,15 @@ describe("#given an earlier Screen Recording decision on record #when the guide 
 		expect(outcome.granted).toEqual(["Screen Recording"]);
 	});
 
-	it("tells how to add the helper with + when macOS leaves it out of the list", async () => {
+	it("tells how to add the helper with + when macOS leaves it out of the list and there is no drag panel", async () => {
 		const { mac } = staleMac();
-		const { deps, printed } = fake(mac);
+		const { deps, calls, printed } = fake(mac);
 		const helperApp = "/Users/someone/.opencua/app/packages/mcp/dist/opencua-mcp.app";
 
-		await grantPermissions({ mode: "terminal", openPanes: true, extraAutomationTargets: [], helperApp }, deps);
+		await grantPermissions(
+			{ mode: "terminal", openPanes: true, extraAutomationTargets: [], helperApp },
+			{ ...deps, dragPanel: fakeDragPanel(calls, false) },
+		);
 
 		expect(printed()).toContain(`paste ${helperApp}, choose Open`);
 	});
@@ -374,5 +398,104 @@ describe("#given an earlier Screen Recording decision on record #when the guide 
 		);
 
 		expect(calls).not.toContain("reset ScreenCapture");
+	});
+});
+
+describe("#given a helper missing from the privacy lists #when the guide opens each pane #then a drag panel is attached for each missing permission and closed once it is granted", () => {
+	const helperApp = "/Users/someone/src/opencua/packages/mcp/dist/opencua-mcp.app";
+
+	function missingBoth(switchesOn: boolean[]): FakeMac {
+		let pending: "accessibility" | "screenRecording" | undefined;
+		const mac: FakeMac = {
+			state: { accessibility: false, screenRecording: false, automation: {} },
+			onRequest: {
+				accessibility: () => {
+					pending = "accessibility";
+				},
+				"screen-recording": () => {
+					pending = "screenRecording";
+				},
+				"switch-on": () => {
+					if (pending !== undefined) {
+						mac.state[pending] = true;
+						pending = undefined;
+					}
+				},
+			},
+			switchesOn,
+		};
+		return mac;
+	}
+
+	const panelCalls = (calls: readonly string[]) =>
+		calls.filter((call) => call.startsWith("open ") || call.includes("panel") || call === "wait");
+
+	it("shows the panel after opening each missing pane and closes it when the switch is on", async () => {
+		const { deps, calls, printed } = fake(missingBoth([true, true]));
+
+		const outcome = await grantPermissions(
+			{ mode: "terminal", openPanes: true, extraAutomationTargets: [], helperApp },
+			{ ...deps, dragPanel: fakeDragPanel(calls, true) },
+		);
+
+		expect(panelCalls(calls)).toEqual([
+			`open ${PRIVACY_PANES.accessibility}`,
+			`show panel ${helperApp}`,
+			"wait",
+			"close panel",
+			`open ${PRIVACY_PANES.screenRecording}`,
+			`show panel ${helperApp}`,
+			"wait",
+			"close panel",
+		]);
+		expect(outcome.granted).toEqual(["Accessibility", "Screen Recording"]);
+		expect(printed()).toContain("drag it from the panel under System Settings into the list");
+		expect(printed()).not.toContain("Command-Shift-G");
+	});
+
+	it("shows no panel for a permission that is already granted, and closes it when the person skips", async () => {
+		const mac = missingBoth([false]);
+		mac.state.accessibility = true;
+		const { deps, calls } = fake(mac);
+
+		const outcome = await grantPermissions(
+			{ mode: "terminal", openPanes: true, extraAutomationTargets: [], helperApp },
+			{ ...deps, dragPanel: fakeDragPanel(calls, true) },
+		);
+
+		expect(panelCalls(calls)).toEqual([
+			`open ${PRIVACY_PANES.screenRecording}`,
+			`show panel ${helperApp}`,
+			"wait",
+			"close panel",
+		]);
+		expect(outcome.missing).toEqual(["Screen Recording"]);
+	});
+
+	it("falls back to the + instructions and selects the helper in Finder once when the panel binary is missing", async () => {
+		const { deps, calls, printed } = fake(missingBoth([true, true]));
+
+		const outcome = await grantPermissions(
+			{ mode: "terminal", openPanes: true, extraAutomationTargets: [], helperApp },
+			{ ...deps, dragPanel: fakeDragPanel(calls, false) },
+		);
+
+		expect(calls.filter((call) => call.includes("panel"))).toEqual([]);
+		expect(calls.filter((call) => call.startsWith("reveal "))).toEqual([`reveal ${helperApp}`]);
+		expect(printed()).toContain(`paste ${helperApp}, choose Open`);
+		expect(outcome.granted).toEqual(["Accessibility", "Screen Recording"]);
+	});
+
+	it("attaches nothing and opens no Finder window with --no-open or in report mode", async () => {
+		for (const mode of ["terminal", "report"] as const) {
+			const { deps, calls } = fake(missingBoth([false, false]));
+
+			await grantPermissions(
+				{ mode, openPanes: mode === "report", extraAutomationTargets: [], helperApp },
+				{ ...deps, dragPanel: fakeDragPanel(calls, true) },
+			);
+
+			expect(calls.filter((call) => call.includes("panel") || call.startsWith("reveal "))).toEqual([]);
+		}
 	});
 });

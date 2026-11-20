@@ -203,3 +203,77 @@ describe("#given nothing to repair #when --fix runs #then it says so and changes
 		expect(outcome.report.ready).toBe(true);
 	});
 });
+
+describe("#given an ad-hoc signed helper that holds grants #when --fix would rebuild it #then it warns and rebuilds only with --rebuild-helper", () => {
+	/** Stale helper inputs call for a rebuild; the ad-hoc helper holds Accessibility and Screen Recording. */
+	function adHocFacts(): DoctorFacts {
+		const facts = readyFacts();
+		return {
+			...facts,
+			helper: {
+				...facts.helper,
+				signature: { valid: true, detail: "valid", adHoc: true },
+				inputs: { built: "old", current: "new" },
+			},
+		};
+	}
+	const warning = `warning: "${HELPER_DISPLAY_NAME}" is signed ad hoc and holds Accessibility, Screen Recording now.`;
+
+	it("names the grants a rebuild drops, does not take a yes at the terminal as consent, and skips the rebuild", async () => {
+		const mac = fakeMac([true]);
+
+		const outcome = await runDoctorFix({ ...UNATTENDED, interactive: true }, { ...mac.deps, gather: adHocFacts });
+
+		expect(mac.calls).toEqual([]);
+		expect(mac.printed()).toContain(warning);
+		expect(mac.printed()).toContain("runs only with --rebuild-helper");
+		expect(outcome.skipped).toEqual([
+			"rebuild the signed helper app (needs your consent: opencua doctor --fix --rebuild-helper)",
+		]);
+	});
+
+	it("prints the warning before it rebuilds with --rebuild-helper", async () => {
+		const mac = fakeMac();
+		let warnedFirst = false;
+
+		await runDoctorFix(
+			{ ...UNATTENDED, rebuildHelper: true },
+			{
+				...mac.deps,
+				gather: adHocFacts,
+				rebuildHelper: () => {
+					warnedFirst = mac.printed().includes(warning);
+					mac.calls.push("rebuild helper");
+					return true;
+				},
+			},
+		);
+
+		expect(mac.calls).toEqual(["rebuild helper"]);
+		expect(warnedFirst).toBe(true);
+	});
+
+	it("still asks at the terminal when the ad-hoc helper holds nothing a rebuild could drop", async () => {
+		const mac = fakeMac([false]);
+		const facts = adHocFacts();
+		const bare: DoctorFacts = {
+			...facts,
+			selfCheck: {
+				ok: true,
+				report: {
+					permissions: { accessibility: false, screenRecording: false },
+					sessionMode: "console",
+					processArch: "arm64",
+					processNode: "v22.23.2",
+					nativeCapture: { available: true, error: "" },
+					automation: {},
+				},
+			},
+		};
+
+		await runDoctorFix({ ...UNATTENDED, interactive: true }, { ...mac.deps, gather: () => bare });
+
+		expect(mac.calls.filter((call) => call.startsWith("ask Rebuild the helper"))).toHaveLength(1);
+		expect(mac.printed()).not.toContain("is signed ad hoc and holds");
+	});
+});

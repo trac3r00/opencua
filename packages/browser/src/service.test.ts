@@ -366,6 +366,65 @@ describe("browser service artifacts", () => {
 		await expect(stat(braveManifest)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
+	it("#given a running daemon registered only in Brave #when Chrome is detected #then doctor reports the Chrome manifest missing and reinstalling writes it", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-late-chrome-"));
+		directories.push(homeDirectory);
+		const support = join(homeDirectory, "Library", "Application Support");
+		await mkdir(join(support, "BraveSoftware", "Brave-Browser"), { recursive: true });
+		const options = {
+			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
+			packageRoot: join(homeDirectory, "package"),
+			stateDirectory: join(homeDirectory, "state"),
+			platform: "darwin",
+			isPortListening: async () => false,
+			launchctl: async () => ({ code: 0, stderr: "" }),
+		} satisfies Parameters<typeof installBrowserService>[0];
+		await installBrowserService(options);
+		expect(await doctorBrowserService(options)).toMatchObject({
+			installed: true,
+			running: true,
+			missingNativeHostManifests: [],
+		});
+		const chromeManifest = join(support, "Google", "Chrome", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`);
+		await mkdir(join(support, "Google", "Chrome"), { recursive: true });
+
+		const before = await doctorBrowserService(options);
+		const paths = await installBrowserService(options);
+
+		expect(before).toMatchObject({ installed: false, running: true, missingNativeHostManifests: [chromeManifest] });
+		expect(nativeManifestSchema.parse(JSON.parse(await readFile(chromeManifest, "utf8"))).path).toBe(
+			paths.nativeHostLauncher,
+		);
+		expect(await doctorBrowserService(options)).toMatchObject({ installed: true, missingNativeHostManifests: [] });
+	});
+
+	it("#given an Aside support directory #when installing #then registers the Aside manifest", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-aside-"));
+		directories.push(homeDirectory);
+		const support = join(homeDirectory, "Library", "Application Support");
+		await mkdir(join(support, "Aside"), { recursive: true });
+		const options = {
+			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
+			packageRoot: join(homeDirectory, "package"),
+			stateDirectory: join(homeDirectory, "state"),
+			platform: "darwin",
+			isPortListening: async () => false,
+			launchctl: async (args: readonly string[]) => ({ code: args[0] === "print" ? 113 : 0, stderr: "" }),
+		} satisfies Parameters<typeof installBrowserService>[0];
+
+		const paths = await installBrowserService(options);
+
+		const asideManifest = join(support, "Aside", "NativeMessagingHosts", `${NATIVE_HOST_NAME}.json`);
+		expect(paths.nativeHostManifest).toBe(asideManifest);
+		expect(nativeManifestSchema.parse(JSON.parse(await readFile(asideManifest, "utf8"))).path).toBe(
+			paths.nativeHostLauncher,
+		);
+		expect(paths.nativeHostManifests).toContain(asideManifest);
+		expect((await doctorBrowserService(options)).installed).toBe(true);
+	});
+
 	it("#given manifests registered in several browsers #when uninstalling #then removes every registered manifest", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-multi-uninstall-"));
 		directories.push(homeDirectory);

@@ -1,5 +1,6 @@
 import type { AutomationStatus } from "@opencua/core";
 import { GRANT_COMMAND, HELPER_DISPLAY_NAME, PRIVACY_PANES, automationAppName } from "./doctor.js";
+import { type DragPanel, type DragPanelLauncher, nativeDragPanel } from "./permission-drag.js";
 
 /** What the helper holds, read without raising a prompt (server.js --doctor through the helper). */
 export interface HelperPermissions {
@@ -31,6 +32,11 @@ export interface GrantDependencies {
 	/** Re-checks until `granted` holds or the person skips; true when it holds. */
 	readonly waitFor: (granted: () => boolean) => Promise<boolean>;
 	readonly print: (text: string) => void;
+	/**
+	 * The panel attached to System Settings that a person drags the helper app from into a privacy list, used when
+	 * GrantOptions.helperApp is set. Defaults to the native permission-drag binary.
+	 */
+	readonly dragPanel?: DragPanelLauncher;
 }
 
 /**
@@ -46,7 +52,7 @@ export interface GrantOptions {
 	readonly openPanes: boolean;
 	/** Apps beyond the helper's own Automation targets to ask about, e.g. approved browsers. */
 	readonly extraAutomationTargets: readonly string[];
-	/** The helper app's path, for adding it by hand when macOS leaves it out of the Screen Recording list. */
+	/** The helper app's path, for adding it by hand when macOS leaves it out of a privacy list. */
 	readonly helperApp?: string;
 	/** Also walk through Input Monitoring, which only the cua-history watcher needs. */
 	readonly inputMonitoring?: boolean;
@@ -59,6 +65,9 @@ export interface GrantOutcome {
 }
 
 const NAME = `"${HELPER_DISPLAY_NAME}"`;
+
+/** The instruction line on the drag panel, which points up at the list from under System Settings. */
+export const DRAG_PANEL_TITLE = "Drag this into the list above, then switch it on.";
 
 /**
  * Walks a person through every permission the helper needs: shows macOS's own dialog (which also lists the helper in
@@ -97,6 +106,36 @@ export async function grantPermissions(options: GrantOptions, deps: GrantDepende
 		} else {
 			deps.print(`  Open System Settings > Privacy & Security > ${pane} with: open "${url}"`);
 		}
+	};
+	let launcher: DragPanelLauncher | undefined;
+	const dragPanel = (): DragPanelLauncher => {
+		launcher ??= deps.dragPanel ?? nativeDragPanel(deps.print);
+		return launcher;
+	};
+	let revealed = false;
+	// macOS can leave the helper out of the list (an ad-hoc build loses its entries on every rebuild): attach the drag
+	// panel to System Settings, or else say how to add it with + and show it selected in Finder.
+	const offerHelperApp = (): DragPanel | undefined => {
+		const app = options.helperApp;
+		if (app === undefined) {
+			return undefined;
+		}
+		const panel = options.openPanes ? dragPanel().show(app, DRAG_PANEL_TITLE) : undefined;
+		if (panel !== undefined) {
+			deps.print(
+				`  If ${NAME} is not in the list: drag it from the panel under System Settings into the list, then switch it on.`,
+			);
+			return panel;
+		}
+		deps.print(
+			`  If ${NAME} is not in the list: click + below it, press Command-Shift-G, paste ${app}, choose Open, then switch it on.`,
+		);
+		if (options.openPanes && !revealed) {
+			revealed = true;
+			dragPanel().reveal(app);
+			deps.print(`  Finder shows ${NAME} selected; you can also drag it from there into the list.`);
+		}
+		return undefined;
 	};
 
 	const grants: {
@@ -156,19 +195,18 @@ export async function grantPermissions(options: GrantOptions, deps: GrantDepende
 		}
 		deps.print(`\n${grant.label} lets ${NAME} ${grant.why}.`);
 		deps.print(`  macOS shows a dialog for ${NAME}: choose Open System Settings, then switch on ${NAME}.`);
-		if (grant.tccService === "ScreenCapture" && options.helperApp !== undefined) {
-			// macOS can show the dialog and still leave the app out of this list; adding it with + always works.
-			deps.print(
-				`  If ${NAME} is not in the list: click + below it, press Command-Shift-G, paste ${options.helperApp}, choose Open, then switch it on.`,
-			);
-		}
 		if (grant.tccService !== undefined) {
 			deps.resetDecision?.(grant.tccService);
 		}
 		deps.request([grant.kind]);
 		await open(grant.url, grant.pane);
+		const panel = offerHelperApp();
 		deps.print(waiting);
-		await deps.waitFor(() => grant.has(deps.read()));
+		try {
+			await deps.waitFor(() => grant.has(deps.read()));
+		} finally {
+			panel?.close();
+		}
 		// The final fresh helper report is authoritative: it catches a grant made as the deadline elapsed and
 		// reports an unreadable response separately from a permission that the helper still says is off.
 		const finalState = deps.read();

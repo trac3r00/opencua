@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { vi } from "@opencua/test-support";
 
 const browser = vi.hoisted(() => ({
@@ -21,7 +24,7 @@ vi.mock("node:child_process", () => ({
 	}),
 }));
 
-const { browserSetupInstructions, setupBrowser } = await import("./browser-commands.js");
+const { browserSetupInstructions, detectChromiumBrowsers, setupBrowser } = await import("./browser-commands.js");
 
 const paths = {
 	launchAgent: "/tmp/agent.plist",
@@ -88,6 +91,39 @@ describe("#given a missing browser service #when setup runs #then it installs on
 		expect(browser.installBrowserService).toHaveBeenCalledTimes(1);
 		expect(result.status.connected).toBe(false);
 		expect(result.extensionPath).toContain("packages/browser/extension");
+	});
+});
+
+describe("#given a running daemon registered only in Brave #when setup runs for Google Chrome #then it reinstalls to register Chrome", () => {
+	it("installs once because doctor reports the Chrome manifest missing", async () => {
+		browser.doctorBrowserService.mockResolvedValue({
+			installed: false,
+			running: true,
+			connectionReady: true,
+			launchAgent: paths.launchAgent,
+			nativeHostManifest: "/tmp/Brave/NativeMessagingHosts/com.browser_skill_omo.bridge.json",
+			missingNativeHostManifests: ["/tmp/Google/Chrome/NativeMessagingHosts/com.browser_skill_omo.bridge.json"],
+		});
+
+		await setupBrowser({ wait: false, open: false, browser: "Google Chrome" });
+
+		expect(browser.installBrowserService).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("#given Aside in the user's Applications folder #when browsers are detected #then Aside is offered with its extensions page", () => {
+	it("lists Aside with chrome://extensions", async () => {
+		const home = await mkdtemp(join(tmpdir(), "cli-aside-"));
+		try {
+			await mkdir(join(home, "Applications", "Aside.app"), { recursive: true });
+
+			const aside = detectChromiumBrowsers(home).find((candidate) => candidate.name === "Aside");
+
+			expect(aside?.extensionsUrl).toBe("chrome://extensions");
+			expect(aside?.appPath.endsWith("Aside.app")).toBe(true);
+		} finally {
+			await rm(home, { recursive: true, force: true });
+		}
 	});
 });
 

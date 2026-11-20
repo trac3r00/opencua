@@ -56,6 +56,8 @@ export type DoctorResult = {
 	readonly launchAgent: string;
 	readonly nativeHostManifest: string;
 	readonly nativeHostManifests: readonly string[];
+	/** Manifests of detected browsers that are not registered yet; setup reinstalls while any is missing. */
+	readonly missingNativeHostManifests: readonly string[];
 };
 
 export async function initializeConnectionMetadata(stateDirectory?: string): Promise<Connection> {
@@ -80,6 +82,7 @@ const SUPPORTED_BROWSERS = [
 	{ supportDirectory: "Microsoft Edge", applicationBundle: "Microsoft Edge.app" },
 	{ supportDirectory: "Arc/User Data", applicationBundle: "Arc.app" },
 	{ supportDirectory: "Vivaldi", applicationBundle: "Vivaldi.app" },
+	{ supportDirectory: "Aside", applicationBundle: "Aside.app" },
 ] as const;
 
 function nativeHostManifestPath(libraryDirectory: string, browserDirectory: string): string {
@@ -392,7 +395,8 @@ export async function doctorBrowserService(options: ServiceOptions = {}): Promis
 	if ((options.platform ?? process.platform) !== "darwin") {
 		throw new Error("The persistent browser service is supported only on macOS.");
 	}
-	const [launchAgent, registeredManifest, nativeHostLauncher, connectionReady] = await Promise.all([
+	const expectedManifests = await registeredManifestPaths(context.homeDirectory, context.applicationsDirectories);
+	const [launchAgent, registeredManifest, nativeHostLauncher, connectionReady, expectedPresent] = await Promise.all([
 		readFile(context.paths.launchAgent, "utf8").then(
 			() => true,
 			(error: unknown) => {
@@ -415,15 +419,23 @@ export async function doctorBrowserService(options: ServiceOptions = {}): Promis
 				throw error;
 			},
 		),
+		Promise.all(expectedManifests.map((path) => regularFileExists(path))),
 	]);
+	const missingNativeHostManifests = expectedManifests.filter((_, index) => expectedPresent[index] !== true);
 	const status = await context.launchctl(["print", context.serviceTarget]);
 	return {
-		installed: launchAgent && registeredManifest !== undefined && nativeHostLauncher,
+		// Every detected browser needs its own manifest: one registered browser does not pair another.
+		installed:
+			launchAgent &&
+			registeredManifest !== undefined &&
+			missingNativeHostManifests.length === 0 &&
+			nativeHostLauncher,
 		running: status.code === 0,
 		connectionReady,
 		launchAgent: context.paths.launchAgent,
 		nativeHostManifest: registeredManifest ?? context.paths.nativeHostManifest,
 		nativeHostManifests: context.paths.nativeHostManifests,
+		missingNativeHostManifests,
 	};
 }
 
