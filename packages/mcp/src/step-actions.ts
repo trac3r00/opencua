@@ -162,6 +162,11 @@ function validateStep(step: RunStep, observation: InputObservation): void {
 		case "scroll":
 			validateElement(observation, requiredElementIndex(step));
 			return;
+		case "open_url":
+			if (!URL.canParse(step.url)) {
+				throw new Error("open_url needs an absolute URL with a scheme (zoommtg://..., https://...)");
+			}
+			return;
 		case "clipboard_write":
 			if ([step.text, step.image_path, step.file_path].filter((value) => value !== undefined).length !== 1) {
 				throw new Error("clipboard_write requires exactly one of text, image_path, or file_path");

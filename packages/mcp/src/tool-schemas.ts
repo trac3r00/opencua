@@ -458,6 +458,10 @@ export const runStepSchema = z.discriminatedUnion("type", [
 		image_path: z.string().optional(),
 		file_path: z.string().optional(),
 	}),
+	/** Hand a URL to the target app in the background (a meeting link, a deep link); pair with wait_for window_title. */
+	z
+		.object({ type: z.literal("open_url"), url: z.string().min(1) })
+		.strict(),
 ]);
 
 const paceSchema = z
@@ -514,6 +518,7 @@ const STEP_TYPES = [
 	"invoke_menu",
 	"set_window_frame",
 	"clipboard_write",
+	"open_url",
 ] as const;
 
 /**
@@ -543,6 +548,7 @@ export const compactStepSchema = z.object({
 	prefix: z.string().optional(),
 	suffix: z.string().optional(),
 	selection: z.enum(["text", "before", "after"]).optional(),
+	url: z.string().optional().describe("open_url: absolute URL opened in the target app in the background."),
 	from_x: coordinateSchema.optional(),
 	from_y: coordinateSchema.optional(),
 	to_x: coordinateSchema.optional(),

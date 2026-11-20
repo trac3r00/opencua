@@ -86,6 +86,62 @@ describe("run_steps #given an observed app #when a batch mixes element and input
 	});
 });
 
+describe("run_steps #given a link the target app handles #when open_url and wait_for run in one batch #then the app opens it and the batch waits for its window", () => {
+	it("opens the URL in the target app, then waits for the window it opened", async () => {
+		const harness = await createHarness(undefined, async () => [window("Documents"), window("Staff Meeting")]);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_steps",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				steps: [
+					{ type: "open_url", url: "zoommtg://zoom.us/join?action=join&confno=123" },
+					{ type: "wait_for", window_title: "Staff Meeting", timeout_ms: 500 },
+				],
+			},
+		});
+		const payload = jsonPayload(result);
+
+		expect(result.isError).not.toBe(true);
+		expect(inputEffects(harness.computer.effects)).toEqual([
+			{ kind: "openUrl", pid: 1234, url: "zoommtg://zoom.us/join?action=join&confno=123" },
+		]);
+		expect(payload["runSteps"]).toMatchObject({
+			requested: 2,
+			completed: 1,
+			stoppedEarly: false,
+			steps: [
+				{ step: 0, type: "open_url", input_dispatched: true, status: "dispatched" },
+				{ step: 1, type: "wait_for", status: "satisfied" },
+			],
+		});
+	});
+
+	it("rejects a URL without a scheme before dispatching any step", async () => {
+		const harness = await createHarness();
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_steps",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				steps: [
+					{ type: "type_text", text: "x" },
+					{ type: "open_url", url: "zoom.us/join" },
+				],
+			},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(inputEffects(harness.computer.effects)).toEqual([]);
+	});
+});
+
 describe("run_steps #given an expect block #when the batch finishes #then the outcome is verified in the same call", () => {
 	it("confirms the written value against the post-batch observation", async () => {
 		const harness = await createHarness();

@@ -58,6 +58,7 @@ interface PowerComputerExtensions {
 		readonly verified: boolean;
 		readonly attempts: number;
 	}>;
+	openUrl?(pid: number, url: string): Promise<{ readonly bundleId: string; readonly url: string }>;
 	readClipboard?(): ReturnType<typeof readClipboard>;
 	writeClipboard?(input: Parameters<typeof writeClipboard>[0]): ReturnType<typeof writeClipboard>;
 }
@@ -86,6 +87,13 @@ export async function dispatchPowerStep(
 			const writeInput = clipboardInput(step);
 			const report = powerComputer.writeClipboard?.(writeInput) ?? writeClipboard(writeInput);
 			return { route: "synthetic_events", delivery: "not_applicable", detail: report };
+		}
+		case "open_url": {
+			if (powerComputer.openUrl === undefined) {
+				throw new Error("this computer cannot open URLs in an app");
+			}
+			const report = await powerComputer.openUrl(targetPid, step.url);
+			return { route: "synthetic_events", delivery: "background", detail: report };
 		}
 		default:
 			return undefined;
