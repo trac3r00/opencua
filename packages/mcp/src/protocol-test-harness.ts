@@ -210,7 +210,8 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	private pagesScrolled = 0;
 	private subtreeIds: ReadonlyMap<number, number> | undefined;
 	private generation = 0;
-	private stateCalls = 0;
+	/** How many app-state reads the fake has answered; tests compare it before and after an action. */
+	stateCalls = 0;
 	private readonly observations = new Map<number, InputObservation>();
 	private actionDispatched = false;
 
