@@ -170,6 +170,8 @@ export interface StepDispatch extends ActionDispatch {
 export interface RunHandsLaneReport {
 	readonly hand: "left" | "right" | "vision";
 	readonly lane: "keyboard" | "pointer" | "vision";
+	/** The chunk this lane ran in; only chunked calls carry it. */
+	readonly chunk?: number;
 	readonly status: "completed" | "failed" | "aborted" | "not_started";
 	readonly resources: readonly string[];
 	readonly steps: readonly RunStepReport[];
@@ -193,6 +195,15 @@ export interface RunHandsVisionReport {
 	readonly unavailable?: string;
 }
 
+export interface RunHandsChunkReport {
+	readonly chunk: number;
+	/** skipped: an earlier chunk failed or the run was stopped, so none of this chunk's input was sent. */
+	readonly status: "completed" | "failed" | "aborted" | "skipped";
+	readonly lanes: readonly RunHandsLaneReport["lane"][];
+	readonly overlap_ms: number;
+	readonly vision?: RunHandsVisionReport;
+}
+
 export interface RunHandsReport {
 	readonly policy: "auto" | "never" | "always";
 	readonly overlap_ms: number;
@@ -201,6 +212,7 @@ export interface RunHandsReport {
 	readonly lanes: readonly RunHandsLaneReport[];
 	readonly unstarted?: readonly string[];
 	readonly vision?: RunHandsVisionReport;
+	readonly chunks?: readonly RunHandsChunkReport[];
 }
 
 export interface RunStepReport {

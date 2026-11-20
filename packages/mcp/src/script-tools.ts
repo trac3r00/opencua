@@ -10,6 +10,7 @@ import type { AppleScriptGuardSession } from "./applescript-session.js";
 import type { DockGuardSession } from "./dock-session.js";
 import type { ExtrasGuardSession } from "./extras-session.js";
 import type { GuardedSession, RunPace, RunStepDriver, VerifyCheckRequest, VerifyRequest } from "./guarded-session.js";
+import { handsChunksFrom } from "./hands-tools.js";
 import type {
 	CallError,
 	HostMessage,
@@ -21,7 +22,7 @@ import type {
 import { createRunStepDriver } from "./step-actions.js";
 import type { TerminalGuardSession } from "./terminal-session.js";
 import type { ToolContent, ToolResult } from "./tool-result.js";
-import { MAX_RUN_STEPS, elementQuerySchema, runStepSchema } from "./tool-schemas.js";
+import { MAX_RUN_STEPS, elementQuerySchema, handsSpecSchema, runStepSchema } from "./tool-schemas.js";
 import type { RunStep } from "./tool-schemas.js";
 
 const MAX_CODE_LENGTH = 20_000;
@@ -58,6 +59,7 @@ const app=apple.app("Finder",{window:"title or id"}); await apple.apps(); await 
 app.observe(options); app.find(query); app.click(target,options); app.setValue(target,value); app.type(text); app.press(keys); app.selectText(target,text,options); app.secondaryAction(target,action); app.menu(path); app.scroll(target,direction,pages); app.drag(from,to,options).
 Targets are observed ids or unique queries {role,label,label_contains,value_contains,text,index}. IDs/coordinates need observe/find first; queries and keyboard/menu actions observe themselves. Scroll modifiers are refused.
 app.waitFor(target|{window_title},options); app.verify(checks,options); app.step(step); app.batch(steps,options); app.chain(steps) (fast; batch verifies intermediate targets by default); app.reveal(query,findOptions) only scrolls.
+app.hands({chunks:[{keyboard:[steps],pointer:[steps],vision:{}}...]},{expect}) runs each chunk's lanes at once (type while pointing while capturing), chunk after chunk, in one call; pointer steps need observed ids or x/y.
 Find options: scrollWithin,maxPages,vision,direction. OCR needs Screen Recording and finds click targets, not AX values.
 const dock=apple.dock(); await dock.observe(); dock.click/showMenu/cancel(target). Dock actions need explicit approval and attended delivery.
 apple.terminal(): run/read; approval required. apple.osascript(source,{language,args,timeoutMs}): AppleScript/JXA; screen-taking statements refused.
@@ -1009,6 +1011,57 @@ class ScriptRun {
 		});
 	}
 
+	/** run_hands from a script: each chunk's keyboard, pointer and vision lanes run at once, chunk after chunk. */
+	hands(target: AppTarget, spec: unknown, options?: unknown): Promise<unknown> {
+		return this.queue(target.app, async () => {
+			const parsed = handsSpecSchema.safeParse(spec);
+			if (!parsed.success) {
+				throw invalid(
+					`invalid hands spec: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
+				);
+			}
+			let chunks: ReturnType<typeof handsChunksFrom>;
+			try {
+				chunks = handsChunksFrom(parsed.data, "app.hands");
+			} catch (error: unknown) {
+				throw invalid(errorMessage(error));
+			}
+			const steps = chunks.flatMap((chunk) => [...chunk.keyboard, ...chunk.pointer]);
+			if (steps.length > 0 && this.options.readOnly) {
+				const entry = { n: this.nextAction++, app: target.app, kind: "hands", ms: 0, status: "refused:read-only" };
+				this.actions.push(entry);
+				this.lastFailure = entry;
+				throw new ScriptActionError("run_script is read_only: hands was not dispatched", {
+					kind: "refused",
+					refused: "read-only",
+				});
+			}
+			const expectInput = pick(options, "expect");
+			const expectation =
+				expectInput === undefined ? undefined : verifyRequestFrom(pick(expectInput, "checks"), expectInput);
+			const token = await this.tokenFor(target, steps.some(needsObservedIds));
+			return await this.exec(
+				target.app,
+				"hands",
+				() =>
+					this.session.runHands(
+						{
+							app: target.app,
+							token,
+							chunks,
+							overlap: parsed.data.overlap ?? "auto",
+							...(expectation === undefined ? {} : { expect: expectation }),
+							fullState: false,
+							includeScreenshot: this.options.includeScreenshot,
+						},
+						this.driver,
+						{ signal: this.signal },
+					),
+				{ windowId: boundId(target) },
+			);
+		});
+	}
+
 	verify(target: AppTarget, checks: unknown, options: unknown): Promise<unknown> {
 		return this.queue(target.app, async () => {
 			const request = verifyRequestFrom(checks, options);
@@ -1113,6 +1166,8 @@ async function perform(
 			return await run.batch(handle(call.target), first, second);
 		case "chain":
 			return await run.batch(handle(call.target), first, second, "fast");
+		case "hands":
+			return await run.hands(handle(call.target), first, second);
 		case "verify":
 			return await run.verify(handle(call.target), first, second);
 		case "dockObserve":

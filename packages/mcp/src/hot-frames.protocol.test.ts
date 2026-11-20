@@ -134,6 +134,44 @@ describe("#given an engaged hot frame source #when a vision call needs pixels #t
 	});
 });
 
+describe("#given an observation with no bound window #when run_hands needs pixels #then the vision lane takes the refresher's frame for the observed window", () => {
+	it("does not race the refresher with its own capture", async () => {
+		const worker = fakeWorker();
+		const hotFrames = new HotFrameSource({ spawnWorker: () => worker, maxAgeMs: 60_000 });
+		hotFrames.start(1234, 71, { width: 1000, height: 800 });
+		const jpeg = Buffer.from("refresher-jpeg");
+		worker.deliver({ type: "frame", bytes: new Uint8Array(jpeg), width: 1000, height: 800, hash: "refresher" });
+		const computer = new FakeGuardedComputer();
+		computer.delivery = "background";
+		const harness = await createHarness(computer, undefined, undefined, {
+			serverOptions: { hotFramesSource: hotFrames },
+		});
+		closeHarness = harness.close;
+		// No window_id: the session binds no window, but the observation still names window 71.
+		const state = jsonPayload(await harness.client.callTool({ name: "get_app_state", arguments: { app: "Finder" } }));
+		const token = state["observation_token"];
+		if (typeof token !== "string") {
+			throw new Error("observation did not return a token");
+		}
+		const readsBefore = computer.stateOptions.length;
+
+		const payload = jsonPayload(
+			await harness.client.callTool({
+				name: "run_hands",
+				arguments: { app: "Finder", observation_token: token, vision: { include_screenshot: true } },
+			}),
+		);
+		const hands =
+			payload["hands"] !== undefined && typeof payload["hands"] === "object" && payload["hands"] !== null
+				? Object.fromEntries(Object.entries(payload["hands"]))
+				: {};
+
+		expect(hands["vision"]).toEqual(expect.objectContaining({ captured: true, source: "hot" }));
+		expect(computer.stateOptions.length).toBe(readsBefore);
+		hotFrames.dispose();
+	});
+});
+
 describe("#given the frame source #when frames age or targets move #then it refuses stale pixels", () => {
 	it("stops answering once the frame is older than the age budget", () => {
 		vi.useFakeTimers();

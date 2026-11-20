@@ -259,6 +259,205 @@ describe("run_hands #given the stop switch #when it flips during a lane #then no
 	});
 });
 
+describe("run_hands #given chunks #when the first chunk's lanes are gated #then they overlap and the next chunk waits for them", () => {
+	it("runs chunk 0's keyboard and pointer at once, then chunk 1, and reports each chunk", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.delivery = "background";
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const typeStarted = new Deferred<void>();
+		const clickStarted = new Deferred<void>();
+		const release = new Deferred<void>();
+		computer.inputGate = async (effect) => {
+			if (effect.kind === "type" && effect.text === "first") {
+				typeStarted.resolve(undefined);
+				await release.promise;
+			}
+			if (effect.kind === "click") {
+				clickStarted.resolve(undefined);
+				await release.promise;
+			}
+		};
+
+		const pending = harness.client.callTool({
+			name: "run_hands",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				chunks: [
+					{ keyboard: [{ type: "type_text", text: "first" }], pointer: [{ type: "click", x: 10, y: 20 }] },
+					{ keyboard: [{ type: "type_text", text: "second" }] },
+				],
+			},
+		});
+		await Promise.all([typeStarted.promise, clickStarted.promise]);
+		expect(inputEffects(computer).map((effect) => effect.kind)).not.toContain("type");
+		release.resolve(undefined);
+		const payload = jsonPayload(await pending);
+		const hands = record(payload["hands"]);
+
+		const effects = inputEffects(computer);
+		expect(effects.at(-1)).toEqual(expect.objectContaining({ kind: "type", text: "second" }));
+		expect(effects).toHaveLength(3);
+		expect(hands["chunks"]).toEqual([
+			expect.objectContaining({ chunk: 0, status: "completed", lanes: ["keyboard", "pointer"] }),
+			expect.objectContaining({ chunk: 1, status: "completed", lanes: ["keyboard"] }),
+		]);
+		expect(hands["lanes"]).toEqual([
+			expect.objectContaining({ lane: "keyboard", chunk: 0, status: "completed" }),
+			expect.objectContaining({ lane: "pointer", chunk: 0, status: "completed" }),
+			expect.objectContaining({ lane: "keyboard", chunk: 1, status: "completed" }),
+		]);
+		expect(typeof payload["observation_token"]).toBe("string");
+	}, 2_000);
+});
+
+describe("run_hands #given chunks #when a chunk's capture is still running #then the next chunk's input does not wait for it", () => {
+	it("types chunk 1 while chunk 0's vision lane is held", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.delivery = "background";
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const releaseVision = new Deferred<void>();
+		const secondTyped = new Deferred<void>();
+		computer.stateGate = releaseVision;
+		computer.inputGate = async (effect) => {
+			if (effect.kind === "type" && effect.text === "second") {
+				secondTyped.resolve(undefined);
+			}
+		};
+
+		const pending = harness.client.callTool({
+			name: "run_hands",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				chunks: [
+					{ keyboard: [{ type: "type_text", text: "first" }], vision: { include_screenshot: true } },
+					{ keyboard: [{ type: "type_text", text: "second" }] },
+				],
+			},
+		});
+		// Only a run that starts chunk 1 before chunk 0's capture finishes can reach this point.
+		await secondTyped.promise;
+		releaseVision.resolve(undefined);
+		const result = await pending;
+		const hands = record(jsonPayload(result)["hands"]);
+		const chunks = hands["chunks"];
+
+		expect(chunks).toEqual([
+			expect.objectContaining({
+				chunk: 0,
+				status: "completed",
+				vision: expect.objectContaining({ captured: true }),
+			}),
+			expect.objectContaining({ chunk: 1, status: "completed" }),
+		]);
+		expect(result.content).toContainEqual({
+			type: "image",
+			data: Buffer.from("png-bytes").toString("base64"),
+			mimeType: "image/png",
+		});
+	}, 2_000);
+});
+
+describe("run_hands #given chunks #when a lane fails in the first chunk #then later chunks send nothing", () => {
+	it("skips chunk 1 and reports the failure", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.delivery = "background";
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		computer.inputGate = async (effect) => {
+			if (effect.kind === "type" && effect.text === "boom") {
+				throw new Error("typing failed");
+			}
+		};
+
+		const payload = jsonPayload(
+			await harness.client.callTool({
+				name: "run_hands",
+				arguments: {
+					app: "Finder",
+					observation_token: token,
+					chunks: [
+						{ keyboard: [{ type: "type_text", text: "boom" }] },
+						{ keyboard: [{ type: "type_text", text: "after" }], pointer: [{ type: "click", x: 10, y: 20 }] },
+					],
+				},
+			}),
+		);
+		const hands = record(payload["hands"]);
+
+		expect(inputEffects(computer).filter((effect) => effect.kind === "click")).toEqual([]);
+		expect(inputEffects(computer)).not.toContainEqual(expect.objectContaining({ kind: "type", text: "after" }));
+		expect(hands["chunks"]).toEqual([
+			expect.objectContaining({ chunk: 0, status: "failed" }),
+			{ chunk: 1, status: "skipped", lanes: [], overlap_ms: 0 },
+		]);
+	}, 2_000);
+});
+
+describe("run_hands #given chunks and top-level lanes together #when called #then nothing dispatches", () => {
+	it("refuses the call as invalid", async () => {
+		const computer = new FakeGuardedComputer();
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_hands",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				keyboard: [{ type: "type_text", text: "top" }],
+				chunks: [{ keyboard: [{ type: "type_text", text: "chunk" }] }],
+			},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(inputEffects(computer)).toEqual([]);
+	});
+});
+
+describe("run_script app.hands #given chunks #when the script runs them #then each chunk's lanes run through run_hands in order", () => {
+	it("returns the chunk report to the script", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.delivery = "background";
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(
+			await harness.client.callTool({
+				name: "run_script",
+				arguments: {
+					code: `
+						const finder = apple.app("Finder");
+						await finder.observe();
+						const result = await finder.hands({
+							chunks: [
+								{ keyboard: [{ type: "type_text", text: "one" }], pointer: [{ type: "click", x: 10, y: 20 }] },
+								{ keyboard: [{ type: "press_keys", keys: ["return"] }] },
+							],
+						});
+						return result.hands.chunks.map((chunk) => chunk.status);
+					`,
+				},
+			}),
+		);
+
+		expect(payload).toMatchObject({ ok: true, value: ["completed", "completed"] });
+		const effects = inputEffects(computer);
+		expect(effects).toContainEqual(expect.objectContaining({ kind: "type", text: "one" }));
+		expect(effects.at(-1)).toEqual(expect.objectContaining({ kind: "key" }));
+	});
+});
+
 describe("get_tool_usage #given successful and failed calls #when the agent asks for usage #then the counts are truthful", () => {
 	it("reports calls, errors, bytes, and per-tool latency without a token", async () => {
 		const harness = await createHarness();

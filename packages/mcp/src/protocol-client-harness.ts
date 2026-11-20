@@ -11,6 +11,7 @@ import type {
 	JSONRPCMessage,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AppOpenLauncher, StopStatusSource, SystemPrompt, TopLevelWindow } from "@opencua/core";
+import { HotFrameSource } from "@opencua/core";
 import { type McpServerOptions, createMcpServer } from "./mcp-server.js";
 import type { PhoneToolSource } from "./phone-session.js";
 import { FakeGuardedComputer } from "./protocol-test-harness.js";
@@ -60,7 +61,12 @@ export async function createHarness(
 		appLauncher,
 		clientOptions?.systemPromptProbe,
 		clientOptions?.stopSwitch,
-		clientOptions?.serverOptions,
+		{
+			// A fake computer has no real windows: a refresher would spawn a worker that captures the host screen and
+			// never delivers. Tests of the refresher pass their own source.
+			hotFramesSource: new HotFrameSource({ spawnWorker: () => undefined }),
+			...clientOptions?.serverOptions,
+		},
 	);
 	const client = new Client(
 		clientOptions?.clientInfo ?? { name: "context-first-test", version: "0.1.0" },

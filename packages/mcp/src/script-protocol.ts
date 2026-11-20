@@ -21,6 +21,7 @@ export type CallMethod =
 	| "step"
 	| "batch"
 	| "chain"
+	| "hands"
 	| "verify"
 	| "dockObserve"
 	| "dockAct"

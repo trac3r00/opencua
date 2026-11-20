@@ -10,6 +10,7 @@ import {
 	describeUserStop,
 	isOwnedSurfacePid,
 	matchElements,
+	measureOverlapMs,
 	openApplication,
 	parseElementIndex,
 	resolveAppPid,
@@ -49,6 +50,7 @@ import {
 import {
 	type ActionDispatch,
 	type ElementFormat,
+	type RunHandsChunkReport,
 	type RunHandsLaneReport,
 	type RunHandsReport,
 	type RunHandsVisionReport,
@@ -58,6 +60,7 @@ import {
 	type SetFieldStepReport,
 	type SetFieldsReport,
 	type StepDispatch,
+	type ToolContent,
 	type ToolResult,
 	type Verification,
 	type VerificationCheck,
@@ -86,6 +89,8 @@ import type { RunStep } from "./tool-schemas.js";
 const VERIFY_POLL_INTERVAL_MILLISECONDS = 150;
 /** How long the vision lane waits for the refresher's next frame before a live capture. */
 const HOT_FRAME_WAIT_BUDGET_MS = 250;
+/** A refresher that has not delivered its first frame yet is starting a worker and its first capture. */
+const HOT_FRAME_FIRST_FRAME_BUDGET_MS = 1_500;
 /** How long one targeting attempt waits before re-observing while it looks for its element. */
 const TARGET_POLL_INTERVAL_MILLISECONDS = 200;
 const DEFAULT_FIND_RESULTS = 5;
@@ -277,17 +282,30 @@ export interface RunHandsVisionOptions {
 
 type HandsLaneValue = readonly RunStepReport[] | HandsVisionCapture;
 
+/** The lanes a chunked hands call started: every task in start order, its chunk, and each chunk's scheduler run. */
+interface HandsChunkRun {
+	readonly tasks: HandTask<HandsLaneValue>[];
+	readonly taskChunk: number[];
+	readonly runs: { readonly offset: number; readonly result: Promise<HandsRunResult<HandsLaneValue>> }[];
+	started: number;
+}
+
 /**
  * One guarded two-handed batch sharing a single observation token. Keyboard and pointer lanes
  * are explicit sequences; vision is an optional concurrent capture. The overlap policy is a
  * resource decision, not a promise: attended focus conflicts always serialize.
  */
-export interface RunHandsRequest {
-	readonly app: string;
-	readonly token: string;
+export interface RunHandsChunk {
 	readonly keyboard: readonly RunStep[];
 	readonly pointer: readonly RunStep[];
 	readonly vision?: RunHandsVisionOptions | undefined;
+}
+
+export interface RunHandsRequest {
+	readonly app: string;
+	readonly token: string;
+	/** Run in order; the lanes inside one chunk overlap. A plain run_hands call is one chunk. */
+	readonly chunks: readonly RunHandsChunk[];
 	readonly overlap: HandsPolicy;
 	readonly expect?: VerifyRequest | undefined;
 	/** Undefined takes the deferred outcome for eligible input-only calls; "live" always reads. */
@@ -1365,9 +1383,11 @@ export class GuardedSession {
 	 */
 	runHands(request: RunHandsRequest, driver: RunStepDriver, control: RunControl = {}): Promise<ToolResult> {
 		return this.enqueue(this.laneForRequestedToken(request.token), async () => {
+			const allSteps = request.chunks.flatMap((chunk) => [...chunk.keyboard, ...chunk.pointer]);
 			// A text write cannot open or close a window; pointer input and key sequences can.
-			const trackWindowSideEffects =
-				request.pointer.length > 0 || request.keyboard.some((step) => step.type !== "type_text");
+			const trackWindowSideEffects = request.chunks.some(
+				(chunk) => chunk.pointer.length > 0 || chunk.keyboard.some((step) => step.type !== "type_text"),
+			);
 			const beforeActionPromise = trackWindowSideEffects ? this.captureWindowBaseline() : Promise.resolve(undefined);
 			let expected: Awaited<ReturnType<typeof this.beginMutation>>;
 			try {
@@ -1375,11 +1395,11 @@ export class GuardedSession {
 					request.token,
 					request.app,
 					(observation) => {
-						for (const step of [...request.keyboard, ...request.pointer]) {
+						for (const step of allSteps) {
 							driver.validate(step, observation);
 						}
 					},
-					request.pointer.some((step) => step.type === "click" && step.element_index === undefined),
+					allSteps.some((step) => step.type === "click" && step.element_index === undefined),
 				);
 			} catch (error: unknown) {
 				const refused = this.refusalFrom(error);
@@ -1400,22 +1420,25 @@ export class GuardedSession {
 
 			const delivery = this.computer.delivery === "background" ? "background" : "attended";
 			const focusResources: readonly HandResource[] = delivery === "attended" ? ["focus"] : [];
+			const lastChunk = request.chunks.length - 1;
 			const runLane = async (
 				kind: "keyboard" | "pointer",
 				steps: readonly RunStep[],
+				chunkIndex: number,
 			): Promise<readonly RunStepReport[]> => {
 				const reports: RunStepReport[] = [];
+				const progressPrefix = lastChunk > 0 ? `chunk ${chunkIndex} ` : "";
 				try {
 					for (const [index, step] of steps.entries()) {
 						const stop = this.inputHalt(control.signal);
 						if (stop !== undefined) {
 							throw stop;
 						}
-						// beginMutation already ran the one preflight for this call. The first step only has
-						// to prove that the observation still names the same window; later steps retain the
-						// full preflight because their own input may have moved or replaced it.
+						// beginMutation already ran the one preflight for this call. The first step of the first chunk
+						// only has to prove that the observation still names the same window; every later step retains
+						// the full preflight because earlier input may have moved or replaced it.
 						const guard = await this.chainGuard(expected.pid, expected.observation, step, {
-							preflight: index > 0,
+							preflight: chunkIndex > 0 || index > 0,
 						});
 						if (guard !== undefined) {
 							throw new Error(`window guard refused the ${kind} lane: ${guard}`);
@@ -1424,7 +1447,10 @@ export class GuardedSession {
 						const actions =
 							elementIndex === undefined ? undefined : expected.elements?.get(elementIndex)?.actions;
 						const finalReadCoversWrite =
-							index === steps.length - 1 && step.type === "type_text" && request.expect === undefined;
+							chunkIndex === lastChunk &&
+							index === steps.length - 1 &&
+							step.type === "type_text" &&
+							request.expect === undefined;
 						const dispatch = await timed(`hands.${kind}.dispatch`, () =>
 							this.inInputScope(expected.pid, expected.observation, control.signal, () =>
 								driver.dispatch(step, expected.pid, expected.observation, actions, {
@@ -1439,7 +1465,11 @@ export class GuardedSession {
 							status: "dispatched",
 							...dispatch,
 						});
-						control.onProgress?.(reports.length, steps.length, `${kind} ${step.type} dispatched`);
+						control.onProgress?.(
+							reports.length,
+							steps.length,
+							`${progressPrefix}${kind} ${step.type} dispatched`,
+						);
 					}
 					return reports;
 				} catch (error: unknown) {
@@ -1447,77 +1477,112 @@ export class GuardedSession {
 				}
 			};
 
-			const tasks: HandTask<HandsLaneValue>[] = [];
-			let settleInputs = (): void => {};
-			const inputsSettled = new Promise<void>((resolve) => {
-				settleInputs = resolve;
-			});
-			let remainingInputLanes = 0;
-			const finishInputLane = (): void => {
-				remainingInputLanes -= 1;
-				if (remainingInputLanes === 0) {
-					settleInputs();
+			// Chunks run in order and the lanes inside one chunk overlap. The next chunk starts as soon as this
+			// chunk's input lanes finish (with overlap=never, once every lane has finished), so a chunk's capture
+			// can still be running while the next chunk types and points. A failed or stopped chunk ends the call.
+			const run: HandsChunkRun = { tasks: [], taskChunk: [], runs: [], started: 0 };
+			const coordinator = new HandsCoordinator();
+			let stopChunks = false;
+			const startChunks = async (): Promise<void> => {
+				for (const [chunkIndex, chunk] of request.chunks.entries()) {
+					if (stopChunks || this.inputHalt(control.signal) !== undefined) {
+						return;
+					}
+					const tasks: HandTask<HandsLaneValue>[] = [];
+					let remainingInputLanes = 0;
+					let settleInputs = (): void => {};
+					const inputsSettled = new Promise<void>((resolve) => {
+						settleInputs = resolve;
+					});
+					const inputLane = (
+						hand: "left" | "right",
+						kind: "keyboard" | "pointer",
+						steps: readonly RunStep[],
+						resource: HandResource,
+					): void => {
+						if (steps.length === 0) {
+							return;
+						}
+						remainingInputLanes += 1;
+						tasks.push({
+							hand,
+							resources: [resource, ...focusResources],
+							run: async () => {
+								try {
+									return await runLane(kind, steps, chunkIndex);
+								} catch (error: unknown) {
+									stopChunks = true;
+									throw error;
+								} finally {
+									remainingInputLanes -= 1;
+									if (remainingInputLanes === 0) {
+										settleInputs();
+									}
+								}
+							},
+						});
+					};
+					inputLane("right", "keyboard", chunk.keyboard, "keyboard");
+					inputLane("left", "pointer", chunk.pointer, "pointer");
+					const vision = chunk.vision;
+					if (vision !== undefined) {
+						tasks.push({
+							hand: "vision",
+							resources: ["capture"],
+							run: async () =>
+								await timed("hands.vision.capture", () =>
+									this.captureVisionLane(
+										expected.pid,
+										vision,
+										// The hot-frame refresher started above captures this same window; naming it lets the lane take
+										// the refresher's frame instead of racing it for the window's one native capture slot.
+										this.boundWindows.get(expected.pid) ?? expected.observation.windowId,
+									),
+								),
+						});
+					}
+					if (remainingInputLanes === 0) {
+						settleInputs();
+					}
+					const offset = run.tasks.length;
+					run.tasks.push(...tasks);
+					run.taskChunk.push(...tasks.map(() => chunkIndex));
+					const chunkRun = coordinator.run(tasks, {
+						policy: request.overlap,
+						...(control.signal === undefined ? {} : { signal: control.signal }),
+					});
+					run.runs.push({ offset, result: chunkRun });
+					run.started = chunkIndex + 1;
+					const chunkDone = chunkRun.then(
+						() => undefined,
+						() => {
+							stopChunks = true;
+						},
+					);
+					void chunkDone.then(settleInputs);
+					await (request.overlap === "never" ? chunkDone : inputsSettled);
 				}
 			};
-			if (request.keyboard.length > 0) {
-				remainingInputLanes += 1;
-				tasks.push({
-					hand: "right",
-					resources: ["keyboard", ...focusResources],
-					run: async () => {
-						try {
-							return await runLane("keyboard", request.keyboard);
-						} finally {
-							finishInputLane();
-						}
-					},
-				});
-			}
-			if (request.pointer.length > 0) {
-				remainingInputLanes += 1;
-				tasks.push({
-					hand: "left",
-					resources: ["pointer", ...focusResources],
-					run: async () => {
-						try {
-							return await runLane("pointer", request.pointer);
-						} finally {
-							finishInputLane();
-						}
-					},
-				});
-			}
-			const vision = request.vision;
-			if (vision !== undefined) {
-				tasks.push({
-					hand: "vision",
-					resources: ["capture"],
-					run: async () =>
-						await timed("hands.vision.capture", () =>
-							this.captureVisionLane(expected.pid, vision, this.boundWindows.get(expected.pid)),
-						),
-				});
-			}
-			if (remainingInputLanes === 0) {
-				settleInputs();
-			}
-
-			const handsPromise = timed("hands.coordinator", () =>
-				new HandsCoordinator().run(tasks, {
-					policy: request.overlap,
-					...(control.signal === undefined ? {} : { signal: control.signal }),
-				}),
-			);
-			void handsPromise.then(settleInputs, settleInputs);
+			const inputsSettled = startChunks();
+			const handsPromise = timed("hands.coordinator", async () => {
+				await inputsSettled;
+				const results = await Promise.all(run.runs.map((chunkRun) => chunkRun.result));
+				return mergeHandsChunks(
+					request.overlap,
+					run.runs.map((chunkRun) => chunkRun.offset),
+					results,
+					run.started < request.chunks.length && control.signal?.aborted === true,
+				);
+			});
+			void handsPromise.catch(() => undefined);
 			await inputsSettled;
 			const deferredOutcome =
 				(request.outcomeMode ?? "deferred") === "deferred" &&
 				request.expect === undefined &&
 				request.fullState !== true &&
-				request.includeScreenshot !== true &&
-				(request.keyboard.length > 0 || request.pointer.length > 0 || request.vision !== undefined);
+				request.includeScreenshot !== true;
 			if (deferredOutcome) {
-				return await this.deferredHandsTail(handsPromise, tasks, expected, beforeAction, request);
+				return await this.deferredHandsTail(handsPromise, run, expected, beforeAction, request);
 			}
 			const windowEventsPromise = trackWindowSideEffects
 				? this.describeWindowSideEffects(beforeAction, expected.pid)
@@ -1544,10 +1609,6 @@ export class GuardedSession {
 				throw error;
 			}
 
-			const lanes = hands.lanes.map((lane) => this.handsLaneReport(lane.hand, lane, tasks));
-			const visionLane = hands.lanes.find((lane) => lane.hand === "vision");
-			const visionCapture =
-				visionLane?.ok === true && isVisionCapture(visionLane.value) ? visionLane.value : undefined;
 			try {
 				const outcome = await outcomePromise;
 				let verification =
@@ -1574,32 +1635,12 @@ export class GuardedSession {
 					});
 				}
 				const windowEvents = await windowEventsPromise;
-				const dispatch = handsDispatch(hands.lanes);
-				const visionImage =
-					visionCapture?.image === undefined
-						? undefined
-						: {
-								type: "image" as const,
-								data: visionCapture.image.base64,
-								mimeType: visionCapture.image.mimeType,
-							};
-				const visionReport = handsVisionReport(
-					request.vision,
-					visionLane,
-					visionCapture,
+				const { report, images } = this.handsReport(
+					hands,
+					run,
+					request,
 					finalOutcome.state.screenshotBase64.length > 0 ? 1 : 0,
 				);
-				const report: RunHandsReport = {
-					policy: hands.policy,
-					overlap_ms: Math.round(hands.overlapMs),
-					sequential_estimate_ms: Math.round(hands.sequentialEstimateMs),
-					aborted: hands.aborted,
-					lanes,
-					...(hands.notStarted.length === 0
-						? {}
-						: { unstarted: hands.notStarted.map((index) => tasks[index]?.hand ?? String(index)) }),
-					...(visionReport === undefined ? {} : { vision: visionReport }),
-				};
 				return observedHandsResult(
 					finalOutcome.state,
 					report,
@@ -1607,19 +1648,21 @@ export class GuardedSession {
 					finalOutcome.contextUnchanged,
 					finalOutcome.nextToken,
 					windowEvents,
-					dispatch,
+					handsDispatch(hands.lanes),
 					finalOutcome.timing,
-					visionImage === undefined ? [] : [visionImage],
+					images,
 				);
 			} catch (error: unknown) {
 				this.clearTokenFor(expected.pid);
+				const { report } = this.handsReport(hands, run, request, undefined);
 				return postActionErrorResult(error, {
 					hands: {
-						policy: hands.policy,
-						overlap_ms: Math.round(hands.overlapMs),
-						sequential_estimate_ms: Math.round(hands.sequentialEstimateMs),
-						aborted: hands.aborted,
-						lanes,
+						policy: report.policy,
+						overlap_ms: report.overlap_ms,
+						sequential_estimate_ms: report.sequential_estimate_ms,
+						aborted: report.aborted,
+						lanes: report.lanes,
+						...(report.chunks === undefined ? {} : { chunks: report.chunks }),
 					},
 				});
 			}
@@ -1634,14 +1677,14 @@ export class GuardedSession {
 	 */
 	private async deferredHandsTail(
 		handsPromise: Promise<HandsRunResult<HandsLaneValue>>,
-		tasks: readonly HandTask<HandsLaneValue>[],
+		run: HandsChunkRun,
 		expected: {
 			readonly pid: number;
 			readonly observation: InputObservation;
 			readonly elements: ObservedElementIdentity | undefined;
 		},
 		beforeAction: readonly number[] | undefined,
-		request: Pick<RunHandsRequest, "vision">,
+		request: Pick<RunHandsRequest, "chunks">,
 	): Promise<ToolResult> {
 		let hands: HandsRunResult<HandsLaneValue>;
 		try {
@@ -1650,9 +1693,6 @@ export class GuardedSession {
 			this.clearTokenFor(expected.pid);
 			throw error;
 		}
-		const lanes = hands.lanes.map((lane) => this.handsLaneReport(lane.hand, lane, tasks));
-		const visionLane = hands.lanes.find((lane) => lane.hand === "vision");
-		const visionCapture = visionLane?.ok === true && isVisionCapture(visionLane.value) ? visionLane.value : undefined;
 		if (hands.aborted || hands.lanes.some((lane) => !lane.ok)) {
 			// Part of the input may have gone out with no dispatch report to trust: read the result live
 			// instead of deferring it, exactly as a failed mutation would.
@@ -1666,16 +1706,7 @@ export class GuardedSession {
 			const windowEvents = await this.describeWindowSideEffects(beforeAction, expected.pid);
 			return observedHandsResult(
 				finalOutcome.state,
-				{
-					policy: hands.policy,
-					overlap_ms: Math.round(hands.overlapMs),
-					sequential_estimate_ms: Math.round(hands.sequentialEstimateMs),
-					aborted: hands.aborted,
-					lanes,
-					...(hands.notStarted.length === 0
-						? {}
-						: { unstarted: hands.notStarted.map((index) => tasks[index]?.hand ?? String(index)) }),
-				},
+				this.handsReport(hands, run, request, undefined).report,
 				undefined,
 				finalOutcome.contextUnchanged,
 				finalOutcome.nextToken,
@@ -1690,17 +1721,52 @@ export class GuardedSession {
 		);
 		const settle = inputDispatched ? settleDeferredOutcome(expected.pid) : { events: 0, settleMs: 0 };
 		const nextToken = this.issue(expected.observation, undefined, true);
-		const dispatch = handsDispatch(hands.lanes);
-		const visionImage =
-			visionCapture?.image === undefined
-				? undefined
-				: {
-						type: "image" as const,
-						data: visionCapture.image.base64,
-						mimeType: visionCapture.image.mimeType,
-					};
-		const visionReport = handsVisionReport(request.vision, visionLane, visionCapture, 0);
-		const report: RunHandsReport = {
+		const { report, images } = this.handsReport(hands, run, request, 0);
+		return deferredHandsResult(
+			expected.observation,
+			report,
+			settle,
+			nextToken,
+			handsDispatch(hands.lanes),
+			{
+				settle: settle.settleMs,
+			},
+			images,
+		);
+	}
+
+	/**
+	 * The hands report for a finished call and its vision images, in chunk order. A one-chunk call keeps its flat
+	 * shape; a chunked call tags each lane with its chunk and adds one summary per chunk. firstImageIndex is where
+	 * the vision images start in the result content; undefined leaves vision out.
+	 */
+	private handsReport(
+		hands: HandsRunResult<HandsLaneValue>,
+		run: HandsChunkRun,
+		request: Pick<RunHandsRequest, "chunks">,
+		firstImageIndex: number | undefined,
+	): { readonly report: RunHandsReport; readonly images: readonly ToolContent[] } {
+		const chunked = request.chunks.length > 1;
+		const lanes = hands.lanes.map((lane) =>
+			this.handsLaneReport(lane, run.tasks, chunked ? run.taskChunk[lane.index] : undefined),
+		);
+		const images: ToolContent[] = [];
+		const visionFor = (chunkIndex: number): RunHandsVisionReport | undefined => {
+			const options = request.chunks[chunkIndex]?.vision;
+			if (firstImageIndex === undefined || options === undefined) {
+				return undefined;
+			}
+			const lane = hands.lanes.find(
+				(candidate) => candidate.hand === "vision" && run.taskChunk[candidate.index] === chunkIndex,
+			);
+			const capture = lane?.ok === true && isVisionCapture(lane.value) ? lane.value : undefined;
+			const report = handsVisionReport(options, lane, capture, firstImageIndex + images.length);
+			if (capture?.image !== undefined) {
+				images.push({ type: "image", data: capture.image.base64, mimeType: capture.image.mimeType });
+			}
+			return report;
+		};
+		const base = {
 			policy: hands.policy,
 			overlap_ms: Math.round(hands.overlapMs),
 			sequential_estimate_ms: Math.round(hands.sequentialEstimateMs),
@@ -1708,20 +1774,34 @@ export class GuardedSession {
 			lanes,
 			...(hands.notStarted.length === 0
 				? {}
-				: { unstarted: hands.notStarted.map((index) => tasks[index]?.hand ?? String(index)) }),
-			...(visionReport === undefined ? {} : { vision: visionReport }),
+				: { unstarted: hands.notStarted.map((index) => run.tasks[index]?.hand ?? String(index)) }),
 		};
-		return deferredHandsResult(
-			expected.observation,
-			report,
-			settle,
-			nextToken,
-			dispatch,
-			{
-				settle: settle.settleMs,
-			},
-			visionImage === undefined ? [] : [visionImage],
-		);
+		if (!chunked) {
+			const vision = visionFor(0);
+			return { report: { ...base, ...(vision === undefined ? {} : { vision }) }, images };
+		}
+		const chunks = request.chunks.map((_, chunkIndex): RunHandsChunkReport => {
+			if (chunkIndex >= run.started) {
+				return { chunk: chunkIndex, status: "skipped", lanes: [], overlap_ms: 0 };
+			}
+			const own = hands.lanes.filter((lane) => run.taskChunk[lane.index] === chunkIndex);
+			const unstarted = hands.notStarted.some((index) => run.taskChunk[index] === chunkIndex);
+			const vision = visionFor(chunkIndex);
+			const status =
+				own.some((lane) => lane.aborted) || unstarted
+					? "aborted"
+					: own.some((lane) => !lane.ok)
+						? "failed"
+						: "completed";
+			return {
+				chunk: chunkIndex,
+				status,
+				lanes: own.map((lane) => laneKind(lane.hand)),
+				overlap_ms: Math.round(measureOverlapMs(own)),
+				...(vision === undefined ? {} : { vision }),
+			};
+		});
+		return { report: { ...base, chunks }, images };
 	}
 
 	/**
@@ -1867,7 +1947,11 @@ export class GuardedSession {
 				};
 			}
 			if (this.hotFrames.engaged(pid, windowId)) {
-				const waited = await this.hotFrames.waitForFrame(pid, windowId, HOT_FRAME_WAIT_BUDGET_MS);
+				const waited = await this.hotFrames.waitForFrame(
+					pid,
+					windowId,
+					this.hotFrames.warming(pid, windowId) ? HOT_FRAME_FIRST_FRAME_BUDGET_MS : HOT_FRAME_WAIT_BUDGET_MS,
+				);
 				if (waited !== undefined) {
 					return {
 						image: {
@@ -1909,15 +1993,16 @@ export class GuardedSession {
 	}
 
 	private handsLaneReport(
-		hand: HandTask<unknown>["hand"],
 		lane: HandsRunResult<unknown>["lanes"][number],
 		tasks: readonly HandTask<unknown>[],
+		chunk: number | undefined,
 	): RunHandsLaneReport {
-		const task = tasks.find((candidate) => candidate.hand === hand);
+		const task = tasks[lane.index];
 		const failure = lane.error instanceof HandsLaneError ? lane.error : undefined;
 		return {
-			hand,
-			lane: hand === "right" ? "keyboard" : hand === "left" ? "pointer" : "vision",
+			hand: lane.hand,
+			lane: laneKind(lane.hand),
+			...(chunk === undefined ? {} : { chunk }),
 			status: lane.ok ? "completed" : lane.aborted ? "aborted" : "failed",
 			resources: task?.resources ?? [],
 			steps: isStepReports(lane.value) ? lane.value : (failure?.reports ?? []),
@@ -2815,6 +2900,31 @@ function isVisionCapture(value: unknown): value is HandsVisionCapture {
 
 function handsErrorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function laneKind(hand: HandTask<unknown>["hand"]): RunHandsLaneReport["lane"] {
+	return hand === "right" ? "keyboard" : hand === "left" ? "pointer" : "vision";
+}
+
+/** One scheduler result for a whole chunked call: lane indices made global, overlap measured across chunks. */
+function mergeHandsChunks(
+	policy: HandsPolicy,
+	offsets: readonly number[],
+	results: readonly HandsRunResult<HandsLaneValue>[],
+	stoppedBetweenChunks: boolean,
+): HandsRunResult<HandsLaneValue> {
+	const offsetOf = (chunk: number): number => offsets[chunk] ?? 0;
+	const lanes = results.flatMap((result, chunk) =>
+		result.lanes.map((lane) => ({ ...lane, index: lane.index + offsetOf(chunk) })),
+	);
+	return {
+		policy,
+		aborted: stoppedBetweenChunks || results.some((result) => result.aborted),
+		lanes,
+		notStarted: results.flatMap((result, chunk) => result.notStarted.map((index) => index + offsetOf(chunk))),
+		overlapMs: measureOverlapMs(lanes),
+		sequentialEstimateMs: results.reduce((sum, result) => sum + result.sequentialEstimateMs, 0),
+	};
 }
 
 function handsDispatch(lanes: readonly HandsLaneSnapshot[]): ActionDispatch | undefined {

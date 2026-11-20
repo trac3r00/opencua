@@ -45,6 +45,7 @@ export {
 } from "./computer/input-region.js";
 export {
 	HandsCoordinator,
+	measureOverlapMs,
 	type HandName,
 	type HandResource,
 	type HandTask,
