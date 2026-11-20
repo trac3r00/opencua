@@ -33,5 +33,9 @@ export function needsHelperPermissions(commandPath: string): boolean {
 	if (command === "daemon") {
 		return subcommand === "run";
 	}
+	if (command === "buddy") {
+		// Only ask captures the screen; listen and agent jobs must not run as the helper (see buddy-commands.ts).
+		return subcommand === "ask";
+	}
 	return command !== undefined && DESKTOP_COMMANDS.has(command);
 }

@@ -17,6 +17,7 @@ import type {
 import { AppApprovalStore, StopSwitch, resolveStateDir } from "@opencua/core/light";
 import { Command } from "commander";
 import { registerBrowserCommands } from "./browser-commands.js";
+import { registerBuddyCommands } from "./buddy-commands.js";
 import { registerDaemonCommands } from "./daemon-commands.js";
 import { forwardToDaemon } from "./daemon.js";
 import { IN_HELPER_ENV, needsHelperPermissions } from "./helper-route.js";
@@ -490,6 +491,18 @@ registerHistoryCommands(program, { isJsonOutput });
 registerLifecycleCommands(program, { isJsonOutput });
 registerUtmCommands(program, { isJsonOutput });
 registerSkillsCommands(program);
+registerBuddyCommands(program, {
+	isJsonOutput,
+	stateDir: resolveStateDir(),
+	entryScript: fileURLToPath(import.meta.url),
+	withComputer: async (action) => await withComputer(action),
+	overlay: async () => {
+		const { NOOP_POINTER_OVERLAY, agentCursorEnabled, createCursorOverlay } = await import("@opencua/core");
+		return program.opts<GlobalOptions>().cursor === false || !agentCursorEnabled()
+			? NOOP_POINTER_OVERLAY
+			: createCursorOverlay(undefined, resolveCursorMotion(resolveLayout().configPath));
+	},
+});
 
 // Refuse input commands while the stop switch is on, before any command code can send input.
 program.hook("preAction", (_program, actionCommand) => {

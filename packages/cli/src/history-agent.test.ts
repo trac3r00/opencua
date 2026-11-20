@@ -100,6 +100,13 @@ process.stdin.on("end", () => process.stdout.write(input));`);
 		);
 	}, 30_000);
 
+	it("#given includeFailureDetail #when the child exits nonzero #then its last output line explains why", async () => {
+		const executable = fixture(`process.stdout.write("working\\nYou've hit your weekly limit"); process.exit(1);`);
+		await expect(
+			generateHistoryText("task", { executable, label: "Buddy agent", includeFailureDetail: true }),
+		).rejects.toThrow("Buddy agent failed with exit code 1: You've hit your weekly limit");
+	}, 30_000);
+
 	it("#given an abort signal #when generation starts #then it terminates with an abort error", async () => {
 		const executable = fixture("process.stdin.resume();");
 		const controller = new AbortController();
