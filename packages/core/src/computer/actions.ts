@@ -48,19 +48,24 @@ const MAX_SIMILAR_APPS = 3;
 const MIN_SIMILAR_WORD_LENGTH = 3;
 
 /**
- * The lowercase names an app answers to: its display name, its bundle id, and its bundle file name without
- * `.app` (Zoom's display name is "Zoom" but its bundle and process are "zoom.us").
+ * The lowercase names a person sees for an app: its display name and its bundle file name without `.app`
+ * (Zoom's display name is "Zoom" but its bundle and process are "zoom.us").
  */
-function appKeys(candidate: AppInfo): string[] {
-	const keys = [candidate.name.toLowerCase(), candidate.bundleId.toLowerCase()];
+function appNames(candidate: AppInfo): string[] {
+	const names = [candidate.name.toLowerCase()];
 	const bundleFile = candidate.path
 		?.split("/")
 		.filter((part) => part.length > 0)
 		.pop();
 	if (bundleFile !== undefined) {
-		keys.push(bundleFile.toLowerCase().replace(/\.app$/, ""));
+		names.push(bundleFile.toLowerCase().replace(/\.app$/, ""));
 	}
-	return keys;
+	return names;
+}
+
+/** Every lowercase key an app answers to: its names and its bundle id. */
+function appKeys(candidate: AppInfo): string[] {
+	return [...appNames(candidate), candidate.bundleId.toLowerCase()];
 }
 
 /**
@@ -68,17 +73,21 @@ function appKeys(candidate: AppInfo): string[] {
  * match follows, and undefined means nothing in the list matches.
  */
 export function findMatchingApp(apps: readonly AppInfo[], app: string): AppInfo | undefined {
-	const normalizedApp = app
-		.trim()
-		.toLowerCase()
-		.replace(/\.app$/, "");
+	const normalizedApp = app.trim().toLowerCase();
+	// "zoom.us.app" names the bundle file; the request as given is still tried first, since a bundle id can end in .app.
+	const withoutSuffix = normalizedApp.replace(/\.app$/, "");
+	const triesSuffixless = withoutSuffix.length > 0 && withoutSuffix !== normalizedApp;
 	return (
 		apps.find((candidate) => appKeys(candidate).includes(normalizedApp)) ??
+		(triesSuffixless ? apps.find((candidate) => appKeys(candidate).includes(withoutSuffix)) : undefined) ??
 		apps.find((candidate) => appKeys(candidate).some((key) => key.includes(normalizedApp)))
 	);
 }
 
-/** Running apps that share a word with a request nothing matched, so the caller can retry with a real name. */
+/**
+ * Running apps whose display or bundle file name shares a word with a request nothing matched, so the caller can
+ * retry with a real name. Bundle ids are left out: their vendor parts ("apple", "google") would match unrelated apps.
+ */
 function similarApps(apps: readonly AppInfo[], app: string): AppInfo[] {
 	const words = app
 		.toLowerCase()
@@ -88,7 +97,7 @@ function similarApps(apps: readonly AppInfo[], app: string): AppInfo[] {
 		return [];
 	}
 	return apps
-		.filter((candidate) => appKeys(candidate).some((key) => words.some((word) => key.includes(word))))
+		.filter((candidate) => appNames(candidate).some((name) => words.some((word) => name.includes(word))))
 		.slice(0, MAX_SIMILAR_APPS);
 }
 

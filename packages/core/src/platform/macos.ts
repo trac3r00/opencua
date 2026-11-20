@@ -1028,6 +1028,7 @@ export class MacOSHostComputer extends HostComputer {
 				pid: app.pid,
 				isRunning: true,
 				isFrontmost: app.isActive,
+				...(app.path.length > 0 ? { path: app.path } : {}),
 				...(appUsage.lastUsedDate !== undefined ? { lastUsedDate: appUsage.lastUsedDate } : {}),
 				...(appUsage.useCount !== undefined ? { useCount: appUsage.useCount } : {}),
 			};

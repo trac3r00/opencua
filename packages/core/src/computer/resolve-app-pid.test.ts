@@ -91,6 +91,14 @@ describe("#given an app whose bundle file name differs from its display name #wh
 		expect(await resolveAppPid({ ...stubComputer(), ...fake.computer }, "Zoom.us.app")).toBe(50);
 	});
 
+	it("matches a bundle id that ends in .app exactly before trying it without the suffix", async () => {
+		const prefix = app("Tool Helper", "com.example.tool.helper", 70);
+		const exact = app("Tool", "com.example.tool.app", 71);
+		const fake = resolverComputer(() => [prefix, exact]);
+
+		expect(await resolveAppPid({ ...stubComputer(), ...fake.computer }, "com.example.tool.app")).toBe(71);
+	});
+
 	it("prefers an exact bundle file name over a partial display-name match", async () => {
 		const helper = { ...app("zoom.us helper tools", "com.example.helper", 60), path: "/Applications/Helper.app" };
 		const fake = resolverComputer(() => [helper, ZOOM]);
@@ -115,6 +123,14 @@ describe("#given no running app matches #when an app name is resolved #then the 
 
 		expect(await rejectionMessage(resolveAppPid({ ...stubComputer(), ...fake.computer }, "Mail"))).toBe(
 			'No running app matched "Mail"',
+		);
+	});
+
+	it("does not suggest apps that only share a bundle-id component such as a vendor name", async () => {
+		const fake = resolverComputer();
+
+		expect(await rejectionMessage(resolveAppPid({ ...stubComputer(), ...fake.computer }, "Apple Music"))).toBe(
+			'No running app matched "Apple Music"',
 		);
 	});
 
