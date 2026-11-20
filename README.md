@@ -276,6 +276,35 @@ setting updates every client's registration.
 </tr>
 </table>
 
+### Screen buddy (voice, pointing, background agents)
+
+A Clicky-style helper on the command line:
+
+```bash
+opencua buddy listen                 # hold Control+Option to talk, let go to send
+opencua buddy ask "where do I export this as PDF?"
+opencua buddy ask --lasso "what does this chart mean?"   # circle it, or Shift-drag a box, then ask
+opencua buddy agent "compare three standing desks under $400 and make a one-page PDF"
+opencua buddy jobs                   # background agents, newest first
+opencua buddy stop                   # stop what buddy is saying
+opencua buddy settings               # agent, model, voice (ElevenLabs or Mac), captions, sounds, language
+opencua buddy agents                 # agent CLIs found on this Mac
+```
+
+The OpenCUA menu bar item has **Stop buddy talking** and **Buddy settings…**. Holding Control+Option while buddy
+talks also stops it, and its caption bubble has a stop button; drag the bubble anywhere and it opens there next time.
+The ElevenLabs API key is kept in the macOS Keychain.
+
+A question is answered from a screenshot of the main display, spoken with `say`, and the OpenCUA cursor overlay
+points at each place the answer names; the screenshot is deleted once the answer is in. While the keys are held a
+"Listening" pill shows at the top of the screen, and you can circle (drag) or box (Shift-drag) what "this" means;
+the marks go to the question with it (`--mark x,y,width,height` passes one by hand). Saying "agent ..." (or
+"에이전트 ...") starts a background agent in its own folder (`~/.opencua/buddy/jobs/<id>/output`) with a sound and a
+notification when it finishes. Speech is recognized on the device by `voice-input`, which asks for Microphone and
+Speech Recognition once in its own name. Settings live in `~/.opencua/buddy/settings.json`; `OPENCUA_BUDDY_AGENT` and `OPENCUA_BUDDY_MODEL` override the agent
+and model for one run, and `OPENCUA_BUDDY_SOUNDS=off` silences the sounds.
+The opencua-mcp helper needs Screen Recording for `buddy ask`.
+
 ### Concurrent worker sessions
 
 The full MCP toolset accepts `session_id` on `manage_workers` and `run_worker`, so independent
