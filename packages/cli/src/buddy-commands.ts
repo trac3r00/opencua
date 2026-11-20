@@ -511,7 +511,13 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 			process.stdout.write(
 				'Hold Control+Option and talk; let go to send. Hold it again to stop buddy talking. Say "agent ..." for a background task. Ctrl+C quits.\n',
 			);
-			await new Promise<void>((resolve) => process.once("SIGINT", resolve));
+			// The chord poller's timer is unref'd, so without this the process would exit at once when no terminal is attached.
+			const keepAlive = setInterval(() => undefined, 2 ** 30);
+			await new Promise<void>((resolve) => {
+				process.once("SIGINT", resolve);
+				process.once("SIGTERM", resolve);
+			});
+			clearInterval(keepAlive);
 			detector.stop();
 		});
 }
