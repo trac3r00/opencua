@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -11,6 +12,7 @@ import {
 	parseSelfCheckOutput,
 	readNativeInputs,
 	readRtk,
+	rtkVersionOutput,
 } from "./doctor.js";
 
 const nativeDir = join(dirname(fileURLToPath(import.meta.url)), "../../core/native");
@@ -350,6 +352,24 @@ describe("#given rtk on PATH or not #when the doctor evaluates it #then a missin
 		expect(found).toEqual({ version: "1.2.1" });
 		expect(readRtk(() => undefined)).toEqual({ version: undefined });
 		expect(readRtk(() => "")).toEqual({ version: undefined });
+	});
+
+	it("reads the version from an rtk on PATH and gives up on one that hangs", () => {
+		const bin = mkdtempSync(join(tmpdir(), "opencua-doctor-rtk-"));
+		try {
+			const rtk = join(bin, "rtk");
+			writeFileSync(rtk, "#!/bin/sh\necho 'rtk 9.9.9'\n", { mode: 0o755 });
+			expect(rtkVersionOutput({ PATH: bin })).toBe("rtk 9.9.9");
+
+			writeFileSync(rtk, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+			const started = Date.now();
+			expect(rtkVersionOutput({ PATH: `${bin}:/bin:/usr/bin` }, 200)).toBeUndefined();
+			expect(Date.now() - started).toBeLessThan(5_000);
+
+			expect(rtkVersionOutput({ PATH: join(bin, "missing") })).toBeUndefined();
+		} finally {
+			rmSync(bin, { recursive: true, force: true });
+		}
 	});
 
 	it("adds no rtk check when rtk was not looked up", () => {

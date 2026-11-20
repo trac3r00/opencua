@@ -827,9 +827,28 @@ function sha256(path: string): string | undefined {
 	}
 }
 
+const RTK_LOOKUP_TIMEOUT_MS = 2_000;
+
+/** Runs `rtk --version` on the given PATH; undefined when rtk is missing, fails or answers too slowly. */
+export function rtkVersionOutput(
+	env: Environment = process.env,
+	timeoutMs = RTK_LOOKUP_TIMEOUT_MS,
+): string | undefined {
+	try {
+		return execFileSync("rtk", ["--version"], {
+			encoding: "utf8",
+			env,
+			timeout: timeoutMs,
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch {
+		return undefined;
+	}
+}
+
 /** Looks rtk up on PATH by running `rtk --version`; the version is undefined when it is missing or fails. */
 export function readRtk(
-	run: (file: string, args: readonly string[]) => string | undefined = commandOutput,
+	run: (file: string, args: readonly string[]) => string | undefined = () => rtkVersionOutput(),
 ): DoctorFacts["rtk"] {
 	const output = run("rtk", ["--version"]);
 	return { version: output === undefined || output === "" ? undefined : output.replace(/^rtk\s+/, "") };
