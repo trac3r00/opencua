@@ -93,7 +93,8 @@ export async function dispatchPowerStep(
 				throw new Error("this computer cannot open URLs in an app");
 			}
 			const report = await powerComputer.openUrl(targetPid, step.url);
-			return { route: "synthetic_events", delivery: "background", detail: report };
+			// Launch Services delivers the URL: neither an accessibility action nor synthetic input events.
+			return { route: "unknown", delivery: "background", detail: report };
 		}
 		default:
 			return undefined;
