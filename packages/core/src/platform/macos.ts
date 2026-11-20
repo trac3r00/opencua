@@ -1009,6 +1009,7 @@ export class MacOSHostComputer extends HostComputer {
 			pid: app.pid,
 			isRunning: true,
 			isFrontmost: app.isActive,
+			...(app.path.length > 0 ? { path: app.path } : {}),
 		}));
 	}
 

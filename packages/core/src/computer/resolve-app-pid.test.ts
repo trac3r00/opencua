@@ -81,6 +81,53 @@ describe("#given a computer with an identity inventory #when an app name is reso
 	});
 });
 
+describe("#given an app whose bundle file name differs from its display name #when it is resolved #then the bundle file name matches", () => {
+	const ZOOM: AppInfo = { ...app("Zoom", "us.zoom.xos", 50), path: "/Applications/zoom.us.app" };
+
+	it("resolves the bundle file name the Dock and Activity Monitor show", async () => {
+		const fake = resolverComputer(() => [...APPS, ZOOM]);
+
+		expect(await resolveAppPid({ ...stubComputer(), ...fake.computer }, "zoom.us")).toBe(50);
+		expect(await resolveAppPid({ ...stubComputer(), ...fake.computer }, "Zoom.us.app")).toBe(50);
+	});
+
+	it("prefers an exact bundle file name over a partial display-name match", async () => {
+		const helper = { ...app("zoom.us helper tools", "com.example.helper", 60), path: "/Applications/Helper.app" };
+		const fake = resolverComputer(() => [helper, ZOOM]);
+
+		expect(await resolveAppPid({ ...stubComputer(), ...fake.computer }, "zoom.us")).toBe(50);
+	});
+});
+
+describe("#given no running app matches #when an app name is resolved #then the error names running apps with a similar name", () => {
+	const ZOOM: AppInfo = { ...app("Zoom", "us.zoom.xos", 50), path: "/Applications/zoom.us.app" };
+
+	it("lists a running app that shares a word with the request", async () => {
+		const fake = resolverComputer(() => [...APPS, ZOOM]);
+
+		await expect(resolveAppPid({ ...stubComputer(), ...fake.computer }, "Zoom Workplace")).rejects.toThrow(
+			'No running app matched "Zoom Workplace"; running apps with a similar name: Zoom (us.zoom.xos)',
+		);
+	});
+
+	it("keeps the plain message when nothing running is similar", async () => {
+		const fake = resolverComputer();
+
+		expect(await rejectionMessage(resolveAppPid({ ...stubComputer(), ...fake.computer }, "Mail"))).toBe(
+			'No running app matched "Mail"',
+		);
+	});
+
+	it("lists at most three similar apps", async () => {
+		const many = [1, 2, 3, 4].map((n) => app(`Notes ${n}`, `com.example.notes${n}`, 100 + n));
+		const fake = resolverComputer(() => many);
+
+		expect(await rejectionMessage(resolveAppPid({ ...stubComputer(), ...fake.computer }, "Notes Pro"))).toBe(
+			'No running app matched "Notes Pro"; running apps with a similar name: Notes 1 (com.example.notes1), Notes 2 (com.example.notes2), Notes 3 (com.example.notes3)',
+		);
+	});
+});
+
 describe("#given a computer without an identity inventory #when an app name is resolved #then it falls back to listApps", () => {
 	it("resolves through listApps", async () => {
 		const listApps = vi.fn<ComputerInterface["listApps"]>(async () => [...APPS]);
@@ -91,6 +138,15 @@ describe("#given a computer without an identity inventory #when an app name is r
 		expect(listApps).toHaveBeenCalledTimes(1);
 	});
 });
+
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+	try {
+		await promise;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	throw new Error("expected the promise to reject");
+}
 
 function stubComputer(): ComputerInterface {
 	return {

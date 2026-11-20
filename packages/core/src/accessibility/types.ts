@@ -183,6 +183,8 @@ export interface AppInfo {
 	pid: number;
 	isRunning: boolean;
 	isFrontmost?: boolean;
+	/** The app bundle's path on disk (`/Applications/zoom.us.app`), when the platform reports one. */
+	path?: string;
 	lastUsedDate?: string;
 	useCount?: number;
 }

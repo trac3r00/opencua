@@ -44,25 +44,52 @@ export async function scrollElement(
 	}
 }
 
+const MAX_SIMILAR_APPS = 3;
+const MIN_SIMILAR_WORD_LENGTH = 3;
+
 /**
- * The app a name, bundle id, or partial app name refers to: an exact name or bundle-id match
- * wins, a partial match follows, and undefined means nothing in the list matches.
+ * The lowercase names an app answers to: its display name, its bundle id, and its bundle file name without
+ * `.app` (Zoom's display name is "Zoom" but its bundle and process are "zoom.us").
+ */
+function appKeys(candidate: AppInfo): string[] {
+	const keys = [candidate.name.toLowerCase(), candidate.bundleId.toLowerCase()];
+	const bundleFile = candidate.path
+		?.split("/")
+		.filter((part) => part.length > 0)
+		.pop();
+	if (bundleFile !== undefined) {
+		keys.push(bundleFile.toLowerCase().replace(/\.app$/, ""));
+	}
+	return keys;
+}
+
+/**
+ * The app a name, bundle id, bundle file name, or partial name refers to: an exact match wins, a partial
+ * match follows, and undefined means nothing in the list matches.
  */
 export function findMatchingApp(apps: readonly AppInfo[], app: string): AppInfo | undefined {
-	const normalizedApp = app.trim().toLowerCase();
-	const exactMatch = apps.find((candidate) => {
-		const name = candidate.name.toLowerCase();
-		const bundleId = candidate.bundleId.toLowerCase();
-		return name === normalizedApp || bundleId === normalizedApp;
-	});
-	if (exactMatch !== undefined) {
-		return exactMatch;
+	const normalizedApp = app
+		.trim()
+		.toLowerCase()
+		.replace(/\.app$/, "");
+	return (
+		apps.find((candidate) => appKeys(candidate).includes(normalizedApp)) ??
+		apps.find((candidate) => appKeys(candidate).some((key) => key.includes(normalizedApp)))
+	);
+}
+
+/** Running apps that share a word with a request nothing matched, so the caller can retry with a real name. */
+function similarApps(apps: readonly AppInfo[], app: string): AppInfo[] {
+	const words = app
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter((word) => word.length >= MIN_SIMILAR_WORD_LENGTH);
+	if (words.length === 0) {
+		return [];
 	}
-	return apps.find((candidate) => {
-		const name = candidate.name.toLowerCase();
-		const bundleId = candidate.bundleId.toLowerCase();
-		return name.includes(normalizedApp) || bundleId.includes(normalizedApp);
-	});
+	return apps
+		.filter((candidate) => appKeys(candidate).some((key) => words.some((word) => key.includes(word))))
+		.slice(0, MAX_SIMILAR_APPS);
 }
 
 export async function resolveAppPid(computer: ComputerInterface, app: string): Promise<number> {
@@ -81,7 +108,12 @@ export async function resolveAppPid(computer: ComputerInterface, app: string): P
 		computer.listAppIdentities === undefined ? await computer.listApps() : await computer.listAppIdentities();
 	const match = findMatchingApp(apps, app);
 	if (match === undefined) {
-		throw new Error(`No running app matched "${app}"`);
+		const similar = similarApps(apps, app).map((candidate) => `${candidate.name} (${candidate.bundleId})`);
+		throw new Error(
+			similar.length === 0
+				? `No running app matched "${app}"`
+				: `No running app matched "${app}"; running apps with a similar name: ${similar.join(", ")}`,
+		);
 	}
 	return match.pid;
 }
