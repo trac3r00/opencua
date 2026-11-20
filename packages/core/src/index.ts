@@ -312,6 +312,8 @@ export {
 	type StopChordTimer,
 	STOP_CHORD_LABEL,
 	STOP_CHORD_MASK,
+	TALK_CHORD_FORBIDDEN_MASK,
+	TALK_CHORD_MASK,
 	StopChordDetector,
 	startStopChordDetector,
 } from "./platform/stop-chord.js";

@@ -7,6 +7,9 @@ const FLAG_ALTERNATE = 0x00080000;
 const FLAG_COMMAND = 0x00100000;
 
 export const STOP_CHORD_MASK = FLAG_CONTROL | FLAG_ALTERNATE | FLAG_COMMAND;
+/** The buddy's push-to-talk chord, Control+Option; Command or Shift held with it means another shortcut. */
+export const TALK_CHORD_MASK = FLAG_CONTROL | FLAG_ALTERNATE;
+export const TALK_CHORD_FORBIDDEN_MASK = FLAG_SHIFT | FLAG_COMMAND;
 export const STOP_CHORD_LABEL = "keyboard chord Control+Option+Command";
 const STOP_CHORD_POLL_MS = 50;
 /** Consecutive samples the chord must be held for (3 x 50 ms = ~150 ms). */
@@ -20,7 +23,13 @@ export interface StopChordDetectorOptions {
 	readonly readFlags: () => number;
 	/** Called once per press, after the chord has been held for the required samples. */
 	readonly onChord: () => void;
+	/** Called once when a chord that fired is let go. */
+	readonly onRelease?: () => void;
 	readonly onError?: (error: unknown) => void;
+	/** Modifiers that must all be held (default Control+Option+Command). */
+	readonly mask?: number;
+	/** Modifiers that must not be held (default Shift). */
+	readonly forbiddenMask?: number;
 	readonly intervalMs?: number;
 	readonly requiredSamples?: number;
 	readonly timer?: StopChordTimer;
@@ -44,7 +53,10 @@ const SYSTEM_TIMER: StopChordTimer = (callback, milliseconds) => {
 export class StopChordDetector {
 	private readonly readFlags: () => number;
 	private readonly onChord: () => void;
+	private readonly onRelease: (() => void) | undefined;
 	private readonly onError: (error: unknown) => void;
+	private readonly mask: number;
+	private readonly forbiddenMask: number;
 	private readonly intervalMs: number;
 	private readonly requiredSamples: number;
 	private readonly timer: StopChordTimer;
@@ -56,6 +68,9 @@ export class StopChordDetector {
 	constructor(options: StopChordDetectorOptions) {
 		this.readFlags = options.readFlags;
 		this.onChord = options.onChord;
+		this.onRelease = options.onRelease;
+		this.mask = options.mask ?? STOP_CHORD_MASK;
+		this.forbiddenMask = options.forbiddenMask ?? FLAG_SHIFT;
 		this.onError = options.onError ?? defaultOnError;
 		this.intervalMs = options.intervalMs ?? STOP_CHORD_POLL_MS;
 		this.requiredSamples = options.requiredSamples ?? STOP_CHORD_REQUIRED_SAMPLES;
@@ -85,10 +100,12 @@ export class StopChordDetector {
 			}
 			return;
 		}
-		const held = (flags & STOP_CHORD_MASK) === STOP_CHORD_MASK && (flags & FLAG_SHIFT) === 0;
+		const held = (flags & this.mask) === this.mask && (flags & this.forbiddenMask) === 0;
 		if (!held) {
+			const fired = !this.armed;
 			this.heldSamples = 0;
 			this.armed = true;
+			if (fired) this.onRelease?.();
 			return;
 		}
 		this.heldSamples += 1;

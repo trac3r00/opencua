@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -107,6 +107,29 @@ describe("#given the menu bar control #when the user picks Stop then Resume #the
 			reason: "stopped from the menu bar",
 		});
 	}, 60_000);
+
+	it("#when Stop buddy talking is chosen #then the process recorded in buddy/speaking.pid gets SIGTERM", async () => {
+		if (scratch === undefined) throw new Error("missing scratch directory");
+		const stateDir = join(scratch, "state-buddy");
+		const probe = join(scratch, "buddy-probe.m");
+		await Bun.write(
+			probe,
+			`#import <Cocoa/Cocoa.h>\n#define main CursorOverlayMain\n#include "${join(nativeDirectory, "cursor-overlay.m")}"\n#undef main\nint main(void){@autoreleasepool{[[StopMenuTarget new] stopBuddyTalking:nil];}return 0;}\n`,
+		);
+		const probeBinary = join(scratch, "buddy-probe");
+		expect(
+			(await run(["clang", "-fobjc-arc", "-Wno-unused-variable", probe, "-framework", "Cocoa", "-o", probeBinary]))
+				.exitCode,
+		).toBe(0);
+		const speaker = Bun.spawn(["sleep", "30"]);
+		await Bun.write(join(stateDir, "buddy", "speaking.pid"), String(speaker.pid));
+
+		expect((await run([probeBinary], { OPENCUA_STATE_DIR: stateDir })).exitCode).toBe(0);
+
+		await speaker.exited;
+		expect(speaker.signalCode).toBe("SIGTERM");
+		expect(existsSync(join(stateDir, "buddy", "speaking.pid"))).toBe(false);
+	}, 60_000);
 });
 
 describe("#given a server process #when it starts the stop menu #then the helper is tied to that process", () => {
@@ -132,10 +155,27 @@ describe("#given a server process #when it starts the stop menu #then the helper
 			"/fixture/cursor-overlay",
 			4242,
 			parents,
+			null,
 		);
 		menu?.stop();
+		startStopMenu(
+			(command, args) => {
+				calls.push({ command, args });
+				return child;
+			},
+			"/fixture/cursor-overlay",
+			4242,
+			parents,
+			"/fixture/cli.js",
+		);
 
-		expect(calls).toEqual([{ command: "/fixture/cursor-overlay", args: ["--status-only", "--parent", "4242"] }]);
+		expect(calls).toEqual([
+			{ command: "/fixture/cursor-overlay", args: ["--status-only", "--parent", "4242"] },
+			{
+				command: "/fixture/cursor-overlay",
+				args: ["--status-only", "--parent", "4242", "--buddy-cli", process.execPath, "/fixture/cli.js"],
+			},
+		]);
 		expect(killed).toBe(1);
 		// Only this server's registration goes, so another server's menu stays.
 		expect(readdirSync(parents)).toEqual(["5151-222"]);
