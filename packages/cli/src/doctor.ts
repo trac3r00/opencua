@@ -144,6 +144,8 @@ export interface DoctorFacts {
 	readonly config: ConfigFacts;
 	/** Whether `opencua history start` installed the cua-history watcher, the only part that needs Input Monitoring. */
 	readonly historyInstalled?: boolean | undefined;
+	/** rtk (github.com/rtk-ai/rtk) on PATH, which compresses the shell output agents read; undefined when not looked up. */
+	readonly rtk?: { readonly version: string | undefined } | undefined;
 	/** Shortens paths under the home directory in summaries; identity when absent. */
 	readonly showPath?: ((path: string) => string) | undefined;
 }
@@ -653,6 +655,18 @@ function stopCheck(facts: DoctorFacts): DoctorCheck {
 	);
 }
 
+const INSTALL_RTK =
+	"Install rtk so agents read compressed shell output: brew install rtk && rtk init -g (https://github.com/rtk-ai/rtk)";
+
+function rtkChecks(facts: DoctorFacts): DoctorCheck[] {
+	if (facts.rtk === undefined) {
+		return [];
+	}
+	return facts.rtk.version === undefined
+		? [check("rtk", "warn", "rtk not found: agents read full shell output, which costs more tokens", INSTALL_RTK)]
+		: [check("rtk", "ok", `rtk ${facts.rtk.version}: agents read compressed shell output`)];
+}
+
 /** Turns gathered facts into a verdict. Pure, so every outcome is testable without touching the Mac. */
 export function evaluateDoctor(facts: DoctorFacts): DoctorReport {
 	const checks: DoctorCheck[] = [
@@ -664,6 +678,7 @@ export function evaluateDoctor(facts: DoctorFacts): DoctorReport {
 		...selfCheckChecks(facts),
 		...clientChecks(facts),
 		stopCheck(facts),
+		...rtkChecks(facts),
 	];
 	const failures = checks.filter((item) => item.status === "fail");
 	const warnings = checks.filter((item) => item.status === "warn");
@@ -968,6 +983,7 @@ export function gatherDoctorFacts(layout: Layout = resolveLayout(), env: Environ
 		selfCheck,
 		stop: new StopSwitch().status(),
 		historyInstalled: existsSync(historyLaunchAgentPath(home)),
+		rtk: { version: commandOutput("rtk", ["--version"])?.replace(/^rtk\s+/, "") },
 		config: readConfigFacts(layout, env),
 		showPath: (path) => displayPath(path, home),
 	};

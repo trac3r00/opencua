@@ -190,7 +190,8 @@ as **node** in these lists; that entry is no longer used and can be removed with
 The doctor never raises a permission prompt: it reads the helper's own permissions by running the server through it
 in a read-only self-check (`server.js --doctor`), and exits 0 when everything is in place, 1 otherwise, with the fix
 for each item. It also catches an Intel build of Node running under Rosetta on Apple Silicon and points to the native
-one.
+one. It also reports whether [rtk](https://github.com/rtk-ai/rtk) is on PATH; without it the doctor only suggests
+installing it, since agents then read full shell output.
 
 ```text
 opencua doctor
@@ -208,6 +209,7 @@ opencua doctor
   ok    ScreenCaptureKit capture loads in the helper
   ok    omo: registered in ~/.omo/agent/mcp.json
   ok    stop switch: not stopped (Control+Option+Command or `opencua stop` stops every agent)
+  ok    rtk 1.2.1: agents read compressed shell output
 
 Installed. One manual step remains, granting permissions to "opencua-mcp":
   1. Grant Screen Recording to "opencua-mcp": run opencua permissions grant, which shows macOS's dialog, opens System Settings > Privacy & Security > Screen & System Audio Recording and waits until it is on. ...

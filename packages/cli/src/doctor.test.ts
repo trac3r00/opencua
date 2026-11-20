@@ -317,6 +317,34 @@ describe("#given conditions that leave the install working #when the doctor eval
 	});
 });
 
+describe("#given rtk on PATH or not #when the doctor evaluates it #then a missing rtk is a suggestion, never a failure", () => {
+	it("reports the rtk version when it is installed", () => {
+		const report = evaluateDoctor({ ...readyFacts(), rtk: { version: "1.2.1" } });
+
+		const rtk = report.checks.find((item) => item.id === "rtk");
+		expect(rtk?.status).toBe("ok");
+		expect(rtk?.summary).toContain("rtk 1.2.1");
+		expect(report.ready).toBe(true);
+	});
+
+	it("warns with the install command when rtk is missing, and stays ready", () => {
+		const report = evaluateDoctor({ ...readyFacts(), rtk: { version: undefined } });
+
+		const rtk = report.checks.find((item) => item.id === "rtk");
+		expect(rtk?.status).toBe("warn");
+		expect(rtk?.fix).toContain("brew install rtk && rtk init -g");
+		expect(report.ready).toBe(true);
+		expect(report.nextSteps).toHaveLength(1);
+		expect(report.nextSteps[0]).toBe(rtk?.fix);
+	});
+
+	it("adds no rtk check when rtk was not looked up", () => {
+		const report = evaluateDoctor(readyFacts());
+
+		expect(report.checks.some((item) => item.id === "rtk")).toBe(false);
+	});
+});
+
 describe("#given server.js --doctor output #when it is parsed #then only a capability report is accepted", () => {
 	it("reads permissions, process and native capture from the last JSON line", () => {
 		const line = JSON.stringify({
