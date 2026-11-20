@@ -10,6 +10,7 @@
 #import <libproc.h>
 #import <pthread.h>
 #import <signal.h>
+#import <spawn.h>
 #import <stdlib.h>
 #import <string.h>
 #import <sys/file.h>
@@ -41,8 +42,8 @@ static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerHighlights = nil;
 // The window each app's agent is working in: a lasting border with an OpenCUA
 // badge, so the person can tell at a glance which window is being driven.
 static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerFrames = nil;
-// The window rect (Quartz, top-left) each frame was asked to mark; the frame's own
-// window animates in and its size is not the marked window's.
+// The window rect (Quartz, top-left) each frame was asked to mark; the frame's
+// own window animates in and its size is not the marked window's.
 static NSMutableDictionary<NSNumber *, NSValue *> *gMarkerFrameTargets = nil;
 // The frame's badge sits this far above the window it marks.
 static const CGFloat kFrameBadgeRise = 11.0;
@@ -205,9 +206,20 @@ static BOOL stop_engaged(void) {
   return [NSFileManager.defaultManager fileExistsAtPath:stop_file_path()];
 }
 
+// The buddy's menu items run `<node> <cli.js> buddy settings`, given by
+// --buddy-cli; without it the items are not shown.
+static NSString *gBuddyNode = nil;
+static NSString *gBuddyCli = nil;
+
+extern char **environ;
+extern int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attributes,
+                                                 int disclaim);
+
 @interface StopMenuTarget : NSObject
 - (void)stopAll:(id)sender;
 - (void)resumeAll:(id)sender;
+- (void)stopBuddyTalking:(id)sender;
+- (void)openBuddySettings:(id)sender;
 @end
 
 static void update_status_item(void);
@@ -233,6 +245,36 @@ static void update_status_item(void);
                                                    error:nil];
   [data writeToFile:path atomically:YES];
   update_status_item();
+}
+- (void)stopBuddyTalking:(id)sender {
+  (void)sender;
+  // The same contract as stopSpeaking in buddy-voice.ts: the speaking process
+  // records its pid and ends its speech and caption on SIGTERM.
+  NSString *path = [stop_file_path().stringByDeletingLastPathComponent
+      stringByAppendingPathComponent:@"buddy/speaking.pid"];
+  NSString *text = [NSString stringWithContentsOfFile:path
+                                             encoding:NSUTF8StringEncoding
+                                                error:nil];
+  [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+  int pid = text.intValue;
+  if (pid > 1)
+    kill(pid, SIGTERM);
+}
+- (void)openBuddySettings:(id)sender {
+  (void)sender;
+  if (gBuddyNode == nil || gBuddyCli == nil)
+    return;
+  // Disclaimed, so the settings page is not charged to this helper: processes
+  // started under the opencua-mcp helper could not reach the network.
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+  responsibility_spawnattrs_setdisclaim(&attributes, 1);
+  char *args[] = {(char *)gBuddyNode.fileSystemRepresentation,
+                  (char *)gBuddyCli.fileSystemRepresentation, "buddy",
+                  "settings", NULL};
+  pid_t pid;
+  posix_spawn(&pid, args[0], NULL, &attributes, args, environ);
+  posix_spawnattr_destroy(&attributes);
 }
 - (void)resumeAll:(id)sender {
   (void)sender;
@@ -272,6 +314,21 @@ static NSMenu *control_menu(NSMenu *menu, NSArray<NSString *> *lines,
                                              keyEquivalent:@""];
     resume.target = gStopTarget;
     [menu addItem:resume];
+    if (gBuddyCli != nil) {
+      [menu addItem:[NSMenuItem separatorItem]];
+      NSMenuItem *quiet =
+          [[NSMenuItem alloc] initWithTitle:@"Stop buddy talking"
+                                     action:@selector(stopBuddyTalking:)
+                              keyEquivalent:@""];
+      quiet.target = gStopTarget;
+      [menu addItem:quiet];
+      NSMenuItem *settings =
+          [[NSMenuItem alloc] initWithTitle:@"Buddy settings…"
+                                     action:@selector(openBuddySettings:)
+                              keyEquivalent:@""];
+      settings.target = gStopTarget;
+      [menu addItem:settings];
+    }
   }
   for (NSUInteger index = 0; index < lines.count; index++) {
     [menu itemAtIndex:index].title = lines[index];
@@ -1056,8 +1113,8 @@ static CGWindowID marker_target_window(NSArray<NSDictionary *> *windows,
 // window's bounds, without the badge that rises above it.
 static NSRect marker_quartz_rect(NSWindow *window, BOOL isFrame) {
   NSRect frame = window.frame;
-  CGFloat height = isFrame ? frame.size.height - kFrameBadgeRise
-                           : frame.size.height;
+  CGFloat height =
+      isFrame ? frame.size.height - kFrameBadgeRise : frame.size.height;
   return NSMakeRect(frame.origin.x,
                     primary_screen_height() - frame.origin.y - height,
                     frame.size.width, height);
@@ -1241,7 +1298,10 @@ static void start_ripple(NSPoint windowOrigin) {
 @implementation FrameView
 - (void)drawRect:(NSRect)dirtyRect {
   (void)dirtyRect;
-  NSColor *accent = [NSColor colorWithSRGBRed:0.20 green:0.55 blue:1.0 alpha:0.9];
+  NSColor *accent = [NSColor colorWithSRGBRed:0.20
+                                        green:0.55
+                                         blue:1.0
+                                        alpha:0.9];
   NSRect marked = NSMakeRect(0, 0, NSWidth(self.bounds),
                              NSHeight(self.bounds) - kFrameBadgeRise);
   NSBezierPath *outline =
@@ -1491,8 +1551,7 @@ static void apply_frame(double x, double y, double w, double h, NSNumber *key) {
   }
   gMarkerFrameTargets[key] = [NSValue valueWithRect:NSMakeRect(x, y, w, h)];
   CGFloat screenHeight = primary_screen_height();
-  NSRect frame =
-      NSMakeRect(x, screenHeight - y - h, w, h + kFrameBadgeRise);
+  NSRect frame = NSMakeRect(x, screenHeight - y - h, w, h + kFrameBadgeRise);
   if (!NSEqualRects(window.frame, frame)) {
     [window setFrame:frame display:YES];
     [window.contentView setNeedsDisplay:YES];
@@ -2139,6 +2198,9 @@ int main(int argc, const char *argv[]) {
       gStatusOnly = YES;
     } else if (strcmp(argv[i], "--parent") == 0 && i + 1 < argc) {
       parent = (pid_t)strtol(argv[++i], NULL, 10);
+    } else if (strcmp(argv[i], "--buddy-cli") == 0 && i + 2 < argc) {
+      gBuddyNode = @(argv[++i]);
+      gBuddyCli = @(argv[++i]);
     }
   }
   signal(SIGPIPE, SIG_IGN);
