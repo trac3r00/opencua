@@ -19,7 +19,9 @@
 // space the cursor overlay uses. The panel never activates, so the person's
 // front app keeps focus.
 #import <Cocoa/Cocoa.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 static BOOL gLassoMode = NO;
@@ -371,13 +373,13 @@ static int run_caption(NSString *positionFile, NSString *snapshot) {
 
 // --status: a small pill at the bottom of the display the person is working on
 // (the one under the pointer) that says what buddy and its agents are doing.
-// Each stdin line is one JSON update:
+// It draws <feed>/current.json (written by the activity feed in
+// packages/core/src/platform/activity-feed.ts) whenever it changes:
 //   {"state":"listening|hearing|thinking|working|speaking|done|error|idle",
 //    "text":"...", "detail":"...", "ttl":2.5}
 // "idle" hides the pill; ttl hides it after that many seconds unless another
 // update arrives. The pill never takes focus, lets clicks through, and is left
 // out of screen captures, so it never lands in the screenshot buddy asks about.
-// stdin closing ends it.
 static const CGFloat kStatusHeight = 40;
 static const CGFloat kStatusDetailHeight = 56;
 static const CGFloat kStatusMaxWidth = 620;
@@ -575,8 +577,8 @@ static NSScreen *status_screen(void) {
 }
 @end
 
-static int run_status(NSString *snapshot, NSString *state, NSString *text,
-                      NSString *detail) {
+static int run_status(NSString *feed, NSString *snapshot, NSString *state,
+                      NSString *text, NSString *detail) {
   NSApplication *app = NSApplication.sharedApplication;
   app.activationPolicy = NSApplicationActivationPolicyAccessory;
   StatusView *view =
@@ -599,6 +601,22 @@ static int run_status(NSString *snapshot, NSString *state, NSString *text,
            view.bounds.size.height);
     return written ? 0 : 1;
   }
+  if (feed == nil) {
+    fprintf(stderr, "usage: buddy-hud --status --feed <dir> | --status "
+                    "--snapshot <png> --state <s> --text <t>\n");
+    return 64;
+  }
+  // One HUD per feed folder: a second one started in a race exits at once.
+  NSString *lockPath = [feed stringByAppendingPathComponent:@".hud.lock"];
+  int lock = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR, 0600);
+  if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0)
+    return 0;
+  NSString *pidPath = [feed stringByAppendingPathComponent:@".hud.pid"];
+  [[NSString stringWithFormat:@"%d", getpid()]
+      writeToFile:pidPath
+       atomically:YES
+         encoding:NSUTF8StringEncoding
+            error:nil];
   NSPanel *panel =
       [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 200, kStatusHeight)
                                  styleMask:NSWindowStyleMaskBorderless |
@@ -626,43 +644,49 @@ static int run_status(NSString *snapshot, NSString *state, NSString *text,
                                       (void)timer;
                                       [controller tick];
                                     }];
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-    NSFileHandle *input = NSFileHandle.fileHandleWithStandardInput;
-    NSMutableData *pending = [NSMutableData data];
-    for (;;) {
-      NSData *chunk = [input availableData];
-      if (chunk.length == 0)
-        break;
-      [pending appendData:chunk];
-      for (;;) {
-        NSRange newline = [pending rangeOfData:[NSData dataWithBytes:"\n"
-                                                              length:1]
-                                       options:0
-                                         range:NSMakeRange(0, pending.length)];
-        if (newline.location == NSNotFound)
-          break;
-        NSData *line =
-            [pending subdataWithRange:NSMakeRange(0, newline.location)];
-        [pending replaceBytesInRange:NSMakeRange(0, newline.location + 1)
-                           withBytes:NULL
-                              length:0];
-        id update = [NSJSONSerialization JSONObjectWithData:line
-                                                    options:0
-                                                      error:nil];
-        if ([update isKindOfClass:NSDictionary.class])
-          dispatch_async(dispatch_get_main_queue(), ^{
-            [controller apply:update];
-          });
-      }
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
-      exit(0);
-    });
-  });
+  NSString *current = [feed stringByAppendingPathComponent:@"current.json"];
+  __block NSData *lastSeen = nil;
+  __block NSDate *hiddenSince = [NSDate date];
+  void (^reload)(void) = ^{
+    NSData *data = [NSData dataWithContentsOfFile:current];
+    if (data == nil || [data isEqualToData:lastSeen])
+      return;
+    lastSeen = data;
+    id update = [NSJSONSerialization JSONObjectWithData:data
+                                                options:0
+                                                  error:nil];
+    if ([update isKindOfClass:NSDictionary.class])
+      [controller apply:update];
+  };
+  int folder = open(feed.fileSystemRepresentation, O_EVTONLY);
+  if (folder >= 0) {
+    dispatch_source_t changes = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_VNODE, (uintptr_t)folder,
+        DISPATCH_VNODE_WRITE | DISPATCH_VNODE_EXTEND, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(changes, reload);
+    dispatch_resume(changes);
+  }
+  reload();
+  // A missed change is picked up within a second, and a HUD left idle for ten
+  // minutes quits; the next writer starts a new one.
+  [NSTimer scheduledTimerWithTimeInterval:1.0
+                                  repeats:YES
+                                    block:^(NSTimer *timer) {
+                                      (void)timer;
+                                      reload();
+                                      if (controller.shown)
+                                        hiddenSince = [NSDate date];
+                                      else if (-hiddenSince.timeIntervalSinceNow >
+                                               600) {
+                                        unlink(pidPath.fileSystemRepresentation);
+                                        exit(0);
+                                      }
+                                    }];
   signal(SIGTERM, SIG_IGN);
   dispatch_source_t term = dispatch_source_create(
       DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_main_queue());
   dispatch_source_set_event_handler(term, ^{
+    unlink(pidPath.fileSystemRepresentation);
     exit(0);
   });
   dispatch_resume(term);
@@ -677,6 +701,7 @@ int main(int argc, char **argv) {
     NSString *statusState = nil;
     NSString *statusText = nil;
     NSString *statusDetail = nil;
+    NSString *feed = nil;
     NSString *positionFile = nil;
     BOOL caption = NO;
     NSString *snapshot = nil;
@@ -701,6 +726,8 @@ int main(int argc, char **argv) {
         statusText = @(argv[++index]);
       else if ([argument isEqualToString:@"--detail"] && index + 1 < argc)
         statusDetail = @(argv[++index]);
+      else if ([argument isEqualToString:@"--feed"] && index + 1 < argc)
+        feed = @(argv[++index]);
       else if ([argument isEqualToString:@"--position-file"] &&
                index + 1 < argc)
         positionFile = @(argv[++index]);
@@ -711,7 +738,7 @@ int main(int argc, char **argv) {
       }
     }
     if (status)
-      return run_status(snapshot, statusState, statusText, statusDetail);
+      return run_status(feed, snapshot, statusState, statusText, statusDetail);
     if (caption)
       return run_caption(positionFile, snapshot);
     if (listen == gLassoMode) {
