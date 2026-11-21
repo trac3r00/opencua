@@ -202,10 +202,13 @@ describe("#given MacOSInputController keyboard input", () => {
 		// given
 		const {
 			MacOSInputController,
+			setAttendedForegroundForTesting,
 			setFocusStealWatcherForTesting,
 			setKeyboardWindowFocuserForTesting,
 			setOnscreenWindowIdsSourceForTesting,
 		} = await import("./macos-input.js");
+		// Attended input goes to the app in front; the test must not depend on what this machine has in front.
+		setAttendedForegroundForTesting(() => ({ appInFront: true, windowFocused: true }));
 		const watched: number[] = [];
 		setFocusStealWatcherForTesting((window) => {
 			watched.push(window.id);
@@ -227,6 +230,7 @@ describe("#given MacOSInputController keyboard input", () => {
 		expect(watched).toEqual([12]);
 		background.close();
 		attended.close();
+		setAttendedForegroundForTesting(undefined);
 	});
 
 	it("#when a key is posted to a target app #then the controller remembers when, so typing can wait for it", async () => {
