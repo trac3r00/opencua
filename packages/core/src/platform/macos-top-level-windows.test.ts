@@ -1,7 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
-import { type TopLevelWindow, fillWindowTitles, placeOnSpaces } from "./macos-top-level-windows.js";
+import {
+	type TopLevelWindow,
+	fillWindowTitles,
+	markFocusedWindows,
+	placeOnDisplays,
+	placeOnSpaces,
+} from "./macos-top-level-windows.js";
 
 const BOUNDS = { x: 0, y: 0, width: 400, height: 300 };
 
@@ -46,6 +52,39 @@ describe("fillWindowTitles #given window titles the WindowServer withheld (no Sc
 		});
 
 		expect(filled.map((entry) => entry.title)).toEqual(["", "", "", "Shown"]);
+	});
+});
+
+describe("placeOnDisplays #given a main display and a secondary display", () => {
+	it("#when windows sit on each #then each carries the display holding most of it and that display's scale", () => {
+		const displays = [
+			{ id: 1, isMain: true, x: 0, y: 0, width: 1728, height: 1117, scaleFactor: 2 },
+			{ id: 2, x: 1728, y: 0, width: 2560, height: 1440, scaleFactor: 1 },
+		];
+		const offscreen = { ...window(3, 10, "nowhere"), bounds: { x: -5000, y: 0, width: 400, height: 300 } };
+		const side = { ...window(2, 10, "side"), bounds: { x: 1600, y: 0, width: 900, height: 300 } };
+
+		const placed = placeOnDisplays([window(1, 10, "main"), side, offscreen], displays);
+
+		expect(placed.map(({ displayId, scaleFactor }) => ({ displayId, scaleFactor }))).toEqual([
+			{ displayId: 1, scaleFactor: 2 },
+			{ displayId: 2, scaleFactor: 1 },
+			{ displayId: undefined, scaleFactor: undefined },
+		]);
+	});
+});
+
+describe("markFocusedWindows #given two apps with two windows each", () => {
+	it("#when each app names its focused window #then only that window is marked, asking each app once", () => {
+		const focusedWindowOf = vi.fn((pid: number) => (pid === 10 ? 2 : undefined));
+
+		const marked = markFocusedWindows(
+			[window(1, 10, "a"), window(2, 10, "b"), window(3, 20, "c"), window(4, 20, "d")],
+			focusedWindowOf,
+		);
+
+		expect(marked.map((entry) => entry.focused)).toEqual([undefined, true, undefined, undefined]);
+		expect(focusedWindowOf.mock.calls).toEqual([[10], [20]]);
 	});
 });
 

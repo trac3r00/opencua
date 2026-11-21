@@ -2,7 +2,7 @@
 
 The guarded stdio MCP server for macOS computer control, part of [OpenCUA](../../README.md).
 
-It exposes 33 tools over MCP: observation (`get_app_state`, `list_apps`, `list_windows`,
+It exposes 36 tools over MCP: observation (`get_app_state`, `list_apps`, `list_windows`, `list_displays`,
 `find_elements`, `verify_state`), mutation (`click`, `click_target`, `set_value`, `set_fields`,
 `run_steps`, `type_text`, `press_keys`, `scroll`, `drag`, `select_text`, `perform_secondary_action`,
 `invoke_menu`, `set_window_frame`, `clipboard_read`, `clipboard_write`), lifecycle (`open_app`) and

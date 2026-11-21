@@ -85,6 +85,7 @@ export {
 	placeOnSpaces,
 } from "./platform/macos-top-level-windows.js";
 export { type ListedWindow, listWindows } from "./platform/macos-ffi/window-list.js";
+export { onlineDisplaysWithSpaces } from "./platform/macos-ffi/display-list.js";
 export { type TypingRhythm, typingRhythm } from "./platform/typing-rhythm.js";
 export { unhideApplication } from "./platform/macos-ffi/workspace.js";
 export { ForegroundKeeper, type ForegroundKeeperDeps, type ForegroundRestore } from "./platform/foreground-keeper.js";
@@ -449,3 +450,4 @@ export {
 	setSessionCursorName,
 } from "./platform/owned-surfaces.js";
 export { type SurfaceListening, listenToSurface } from "./platform/surface-listen.js";
+export { getCurrentCursorPosition as personPointerPosition } from "./platform/macos-ffi/coregraphics.js";

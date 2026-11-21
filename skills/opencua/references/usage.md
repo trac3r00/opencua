@@ -23,6 +23,8 @@ an MCP server: stdout carries its protocol.
 Read-only tools:
 
 - `list_apps`: inventory of running apps; no authorization implied.
+- `list_displays`: every display (id, main, bounds, scale, shown Space, whether it holds the
+  cursor) and the frontmost app; posts no input.
 - `get_app_state`: screenshot, AX elements and current context for the named app.
   Optional `diff_only` returns only what changed since the previous observation of that app
   (the `axChanges` list) instead of the whole tree; the first observation of an app is

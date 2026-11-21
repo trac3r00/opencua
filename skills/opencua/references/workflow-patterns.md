@@ -83,8 +83,10 @@ Use element IDs or semantic `target` queries first. When coordinates are necessa
 use the coordinate space documented by that observation; never convert screenshot
 pixels to global logical points by guesswork. Current background pointer actions are
 window-targeted. `displays` reports each screen's ID, global origin, logical size
-and scale. `windowDisplayId` identifies the greatest-overlap screen;
+and scale. `display` and `windowDisplayId` identify the greatest-overlap screen
+(`windowDisplayAmbiguous` when two screens hold it about equally);
 `windowDisplayIds` includes every screen intersected by a spanning window.
+`list_windows` adds each window's `z_order`, `focused`, `display_id` and `scale_factor`.
 Observe the target in place rather than moving it to the main screen.
 
 ## Cheapest confirming observation

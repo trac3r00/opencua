@@ -143,10 +143,16 @@ describe("run_script #given an app with two documents #when a handle is bound to
 		const payload = await runScript(harness, `return await apple.windows("Finder");`);
 
 		expect(payload["value"]).toEqual([
-			{ window_id: 71, pid: 1234, app: "Finder", title: "a.txt", bounds: BOUNDS },
-			{ window_id: 72, pid: 1234, app: "Finder", title: "b.txt", bounds: BOUNDS },
+			{ window_id: 71, pid: 1234, app: "Finder", title: "a.txt", bounds: BOUNDS, z_order: 0 },
+			{ window_id: 72, pid: 1234, app: "Finder", title: "b.txt", bounds: BOUNDS, z_order: 1 },
 		]);
-		expect(probe.asked).toContainEqual({ titlesFor: [1234], includeOffscreen: true, withSpaces: true });
+		expect(probe.asked).toContainEqual({
+			titlesFor: [1234],
+			includeOffscreen: true,
+			withSpaces: true,
+			withDisplays: true,
+			withFocus: true,
+		});
 	});
 });
 
@@ -157,7 +163,9 @@ describe("list_windows #given window titles the WindowServer withholds #when it 
 		const payload = jsonPayload(await harness.client.callTool({ name: "list_windows", arguments: {} }));
 
 		expect(payload["windows"]).toContainEqual(expect.objectContaining({ window_id: 72, title: "b.txt" }));
-		expect(probe.asked).toEqual([{ titlesFor: "all", includeOffscreen: true, withSpaces: true }]);
+		expect(probe.asked).toEqual([
+			{ titlesFor: "all", includeOffscreen: true, withSpaces: true, withDisplays: true, withFocus: true },
+		]);
 	});
 });
 

@@ -504,17 +504,21 @@ export class GuardedSession {
 	listWindows(options: { readonly app?: string } = {}): Promise<ToolResult> {
 		return this.enqueue(undefined, async () => {
 			const pid = options.app === undefined ? undefined : await this.resolvePid(options.app);
-			const windows =
+			// Every Space in either mode: attended input brings an off-Space window forward itself, so it is a target too.
+			const stacked =
 				this.windowProbe === undefined
 					? []
-					: // Every Space in either mode: attended input brings an off-Space window forward itself, so it is a target too.
-						(
-							await this.windowProbe({
-								titlesFor: pid === undefined ? "all" : [pid],
-								includeOffscreen: true,
-								withSpaces: true,
-							})
-						).filter((window) => pid === undefined || window.ownerPid === pid);
+					: await this.windowProbe({
+							titlesFor: pid === undefined ? "all" : [pid],
+							includeOffscreen: true,
+							withSpaces: true,
+							withDisplays: true,
+							withFocus: true,
+						});
+			// The probe lists front to back, so a window's place there is its z-order across every app.
+			const windows = stacked
+				.map((window, zOrder) => ({ ...window, zOrder }))
+				.filter((window) => pid === undefined || window.ownerPid === pid);
 			const prompts = this.systemPromptProbe === undefined ? [] : this.systemPromptProbe();
 			return textResult(
 				JSON.stringify({
@@ -524,6 +528,10 @@ export class GuardedSession {
 						app: window.ownerName,
 						title: window.title,
 						bounds: window.bounds,
+						z_order: window.zOrder,
+						...(window.focused === true ? { focused: true } : {}),
+						...(window.displayId === undefined ? {} : { display_id: window.displayId }),
+						...(window.scaleFactor === undefined ? {} : { scale_factor: window.scaleFactor }),
 						...(window.space === undefined
 							? {}
 							: {

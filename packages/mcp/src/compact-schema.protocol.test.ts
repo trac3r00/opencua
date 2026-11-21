@@ -13,8 +13,9 @@ const LEAN_BUDGET_BYTES = 10_500;
 // surface `listen` op (37,459 bytes on 2026-11-07), `surface` pointers and the built-in opencua:board (37,617 bytes
 // on 2026-11-08), then worker `session_id` and `release_session` (38,145 bytes on 2026-11-08), then run_applescript
 // and press_keys taking one combo string (38,719 bytes on 2026-11-17), then run_hands `chunks` (39,728 bytes on
-// 2026-11-20). The full list still omits the repeated per-type step schema.
-const FULL_BUDGET_BYTES = 39_800;
+// 2026-11-20), then list_displays and the list_windows z-order, focus and display fields (40,113 bytes on
+// 2026-11-21). The full list still omits the repeated per-type step schema.
+const FULL_BUDGET_BYTES = 40_200;
 
 let closeHarness: (() => Promise<void>) | undefined;
 

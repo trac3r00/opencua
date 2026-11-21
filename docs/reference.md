@@ -396,8 +396,8 @@ shows: "scroll, click test1, Cmd-click test2" in a 152-row background Finder lis
 instead of 7 calls and 7.4 s.
 
 Pick how much the agent loads with `OPENCUA_TOOLSET`. `full` (the default) registers every desktop tool;
-`lean` registers ten — `get_capabilities`, `list_apps`, `list_windows`, `open_app`, `get_app_state`,
-`find_elements`, `verify_state`, `run_script`, `ask_user` and `analyze_screen` — and does everything else
+`lean` registers twelve — `get_capabilities`, `get_tool_usage`, `list_apps`, `list_windows`, `list_displays`,
+`open_app`, `get_app_state`, `find_elements`, `verify_state`, `run_script`, `ask_user` and `analyze_screen` — and does everything else
 through `run_script`.
 The iPhone tools are opt-in with `OPENCUA_IPHONE=1` under either profile.
 `run_steps` and `run_parallel` publish one flat step schema and still validate every step
@@ -721,8 +721,14 @@ When a tree is capped the answer says so in `elementsTruncated`, and a walk at a
 is treated as a fresh baseline rather than diffed against a differently truncated one, so a diff
 never reports elements that were merely outside the budget as removed. `list_windows` names
 targetable top-level windows (including other Spaces in background delivery) with their id, pid,
-app, title and bounds, plus `space` (`current` or `other`), `space_ids` and `display` when the WindowServer
-places the window on a Space, so an agent can pick its target and its route before observing instead of guessing.
+app, title and bounds, its `z_order` across every app (0 is frontmost), `focused: true` on each app's focused
+window, `display_id` and `scale_factor` of the display holding most of it, plus `space` (`current` or `other`),
+`space_ids` and `display` when the WindowServer places the window on a Space, so an agent can pick its target and
+its route before observing instead of guessing. `list_displays` answers every display's id, `main`, bounds,
+`scale_factor`, `active_space_id` and `has_cursor` (the display under the person's own pointer), plus `frontmost_app`. In `get_app_state`, `display` is the
+display the observed window is on (the main display only when there is no window), `windowDisplayAmbiguous`
+marks a window split within 10% between two displays, and `space` (`ids`, `current`) or `spaceUnknown` says
+where the window sits among Spaces.
 When any window is on another Space the answer adds `space_note`, which says what reaches such a window. Drilling in with `subtree_of` costs what the branch costs:
 on a Finder window whose full tree is 718 elements, re-observing a row returned 10 elements in
 165 ms instead of roughly 810 ms for the window.
@@ -849,7 +855,7 @@ Full walkthrough: [`skills/opencua/references/installation.md`](../skills/opencu
 | Path | What lives there |
 |---|---|
 | [`packages/core`](../packages/core) | Platform-abstracted interfaces, the native macOS computer, the guarded token layer, and targeting (`matchElements`, `openApplication`) |
-| [`packages/mcp`](../packages/mcp) | The stdio MCP server (33 tools) and `assets/appicon.png` for the signed helper bundle |
+| [`packages/mcp`](../packages/mcp) | The stdio MCP server (36 tools) and `assets/appicon.png` for the signed helper bundle |
 | [`packages/cli`](../packages/cli) | The `opencua` command line |
 | [`packages/pi-extension`](../packages/pi-extension) | Pi coding-agent bridge to the MCP server, including native Anthropic/OpenAI computer-use shapes |
 | [`skills/opencua`](../skills/opencua) | The portable agent skill: workflow, usage, permissions, harness setup |

@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { classifyContentKind } from "../accessibility/content-kind.js";
 import { diffAxTreeChanges, diffAxTreesByKey } from "../accessibility/diff.js";
 import { normalizeAxTree } from "../accessibility/normalize.js";
-import type { AXTreeElement, AppInfo, AppState, DisplayInfo, DisplayInventoryEntry } from "../accessibility/types.js";
+import type { AXTreeElement, AppInfo, AppState, DisplayInfo } from "../accessibility/types.js";
 import type { OcrTextEntry, WindowInventoryEntry } from "../accessibility/types.js";
 import { resolveAppInstructions } from "../app-instructions/index.js";
 import { resolveDisplayMetadata } from "../computer/display-metadata.js";
@@ -29,6 +29,7 @@ import type {
 } from "../types/index.js";
 import { type RunningAppInfo, collectAppUsage, findRunningApp, getRunningMacOSApps } from "./app-list.js";
 import { CursorKeyedObservations } from "./cursor-observations.js";
+import { displayOverlaps, overlapIsAmbiguous } from "./display-placement.js";
 import { execFileStdout, execFileStdoutBuffer } from "./exec-util.js";
 import { HostComputer, type HostComputerOptions } from "./host.js";
 import { parseImageDimensions, sniffImageMimeType } from "./image-format.js";
@@ -113,7 +114,7 @@ import { resolveOcrCrop } from "./ocr-region.js";
 import { isOwnedSurfacePid, surfaceAudioState } from "./owned-surfaces.js";
 import { currentSystemPrompts } from "./system-prompts.js";
 import { settleWebFocus } from "./web-focus-settle.js";
-import { windowMinimizedState, windowOnHiddenSpace } from "./window-minimized.js";
+import { windowMinimizedState, windowOnHiddenSpace, windowSpacePlacement } from "./window-minimized.js";
 
 /** How long a background web click waits for the page to take keyboard focus, and how often it looks. */
 const WEB_FOCUS_SETTLE_LIMIT_MILLISECONDS = 400;
@@ -826,12 +827,12 @@ export class MacOSHostComputer extends HostComputer {
 				if (window.id === targetWindow?.id && targetWindowTitle !== undefined) {
 					title = targetWindowTitle;
 				}
-				const windowDisplays = displaysForWindow(window.bounds, displayInventory);
+				const overlaps = displayOverlaps(window.bounds, displayInventory);
 				return {
 					...window,
 					title,
-					...(windowDisplays[0] === undefined ? {} : { displayId: windowDisplays[0].id }),
-					...(windowDisplays.length === 0 ? {} : { displayIds: windowDisplays.map(({ id }) => id) }),
+					...(overlaps[0] === undefined ? {} : { displayId: overlaps[0].display.id }),
+					...(overlaps.length === 0 ? {} : { displayIds: overlaps.map(({ display }) => display.id) }),
 				};
 			});
 		}
@@ -840,10 +841,6 @@ export class MacOSHostComputer extends HostComputer {
 				? await this.readWindowText(screenshot, size, targetWindow)
 				: undefined;
 		const displays = displayInventory;
-		const mainDisplayId = getMainDisplayId();
-		const inventoryMainDisplay = displays?.find((candidate) => candidate.isMain === true);
-		const displayMetadata = resolveDisplayInfo(mainDisplayId);
-		const display = { ...displayMetadata, ...inventoryMainDisplay };
 		const appInstructions = resolveAppInstructions(app.name, app.bundleId);
 		const systemPrompts = currentSystemPrompts();
 
@@ -884,8 +881,13 @@ export class MacOSHostComputer extends HostComputer {
 				: classifyContentKind(elements, { width: screenshot.width, height: screenshot.height });
 		const diffOnly = options?.diffOnly === true && previousTree !== undefined && tree !== undefined;
 		const observationKey = currentObservationKey(app.pid);
-		const windowDisplays = windowBounds === undefined ? [] : displaysForWindow(windowBounds, displays);
-		const windowDisplayId = windowDisplays[0]?.id;
+		const windowOverlaps = windowBounds === undefined ? [] : displayOverlaps(windowBounds, displays);
+		const windowDisplayId = windowOverlaps[0]?.display.id;
+		const display = windowOverlaps[0]?.display ?? {
+			...resolveDisplayInfo(getMainDisplayId()),
+			...displays?.find((candidate) => candidate.isMain === true),
+		};
+		const spacePlacement = targetWindow === undefined ? undefined : windowSpacePlacement(targetWindow.id);
 
 		const audio = isOwnedSurfacePid(app.pid) ? surfaceAudioState(app.pid) : undefined;
 		const state: AppState = {
@@ -913,7 +915,15 @@ export class MacOSHostComputer extends HostComputer {
 			...(appInstructions !== undefined ? { appInstructions } : {}),
 			...(windowBounds !== undefined ? { windowBounds } : {}),
 			...(windowDisplayId === undefined ? {} : { windowDisplayId }),
-			...(windowDisplays.length === 0 ? {} : { windowDisplayIds: windowDisplays.map(({ id }) => id) }),
+			...(windowOverlaps.length === 0
+				? {}
+				: { windowDisplayIds: windowOverlaps.map(({ display: overlapped }) => overlapped.id) }),
+			...(overlapIsAmbiguous(windowOverlaps) ? { windowDisplayAmbiguous: true } : {}),
+			...(targetWindow === undefined
+				? {}
+				: spacePlacement === undefined
+					? { spaceUnknown: true }
+					: { space: { ids: spacePlacement.spaceIds, current: spacePlacement.onShownSpace } }),
 			...(targetWindow !== undefined ? { windowId: targetWindow.id } : {}),
 			...(targetWindowTitle !== undefined ? { windowTitle: targetWindowTitle } : {}),
 			...(windowCandidates !== undefined ? { windowCandidates } : {}),
@@ -1871,25 +1881,6 @@ async function settledWindowBounds(read: () => Promise<Rect | undefined>): Promi
 		previous = next;
 	}
 	return previous;
-}
-
-function displaysForWindow(
-	window: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
-	displays: ReturnType<typeof onlineDisplayInfo>,
-): readonly DisplayInventoryEntry[] {
-	if (displays === undefined) {
-		return [];
-	}
-	return displays
-		.map((display) => {
-			const width = Math.min(window.x + window.width, display.x + display.width) - Math.max(window.x, display.x);
-			const height = Math.min(window.y + window.height, display.y + display.height) - Math.max(window.y, display.y);
-			const intersectionArea = Math.max(0, width) * Math.max(0, height);
-			return { display, intersectionArea };
-		})
-		.filter(({ intersectionArea }) => intersectionArea > 0)
-		.sort((left, right) => right.intersectionArea - left.intersectionArea)
-		.map(({ display }) => display);
 }
 
 interface ObservationCaptureRequest {

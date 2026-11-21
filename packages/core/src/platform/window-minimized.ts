@@ -1,13 +1,16 @@
 import { windowMinimizedForPid } from "./macos-ffi/accessibility.js";
 import { managedDisplaySpaces, spacesForWindows } from "./macos-ffi/sls-spaces.js";
 
-export type WindowPlacement = { readonly onShownSpace: boolean };
+export type WindowPlacement = { readonly spaceIds: readonly number[]; readonly onShownSpace: boolean };
 
 function placementFromWindowServer(windowId: number): WindowPlacement | undefined {
 	const spaces = spacesForWindows([windowId]).get(windowId);
 	if (spaces === undefined || spaces.length === 0) return undefined;
-	const shown = new Set(managedDisplaySpaces().map((display) => display.currentSpaceId));
-	return { onShownSpace: spaces.some((space) => shown.has(space)) };
+	// No display listing means the shown Spaces are unknown, not that none is shown.
+	const displays = managedDisplaySpaces();
+	if (displays.length === 0) return undefined;
+	const shown = new Set(displays.map((display) => display.currentSpaceId));
+	return { spaceIds: spaces, onShownSpace: spaces.some((space) => shown.has(space)) };
 }
 
 const askAccessibility = (pid: number, windowId: number): boolean | undefined => windowMinimizedForPid(pid, windowId);
@@ -35,6 +38,11 @@ export function windowMinimizedState(pid: number, windowId: number): boolean | u
 	if (answered !== undefined) return answered;
 	const placement = placementSource(windowId);
 	return placement !== undefined && !placement.onShownSpace ? false : undefined;
+}
+
+/** The Spaces a window is on and whether a display shows one now; undefined when the WindowServer cannot say. */
+export function windowSpacePlacement(windowId: number): WindowPlacement | undefined {
+	return placementSource(windowId);
 }
 
 export function windowOnHiddenSpace(windowId: number): boolean | undefined {
