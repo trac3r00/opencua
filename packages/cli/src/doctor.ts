@@ -149,6 +149,8 @@ export interface DoctorFacts {
 	readonly config: ConfigFacts;
 	/** Whether `opencua history start` installed the cua-history watcher, the only part that needs Input Monitoring. */
 	readonly historyInstalled?: boolean | undefined;
+	/** rtk (github.com/rtk-ai/rtk) on PATH, which compresses the shell output agents read; undefined when not looked up. */
+	readonly rtk?: { readonly version: string | undefined } | undefined;
 	/** Shortens paths under the home directory in summaries; identity when absent. */
 	readonly showPath?: ((path: string) => string) | undefined;
 }
@@ -677,6 +679,18 @@ function stopCheck(facts: DoctorFacts): DoctorCheck {
 	);
 }
 
+const INSTALL_RTK =
+	"Install rtk so agents read compressed shell output: brew install rtk && rtk init -g (https://github.com/rtk-ai/rtk)";
+
+function rtkChecks(facts: DoctorFacts): DoctorCheck[] {
+	if (facts.rtk === undefined) {
+		return [];
+	}
+	return facts.rtk.version === undefined
+		? [check("rtk", "warn", "rtk not found: agents read full shell output, which costs more tokens", INSTALL_RTK)]
+		: [check("rtk", "ok", `rtk ${facts.rtk.version} on PATH (rtk init --show lists the agents it is hooked into)`)];
+}
+
 /** Turns gathered facts into a verdict. Pure, so every outcome is testable without touching the Mac. */
 export function evaluateDoctor(facts: DoctorFacts): DoctorReport {
 	const checks: DoctorCheck[] = [
@@ -688,6 +702,7 @@ export function evaluateDoctor(facts: DoctorFacts): DoctorReport {
 		...selfCheckChecks(facts),
 		...clientChecks(facts),
 		stopCheck(facts),
+		...rtkChecks(facts),
 	];
 	const failures = checks.filter((item) => item.status === "fail");
 	const warnings = checks.filter((item) => item.status === "warn");
@@ -847,6 +862,33 @@ function sha256(path: string): string | undefined {
 	}
 }
 
+const RTK_LOOKUP_TIMEOUT_MS = 2_000;
+
+/** Runs `rtk --version` on the given PATH; undefined when rtk is missing, fails or answers too slowly. */
+export function rtkVersionOutput(
+	env: Environment = process.env,
+	timeoutMs = RTK_LOOKUP_TIMEOUT_MS,
+): string | undefined {
+	try {
+		return execFileSync("rtk", ["--version"], {
+			encoding: "utf8",
+			env,
+			timeout: timeoutMs,
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch {
+		return undefined;
+	}
+}
+
+/** Looks rtk up on PATH by running `rtk --version`; the version is undefined when it is missing or fails. */
+export function readRtk(
+	run: (file: string, args: readonly string[]) => string | undefined = () => rtkVersionOutput(),
+): DoctorFacts["rtk"] {
+	const output = run("rtk", ["--version"]);
+	return { version: output === undefined || output === "" ? undefined : output.replace(/^rtk\s+/, "") };
+}
+
 /** Compares packages/core/native/build-inputs.sha256 (written by build.sh) with the sources it names. */
 export function readNativeInputs(nativeDir: string): DoctorFacts["nativeInputs"] {
 	let recorded: string;
@@ -1003,6 +1045,7 @@ export function gatherDoctorFacts(layout: Layout = resolveLayout(), env: Environ
 		selfCheck,
 		stop: new StopSwitch().status(),
 		historyInstalled: existsSync(historyLaunchAgentPath(home)),
+		rtk: readRtk(),
 		config: readConfigFacts(layout, env),
 		showPath: (path) => displayPath(path, home),
 	};
