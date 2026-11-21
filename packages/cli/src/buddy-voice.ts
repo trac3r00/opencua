@@ -1,10 +1,20 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
+import { systemLocale, uiLanguageOf } from "./buddy-i18n.js";
 import { type BuddySettings, readElevenLabsKey } from "./buddy-settings.js";
 
+const execFileAsync = promisify(execFile);
+
 const ELEVENLABS_API = "https://api.elevenlabs.io/v1";
+
+/**
+ * The signal that stops speech. Not SIGTERM: `buddy listen` speaks in its own process, and SIGTERM there means quit.
+ * speak() handles it for exactly as long as the speaking.pid record names its process.
+ */
+export const STOP_SPEAKING_SIGNAL = "SIGUSR2";
 
 export function speakingPidPath(stateDir: string): string {
 	return join(stateDir, "buddy", "speaking.pid");
@@ -17,7 +27,7 @@ export function captionPositionPath(stateDir: string): string {
 /** Stops whatever buddy is saying right now, from any process. Returns whether something was speaking. */
 export function stopSpeaking(
 	stateDir: string,
-	kill: (pid: number) => void = (pid) => process.kill(pid, "SIGTERM"),
+	kill: (pid: number) => void = (pid) => process.kill(pid, STOP_SPEAKING_SIGNAL),
 ): boolean {
 	const path = speakingPidPath(stateDir);
 	let pid: number;
@@ -82,11 +92,55 @@ export async function elevenLabsVoices(
 	);
 }
 
+export interface SayVoice {
+	readonly name: string;
+	readonly locale: string;
+}
+
+/** `say -v ?` lines look like "Samantha            en_US    # Hello..."; names may contain spaces and parentheses. */
+export function parseSayVoices(listing: string): readonly SayVoice[] {
+	return listing.split("\n").flatMap((line) => {
+		const match = /^(.+?)\s+([a-z]{2,3}[_-][A-Za-z0-9]+)\s+#/.exec(line);
+		const name = match?.[1]?.trim();
+		return name && match?.[2] ? [{ name, locale: match[2].replace("_", "-") }] : [];
+	});
+}
+
+let sayVoices: Promise<readonly SayVoice[]> | undefined;
+
+/** The Mac's voices, listed once per process: `say -v ?` takes a noticeable moment. */
+export function systemVoices(): Promise<readonly SayVoice[]> {
+	sayVoices ??= execFileAsync("say", ["-v", "?"]).then(
+		({ stdout }) => parseSayVoices(stdout),
+		() => [],
+	);
+	return sayVoices;
+}
+
+/**
+ * The Mac voice to use. A pinned voice always wins; otherwise the system voice, unless the answer is in another
+ * language than the Mac's, where a voice of that language is used so the words are not read with the wrong sounds.
+ */
+export function macVoiceFor(
+	pinned: string,
+	language: string | undefined,
+	voices: readonly SayVoice[],
+	system: string = systemLocale(),
+): string | undefined {
+	if (pinned) return pinned;
+	const wanted = uiLanguageOf(language) ?? (language ?? "").toLowerCase().split(/[-_]/)[0];
+	if (!wanted || wanted === (system.toLowerCase().split(/[-_]/)[0] ?? "")) return undefined;
+	const exact = voices.find((voice) => voice.locale.toLowerCase() === (language ?? "").toLowerCase());
+	return (exact ?? voices.find((voice) => voice.locale.toLowerCase().startsWith(`${wanted}-`)))?.name;
+}
+
 export interface SpeakOptions {
 	readonly stateDir: string;
 	readonly settings: BuddySettings;
 	readonly hudBinary?: string | undefined;
 	readonly onVoiceError?: (message: string) => void;
+	/** The language of `text` (a locale such as ko-KR), when known. */
+	readonly language?: string | undefined;
 }
 
 function waitForExit(child: ChildProcess): Promise<void> {
@@ -123,7 +177,7 @@ export async function speak(text: string, options: SpeakOptions): Promise<"finis
 		player?.kill("SIGTERM");
 		resolveStop();
 	};
-	process.once("SIGTERM", stop);
+	process.on(STOP_SPEAKING_SIGNAL, stop);
 
 	let caption: ChildProcess | undefined;
 	if (settings.captions && options.hudBinary !== undefined && existsSync(options.hudBinary)) {
@@ -162,14 +216,14 @@ export async function speak(text: string, options: SpeakOptions): Promise<"finis
 					options.onVoiceError?.(`${error instanceof Error ? error.message : String(error)} Using the Mac voice.`);
 				}
 			}
-			player = spawn("say", [...(settings.systemVoice ? ["-v", settings.systemVoice] : []), text], {
-				stdio: "ignore",
-			});
+			const voice = macVoiceFor(settings.systemVoice, options.language, await systemVoices());
+			if (stopped) return;
+			player = spawn("say", [...(voice ? ["-v", voice] : []), text], { stdio: "ignore" });
 			await waitForExit(player);
 		})();
 		await Promise.race([voiced, stopRequested]);
 	} finally {
-		process.removeListener("SIGTERM", stop);
+		process.removeListener(STOP_SPEAKING_SIGNAL, stop);
 		player?.kill("SIGTERM");
 		caption?.stdin?.end();
 		if (caption !== undefined) await waitForExit(caption);

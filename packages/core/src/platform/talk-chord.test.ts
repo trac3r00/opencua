@@ -44,3 +44,32 @@ describe("talk chord #given Control+Option push-to-talk readings", () => {
 		]);
 	});
 });
+
+describe("talk chord early start #given the press is sampled", () => {
+	function events(sequence: readonly number[]): string[] {
+		const seen: string[] = [];
+		let index = 0;
+		const detector = new StopChordDetector({
+			readFlags: () => sequence[index++] ?? 0,
+			mask: TALK_CHORD_MASK,
+			requiredSamples: 3,
+			onEngage: () => seen.push("engage"),
+			onAbandon: () => seen.push("abandon"),
+			onChord: () => seen.push("chord"),
+			onRelease: () => seen.push("release"),
+		});
+		for (let sample = 0; sample < sequence.length; sample += 1) detector.sample();
+		return seen;
+	}
+	it("#when the keys go down #then work starts on the first sample, before the press is confirmed", () => {
+		expect(events([TALK, TALK, TALK, TALK, 0])).toEqual(["engage", "chord", "release"]);
+	});
+
+	it("#when they are let go before the press is confirmed #then the early start is abandoned, never released", () => {
+		expect(events([TALK, TALK, 0, TALK, 0, 0])).toEqual(["engage", "abandon", "engage", "abandon"]);
+	});
+
+	it("#when nothing is held #then nothing fires", () => {
+		expect(events([0, 0, 0])).toEqual([]);
+	});
+});

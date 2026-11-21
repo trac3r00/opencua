@@ -89,20 +89,27 @@ function describeMarks(marks: readonly Mark[], geometry: ImageGeometry): string[
 
 const POINT_TAG = /\[POINT:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*(?::\s*([^\]]*))?\]/g;
 
-export function askPrompt(
-	question: string,
-	screenshotPath: string,
-	geometry: ImageGeometry,
-	marks: readonly Mark[] = [],
-): string {
+export interface AskContext {
+	/** The screenshot file an agent CLI opens; undefined when the image is attached to the request. */
+	readonly screenshotPath?: string | undefined;
+	readonly marks?: readonly Mark[] | undefined;
+	/** The language they spoke, such as Korean; the answer comes back in it. */
+	readonly language?: string | undefined;
+}
+
+export function askPrompt(question: string, geometry: ImageGeometry, context: AskContext = {}): string {
+	const size = `${geometry.imageWidth}x${geometry.imageHeight} pixels`;
 	return [
 		"You are opencua buddy, a friendly helper who lives on this person's Mac and sees their screen.",
-		`Their screen is in the image file ${screenshotPath} (${geometry.imageWidth}x${geometry.imageHeight} pixels). Read it first.`,
+		context.screenshotPath === undefined
+			? `Their screen is the attached image (${size}). Look at it first.`
+			: `Their screen is in the image file ${context.screenshotPath} (${size}). Read it first.`,
 		"Answer their question about what is on screen out loud: short, warm, plain sentences that sound right spoken,",
 		"no markdown, no lists. When the answer involves a place on screen (a button, a menu, a field, a word),",
 		"point at it by adding a tag [POINT:x,y:label] where x,y are the pixel coordinates of its center in the image",
 		"and label is 1 to 3 words. Use at most 3 tags, in the order they should click. Never guess a point you cannot see.",
-		...describeMarks(marks, geometry),
+		...describeMarks(context.marks ?? [], geometry),
+		...(context.language === undefined ? [] : [`They spoke ${context.language}; answer in ${context.language}.`]),
 		"",
 		`Their question: ${question}`,
 	].join("\n");
@@ -124,12 +131,6 @@ export function parseBuddyReply(text: string, geometry: ImageGeometry): BuddyRep
 		.replace(/[ \t]{2,}/g, " ")
 		.trim();
 	return { speech, points };
-}
-
-export function pngSize(data: Uint8Array): { readonly width: number; readonly height: number } {
-	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-	if (data.byteLength < 24 || view.getUint32(12) !== 0x49484452) throw new Error("Not a PNG image.");
-	return { width: view.getUint32(16), height: view.getUint32(20) };
 }
 
 export type Utterance =
@@ -160,16 +161,24 @@ export interface BuddyJob {
 	readonly finishedAt?: string;
 	readonly pid?: number;
 	readonly summary?: string;
+	/** The locale the request was spoken in, such as ko-KR. */
+	readonly language?: string;
 }
 
 export function jobsRoot(stateDir: string): string {
 	return join(stateDir, "buddy", "jobs");
 }
 
-export function createJob(root: string, task: string, now: Date = new Date()): BuddyJob {
+export function createJob(root: string, task: string, now: Date = new Date(), language?: string): BuddyJob {
 	const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
 	const id = `${stamp}-${randomBytes(3).toString("hex")}`;
-	const job: BuddyJob = { id, task, status: "running", createdAt: now.toISOString() };
+	const job: BuddyJob = {
+		id,
+		task,
+		status: "running",
+		createdAt: now.toISOString(),
+		...(language ? { language } : {}),
+	};
 	mkdirSync(join(root, id, "output"), { recursive: true, mode: 0o700 });
 	writeFileSync(join(root, id, "task.md"), `${task}\n`);
 	writeJob(root, job);
@@ -209,14 +218,23 @@ export function listJobs(root: string, isAlive: (pid: number) => boolean): reado
 	return jobs;
 }
 
-export function agentJobPrompt(task: string): string {
+export interface JobContext {
+	/** The job runs in a connected app on its own computer, not in a folder on this Mac. */
+	readonly remote?: boolean;
+	readonly language?: string | undefined;
+}
+
+export function agentJobPrompt(task: string, context: JobContext = {}): string {
 	return [
 		"You are a helper opencua buddy started on this person's Mac to do one piece of work in the background.",
 		"They asked by voice, so read their request for what they actually want, then do it.",
-		"Your working folder is this job's home: put deliverables in output/ and nothing else there.",
+		context.remote === true
+			? "You work on your own computer: say where each deliverable is, or include it in your reply."
+			: "Your working folder is this job's home: put deliverables in output/ and nothing else there.",
 		"Check what you make before you say it is done. Never invent facts, files or results.",
 		"Do not send messages, post, delete their data or spend money; if the work needs that, stop and say so.",
 		"Finish with a short, warm message that leads with the result, as it will be read in a notification.",
+		...(context.language === undefined ? [] : [`They spoke ${context.language}; reply in ${context.language}.`]),
 		"",
 		`Their request: ${task}`,
 	].join("\n");

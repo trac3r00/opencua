@@ -25,6 +25,10 @@ export interface StopChordDetectorOptions {
 	readonly onChord: () => void;
 	/** Called once when a chord that fired is let go. */
 	readonly onRelease?: () => void;
+	/** Called on the first sample of a press, before it is confirmed, so work can start without waiting. */
+	readonly onEngage?: () => void;
+	/** Called when an engaged press is let go before it was confirmed. */
+	readonly onAbandon?: () => void;
 	readonly onError?: (error: unknown) => void;
 	/** Modifiers that must all be held (default Control+Option+Command). */
 	readonly mask?: number;
@@ -54,6 +58,8 @@ export class StopChordDetector {
 	private readonly readFlags: () => number;
 	private readonly onChord: () => void;
 	private readonly onRelease: (() => void) | undefined;
+	private readonly onEngage: (() => void) | undefined;
+	private readonly onAbandon: (() => void) | undefined;
 	private readonly onError: (error: unknown) => void;
 	private readonly mask: number;
 	private readonly forbiddenMask: number;
@@ -69,6 +75,8 @@ export class StopChordDetector {
 		this.readFlags = options.readFlags;
 		this.onChord = options.onChord;
 		this.onRelease = options.onRelease;
+		this.onEngage = options.onEngage;
+		this.onAbandon = options.onAbandon;
 		this.mask = options.mask ?? STOP_CHORD_MASK;
 		this.forbiddenMask = options.forbiddenMask ?? FLAG_SHIFT;
 		this.onError = options.onError ?? defaultOnError;
@@ -103,12 +111,15 @@ export class StopChordDetector {
 		const held = (flags & this.mask) === this.mask && (flags & this.forbiddenMask) === 0;
 		if (!held) {
 			const fired = !this.armed;
+			const engaged = this.heldSamples > 0;
 			this.heldSamples = 0;
 			this.armed = true;
 			if (fired) this.onRelease?.();
+			else if (engaged) this.onAbandon?.();
 			return;
 		}
 		this.heldSamples += 1;
+		if (this.armed && this.heldSamples === 1) this.onEngage?.();
 		if (this.armed && this.heldSamples >= this.requiredSamples) {
 			this.armed = false;
 			this.onChord();

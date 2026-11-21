@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { buddyAgentCommand } from "./buddy-commands.js";
 import { DEFAULT_BUDDY_SETTINGS } from "./buddy-settings.js";
 import { askPrompt, parseHudOutput, parseMarkOption } from "./buddy.js";
-import { createJob, listJobs, parseBuddyReply, pngSize, readJob, routeUtterance, writeJob } from "./buddy.js";
+import { agentJobPrompt, createJob, listJobs, parseBuddyReply, readJob, routeUtterance, writeJob } from "./buddy.js";
 import { needsHelperPermissions } from "./helper-route.js";
 
 const RETINA = { imageWidth: 2880, imageHeight: 1800, screenWidth: 1440, screenHeight: 900 };
@@ -47,11 +47,12 @@ describe("lasso marks #given what the person drew", () => {
 	});
 
 	it("#when marks reach the prompt #then they are given in screenshot pixels, the space the model reads", () => {
-		const prompt = askPrompt("what is this?", "/tmp/s.png", RETINA, [
-			{ kind: "lasso", x: 100, y: 50, width: 40, height: 20 },
-		]);
+		const prompt = askPrompt("what is this?", RETINA, {
+			screenshotPath: "/tmp/s.png",
+			marks: [{ kind: "lasso", x: 100, y: 50, width: 40, height: 20 }],
+		});
 		expect(prompt).toContain("pixels x 200 to 280, y 100 to 140");
-		expect(askPrompt("what is this?", "/tmp/s.png", RETINA)).not.toContain("pixels x");
+		expect(askPrompt("what is this?", RETINA, { screenshotPath: "/tmp/s.png" })).not.toContain("pixels x");
 	});
 
 	it("#when --mark is parsed #then it needs four numbers and a positive size", () => {
@@ -85,14 +86,23 @@ describe("routeUtterance #given a transcript", () => {
 	});
 });
 
-describe("pngSize #given image bytes", () => {
-	it("#when it is a PNG #then the IHDR width and height are read", () => {
-		const header = Buffer.from("89504e470d0a1a0a0000000d4948445200000b4000000708", "hex");
-		expect(pngSize(header)).toEqual({ width: 2880, height: 1800 });
+describe("prompts #given where the screen image is and what language was spoken", () => {
+	it("#when an agent CLI answers #then it is pointed at the file; an app gets the image attached", () => {
+		expect(askPrompt("hi", RETINA, { screenshotPath: "/tmp/s.jpg" })).toContain("image file /tmp/s.jpg (2880x1800");
+		const attached = askPrompt("hi", RETINA);
+		expect(attached).toContain("attached image (2880x1800 pixels)");
+		expect(attached).not.toContain("image file");
 	});
 
-	it("#when it is not a PNG #then it throws", () => {
-		expect(() => pngSize(Buffer.alloc(30))).toThrow("Not a PNG");
+	it("#when the question was spoken in Korean #then the answer is asked for in Korean, and nothing is said otherwise", () => {
+		expect(askPrompt("이게 뭐야?", RETINA, { language: "Korean" })).toContain("They spoke Korean; answer in Korean.");
+		expect(askPrompt("what?", RETINA)).not.toContain("They spoke");
+		expect(agentJobPrompt("정리해줘", { language: "Korean" })).toContain("reply in Korean");
+	});
+
+	it("#when a job runs in a connected app #then it is not told to use a folder on this Mac", () => {
+		expect(agentJobPrompt("x")).toContain("output/");
+		expect(agentJobPrompt("x", { remote: true })).not.toContain("output/");
 	});
 });
 
@@ -118,12 +128,28 @@ describe("agent jobs #given a jobs folder", () => {
 		expect(readJob(root, first.id).summary).toBe("made it");
 		expect(() => readJob(root, "../escape")).toThrow("Invalid job id");
 	});
+
+	it("#when a job is asked for in Korean #then the language is kept for the agent that runs it", () => {
+		const root = mkdtempSync(join(tmpdir(), "buddy-jobs-"));
+		roots.push(root);
+		const job = createJob(root, "정리해줘", new Date("2026-11-20T03:00:00Z"), "ko-KR");
+		expect(readJob(root, job.id).language).toBe("ko-KR");
+		expect(readJob(root, createJob(root, "plain").id).language).toBeUndefined();
+	});
 });
 
 describe("buddy helper routing #given the buddy subcommands", () => {
 	it("#when routed #then only ask runs in the permission helper, so listen and agent jobs never descend from it", () => {
 		expect(needsHelperPermissions("buddy ask")).toBe(true);
-		for (const path of ["buddy listen", "buddy agent", "buddy job-run", "buddy jobs"]) {
+		for (const path of [
+			"buddy listen",
+			"buddy agent",
+			"buddy job-run",
+			"buddy jobs",
+			"buddy connect",
+			"buddy apps",
+			"buddy disconnect",
+		]) {
 			expect(needsHelperPermissions(path)).toBe(false);
 		}
 	});

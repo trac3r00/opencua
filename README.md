@@ -287,9 +287,25 @@ opencua buddy ask --lasso "what does this chart mean?"   # circle it, or Shift-d
 opencua buddy agent "compare three standing desks under $400 and make a one-page PDF"
 opencua buddy jobs                   # background agents, newest first
 opencua buddy stop                   # stop what buddy is saying
-opencua buddy settings               # agent, model, voice (ElevenLabs or Mac), captions, sounds, language
+opencua buddy settings               # languages, agent or connected app, model, voice, captions, sounds
 opencua buddy agents                 # agent CLIs found on this Mac
+opencua buddy apps                   # apps buddy can answer through, and which are connected
+echo "$TOKEN" | opencua buddy connect hermes --use   # connect an app once; --url for Dots and Bop
+opencua buddy disconnect hermes      # forget the app and delete its token
 ```
+
+**Languages.** Dictation is automatic by default: `voice-input` listens in the Mac's preferred languages (up to
+three). Pick up to three in settings (or `buddy listen --locale ko-KR,en-US`) to talk in any of them; every language
+hears the same audio, the best-heard transcript wins, and buddy answers in that language (its own lines too, and the
+Mac voice switches to one for that language unless a voice is pinned). The settings page shows in English, 한국어,
+日本語, 中文, Español, Français or Deutsch, or follows the browser's language.
+
+**Connected apps.** Instead of a local agent CLI, buddy can ask an app over the OpenAI Chat Completions protocol:
+Muse (Meta Model API), Grok (xAI API; Grok Bot's app chats have no public API), OpenClaw (gateway with
+`chatCompletions` enabled), Hermes Agent (`API_SERVER_ENABLED=true`), and Dots or Bop through an OpenAI-compatible
+address you enter (OpenAI has no public Dots API yet). Connect each once in settings or with `buddy connect`: the
+token is checked against the app, kept in the Keychain (`dev.opencua.buddy.app.<id>`), and never asked for again.
+The screenshot goes to apps that read images inline; jobs run on the app's side.
 
 The OpenCUA menu bar item has **Stop buddy talking** and **Buddy settings…**. Holding Control+Option while buddy
 talks also stops it, and its caption bubble has a stop button; drag the bubble anywhere and it opens there next time.
@@ -301,7 +317,11 @@ points at each place the answer names; the screenshot is deleted once the answer
 the marks go to the question with it (`--mark x,y,width,height` passes one by hand). Saying "agent ..." (or
 "에이전트 ...") starts a background agent in its own folder (`~/.opencua/buddy/jobs/<id>/output`) with a sound and a
 notification when it finishes. Speech is recognized on the device by `voice-input`, which asks for Microphone and
-Speech Recognition once in its own name. Settings live in `~/.opencua/buddy/settings.json`; `OPENCUA_BUDDY_AGENT` and `OPENCUA_BUDDY_MODEL` override the agent
+Speech Recognition once in its own name; `buddy listen` keeps it warm between questions and opens the microphone on
+the first moment the keys are down (the press is still confirmed after ~150 ms, so quick Control+Option shortcuts
+are dropped), so words said right away are heard. Each question's screenshot comes from the opencua daemon, which
+`buddy listen` starts unless one is running and stops when it quits; with no daemon answering, the question runs as
+a `buddy ask` inside the helper instead (about a second slower). Settings live in `~/.opencua/buddy/settings.json`; `OPENCUA_BUDDY_AGENT` and `OPENCUA_BUDDY_MODEL` override the agent
 and model for one run, and `OPENCUA_BUDDY_SOUNDS=off` silences the sounds.
 The opencua-mcp helper needs Screen Recording for `buddy ask`.
 
