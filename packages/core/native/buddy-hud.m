@@ -6,6 +6,8 @@
 //                        when stdin closes or on SIGTERM.
 //   buddy-hud --lasso    ask for one circle or box, ending on mouse-up; Esc
 //   cancels.
+//   buddy-hud --status   a pill at the bottom of the screen saying what buddy
+//                        and its agents are doing (see run_status).
 //   --replay <json>      draw the given strokes ([[[x,y],...], ...], screen
 //   points from the top left) instead of
 //                        reading the mouse; for checks that must not touch the
@@ -367,9 +369,314 @@ static int run_caption(NSString *positionFile, NSString *snapshot) {
   return 0;
 }
 
+// --status: a small pill at the bottom of the display the person is working on
+// (the one under the pointer) that says what buddy and its agents are doing.
+// Each stdin line is one JSON update:
+//   {"state":"listening|hearing|thinking|working|speaking|done|error|idle",
+//    "text":"...", "detail":"...", "ttl":2.5}
+// "idle" hides the pill; ttl hides it after that many seconds unless another
+// update arrives. The pill never takes focus, lets clicks through, and is left
+// out of screen captures, so it never lands in the screenshot buddy asks about.
+// stdin closing ends it.
+static const CGFloat kStatusHeight = 40;
+static const CGFloat kStatusDetailHeight = 56;
+static const CGFloat kStatusMaxWidth = 620;
+static const CGFloat kStatusBottomGap = 22;
+
+@interface StatusView : NSView
+@property(nonatomic, copy) NSString *state;
+@property(nonatomic, copy) NSString *text;
+@property(nonatomic, copy) NSString *detail;
+@property(nonatomic) CGFloat phase;
+@end
+
+static NSColor *status_color(NSString *state) {
+  if ([state isEqualToString:@"listening"] ||
+      [state isEqualToString:@"hearing"])
+    return [NSColor colorWithRed:1.0 green:0.3 blue:0.25 alpha:1];
+  if ([state isEqualToString:@"thinking"])
+    return [NSColor colorWithRed:0.35 green:0.62 blue:1.0 alpha:1];
+  if ([state isEqualToString:@"working"])
+    return [NSColor colorWithRed:1.0 green:0.72 blue:0.2 alpha:1];
+  if ([state isEqualToString:@"speaking"])
+    return [NSColor colorWithRed:0.72 green:0.5 blue:1.0 alpha:1];
+  if ([state isEqualToString:@"done"])
+    return [NSColor colorWithRed:0.3 green:0.85 blue:0.45 alpha:1];
+  if ([state isEqualToString:@"error"])
+    return [NSColor colorWithRed:1.0 green:0.55 blue:0.2 alpha:1];
+  return [NSColor colorWithWhite:0.7 alpha:1];
+}
+
+static BOOL status_pulses(NSString *state) {
+  return [state isEqualToString:@"listening"] ||
+         [state isEqualToString:@"hearing"] ||
+         [state isEqualToString:@"thinking"] ||
+         [state isEqualToString:@"working"] ||
+         [state isEqualToString:@"speaking"];
+}
+
+static NSDictionary *status_title_attributes(void) {
+  NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
+  style.lineBreakMode = NSLineBreakByTruncatingTail;
+  return @{
+    NSFontAttributeName : [NSFont systemFontOfSize:14
+                                            weight:NSFontWeightSemibold],
+    NSForegroundColorAttributeName : NSColor.whiteColor,
+    NSParagraphStyleAttributeName : style
+  };
+}
+
+static NSDictionary *status_detail_attributes(void) {
+  NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
+  style.lineBreakMode = NSLineBreakByTruncatingTail;
+  return @{
+    NSFontAttributeName : [NSFont systemFontOfSize:12
+                                            weight:NSFontWeightRegular],
+    NSForegroundColorAttributeName : [NSColor colorWithWhite:0.78 alpha:1],
+    NSParagraphStyleAttributeName : style
+  };
+}
+
+/** The pill's size for its text: as wide as the longer line, within bounds. */
+static NSSize status_size(NSString *text, NSString *detail) {
+  CGFloat width = [text sizeWithAttributes:status_title_attributes()].width;
+  if (detail.length > 0)
+    width = MAX(width,
+                [detail sizeWithAttributes:status_detail_attributes()].width);
+  return NSMakeSize(MIN(MAX(width + 58, 180), kStatusMaxWidth),
+                    detail.length > 0 ? kStatusDetailHeight : kStatusHeight);
+}
+
+@implementation StatusView
+- (BOOL)isFlipped {
+  return YES;
+}
+- (void)drawRect:(NSRect)dirty {
+  (void)dirty;
+  NSRect bounds = self.bounds;
+  NSBezierPath *background =
+      [NSBezierPath bezierPathWithRoundedRect:bounds
+                                      xRadius:MIN(20, bounds.size.height / 2)
+                                      yRadius:MIN(20, bounds.size.height / 2)];
+  [[NSColor colorWithWhite:0.08 alpha:0.88] setFill];
+  [background fill];
+  [[NSColor colorWithWhite:1 alpha:0.12] setStroke];
+  background.lineWidth = 1;
+  [background stroke];
+  NSColor *color = status_color(self.state);
+  CGFloat pulse =
+      status_pulses(self.state) ? 0.55 + 0.45 * fabs(sin(self.phase)) : 1;
+  CGFloat dot = 10;
+  NSPoint center = NSMakePoint(20, 20);
+  [[color colorWithAlphaComponent:0.28 * pulse] setFill];
+  [[NSBezierPath
+      bezierPathWithOvalInRect:NSMakeRect(center.x - dot, center.y - dot,
+                                          dot * 2, dot * 2)] fill];
+  [[color colorWithAlphaComponent:pulse] setFill];
+  [[NSBezierPath
+      bezierPathWithOvalInRect:NSMakeRect(center.x - dot / 2,
+                                          center.y - dot / 2, dot, dot)] fill];
+  CGFloat textWidth = bounds.size.width - 52;
+  [self.text drawInRect:NSMakeRect(38, 11, textWidth, 20)
+         withAttributes:status_title_attributes()];
+  if (self.detail.length > 0)
+    [self.detail drawInRect:NSMakeRect(38, 31, textWidth, 18)
+             withAttributes:status_detail_attributes()];
+}
+@end
+
+@interface StatusController : NSObject
+@property(nonatomic, strong) NSPanel *panel;
+@property(nonatomic, strong) StatusView *view;
+@property(nonatomic) NSUInteger generation;
+@property(nonatomic) BOOL shown;
+@end
+
+/** The display the person is working on: the one under the pointer. */
+static NSScreen *status_screen(void) {
+  NSPoint pointer = NSEvent.mouseLocation;
+  for (NSScreen *screen in NSScreen.screens) {
+    if (NSPointInRect(pointer, screen.frame))
+      return screen;
+  }
+  return NSScreen.mainScreen;
+}
+
+@implementation StatusController
+- (void)tick {
+  if (!self.shown || !status_pulses(self.view.state))
+    return;
+  self.view.phase += 0.12;
+  [self.view setNeedsDisplay:YES];
+}
+- (void)hide {
+  if (!self.shown)
+    return;
+  self.shown = NO;
+  [NSAnimationContext
+      runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.25;
+        self.panel.animator.alphaValue = 0;
+      }
+      completionHandler:^{
+        if (!self.shown)
+          [self.panel orderOut:nil];
+      }];
+}
+- (void)apply:(NSDictionary *)update {
+  NSString *state = [update[@"state"] isKindOfClass:NSString.class]
+                        ? update[@"state"]
+                        : @"idle";
+  self.generation += 1;
+  if ([state isEqualToString:@"idle"]) {
+    [self hide];
+    return;
+  }
+  NSString *text =
+      [update[@"text"] isKindOfClass:NSString.class] ? update[@"text"] : @"";
+  NSString *detail = [update[@"detail"] isKindOfClass:NSString.class]
+                         ? update[@"detail"]
+                         : @"";
+  self.view.state = state;
+  self.view.text = text;
+  self.view.detail = detail;
+  NSSize size = status_size(text, detail);
+  // A pill that is already up stays on its display; a new one appears where
+  // the person is.
+  NSScreen *screen =
+      self.shown ? (self.panel.screen ?: status_screen()) : status_screen();
+  NSRect visible = screen.visibleFrame;
+  [self.panel setFrame:NSMakeRect(NSMidX(visible) - size.width / 2,
+                                  NSMinY(visible) + kStatusBottomGap,
+                                  size.width, size.height)
+               display:YES];
+  [self.view setNeedsDisplay:YES];
+  if (!self.shown) {
+    self.shown = YES;
+    self.panel.alphaValue = 0;
+    [self.panel orderFrontRegardless];
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+      context.duration = 0.15;
+      self.panel.animator.alphaValue = 1;
+    }];
+  }
+  double ttl = [update[@"ttl"] isKindOfClass:NSNumber.class]
+                   ? [update[@"ttl"] doubleValue]
+                   : 0;
+  if (ttl > 0) {
+    NSUInteger generation = self.generation;
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(ttl * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+          if (self.generation == generation)
+            [self hide];
+        });
+  }
+}
+@end
+
+static int run_status(NSString *snapshot, NSString *state, NSString *text,
+                      NSString *detail) {
+  NSApplication *app = NSApplication.sharedApplication;
+  app.activationPolicy = NSApplicationActivationPolicyAccessory;
+  StatusView *view =
+      [[StatusView alloc] initWithFrame:NSMakeRect(0, 0, 200, kStatusHeight)];
+  if (snapshot != nil) {
+    view.state = state ?: @"thinking";
+    view.text = text ?: @"";
+    view.detail = detail ?: @"";
+    view.phase = M_PI / 2;
+    NSSize size = status_size(view.text, view.detail);
+    view.frame = NSMakeRect(0, 0, size.width, size.height);
+    NSBitmapImageRep *image =
+        [view bitmapImageRepForCachingDisplayInRect:view.bounds];
+    [view cacheDisplayInRect:view.bounds toBitmapImageRep:image];
+    BOOL written = [[image representationUsingType:NSBitmapImageFileTypePNG
+                                        properties:@{}] writeToFile:snapshot
+                                                         atomically:YES];
+    printf("{\"snapshot\":%s,\"width\":%.0f,\"height\":%.0f}\n",
+           written ? "true" : "false", view.bounds.size.width,
+           view.bounds.size.height);
+    return written ? 0 : 1;
+  }
+  NSPanel *panel =
+      [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 200, kStatusHeight)
+                                 styleMask:NSWindowStyleMaskBorderless |
+                                           NSWindowStyleMaskNonactivatingPanel
+                                   backing:NSBackingStoreBuffered
+                                     defer:NO];
+  panel.level = NSStatusWindowLevel;
+  panel.opaque = NO;
+  panel.backgroundColor = NSColor.clearColor;
+  panel.hasShadow = YES;
+  panel.ignoresMouseEvents = YES;
+  panel.sharingType = NSWindowSharingNone;
+  panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+                             NSWindowCollectionBehaviorFullScreenAuxiliary |
+                             NSWindowCollectionBehaviorStationary |
+                             NSWindowCollectionBehaviorIgnoresCycle;
+  view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  panel.contentView = view;
+  StatusController *controller = [StatusController new];
+  controller.panel = panel;
+  controller.view = view;
+  [NSTimer scheduledTimerWithTimeInterval:1.0 / 30
+                                  repeats:YES
+                                    block:^(NSTimer *timer) {
+                                      (void)timer;
+                                      [controller tick];
+                                    }];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    NSFileHandle *input = NSFileHandle.fileHandleWithStandardInput;
+    NSMutableData *pending = [NSMutableData data];
+    for (;;) {
+      NSData *chunk = [input availableData];
+      if (chunk.length == 0)
+        break;
+      [pending appendData:chunk];
+      for (;;) {
+        NSRange newline = [pending rangeOfData:[NSData dataWithBytes:"\n"
+                                                              length:1]
+                                       options:0
+                                         range:NSMakeRange(0, pending.length)];
+        if (newline.location == NSNotFound)
+          break;
+        NSData *line =
+            [pending subdataWithRange:NSMakeRange(0, newline.location)];
+        [pending replaceBytesInRange:NSMakeRange(0, newline.location + 1)
+                           withBytes:NULL
+                              length:0];
+        id update = [NSJSONSerialization JSONObjectWithData:line
+                                                    options:0
+                                                      error:nil];
+        if ([update isKindOfClass:NSDictionary.class])
+          dispatch_async(dispatch_get_main_queue(), ^{
+            [controller apply:update];
+          });
+      }
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      exit(0);
+    });
+  });
+  signal(SIGTERM, SIG_IGN);
+  dispatch_source_t term = dispatch_source_create(
+      DISPATCH_SOURCE_TYPE_SIGNAL, SIGTERM, 0, dispatch_get_main_queue());
+  dispatch_source_set_event_handler(term, ^{
+    exit(0);
+  });
+  dispatch_resume(term);
+  [app run];
+  return 0;
+}
+
 int main(int argc, char **argv) {
   @autoreleasepool {
     NSString *replay = nil;
+    BOOL status = NO;
+    NSString *statusState = nil;
+    NSString *statusText = nil;
+    NSString *statusDetail = nil;
     NSString *positionFile = nil;
     BOOL caption = NO;
     NSString *snapshot = nil;
@@ -386,15 +693,25 @@ int main(int argc, char **argv) {
         snapshot = @(argv[++index]);
       else if ([argument isEqualToString:@"--caption"])
         caption = YES;
+      else if ([argument isEqualToString:@"--status"])
+        status = YES;
+      else if ([argument isEqualToString:@"--state"] && index + 1 < argc)
+        statusState = @(argv[++index]);
+      else if ([argument isEqualToString:@"--text"] && index + 1 < argc)
+        statusText = @(argv[++index]);
+      else if ([argument isEqualToString:@"--detail"] && index + 1 < argc)
+        statusDetail = @(argv[++index]);
       else if ([argument isEqualToString:@"--position-file"] &&
                index + 1 < argc)
         positionFile = @(argv[++index]);
       else {
-        fprintf(stderr,
-                "usage: buddy-hud --listen | --lasso [--replay <json>]\n");
+        fprintf(stderr, "usage: buddy-hud --listen | --lasso [--replay "
+                        "<json>] | --caption | --status\n");
         return 64;
       }
     }
+    if (status)
+      return run_status(snapshot, statusState, statusText, statusDetail);
     if (caption)
       return run_caption(positionFile, snapshot);
     if (listen == gLassoMode) {
