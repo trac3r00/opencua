@@ -5,7 +5,7 @@
  */
 export type ToolsetProfile = "full" | "lean";
 
-import type { DockSource, HostCapabilities, HotFrameSource } from "@opencua/core";
+import type { DisplaySpaceEntry, DockSource, HostCapabilities, HotFrameSource } from "@opencua/core";
 import type { OsascriptRunner } from "./applescript-session.js";
 import type { ExtrasSource } from "./extras-session.js";
 import type { RulesProfile } from "./rules-profile.js";
@@ -29,6 +29,8 @@ export interface McpServerOptions {
 	readonly extrasTtlMs?: number;
 	/** Speculative frame refresher to share; tests inject a controllable source. */
 	readonly hotFramesSource?: HotFrameSource;
+	/** Online displays with their shown Space; defaults to the WindowServer's on the native macOS host. */
+	readonly displayProbe?: () => readonly DisplaySpaceEntry[] | undefined;
 	/** Per-app rules; defaults to the rules profile file for the native host and to none otherwise. */
 	readonly rulesProfile?: () => RulesProfile;
 }

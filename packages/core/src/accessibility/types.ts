@@ -31,6 +31,11 @@ export interface DisplayInventoryEntry extends DisplayInfo {
 	readonly y: number;
 }
 
+/** An online display and the Space it shows now, when the WindowServer says. */
+export interface DisplaySpaceEntry extends DisplayInventoryEntry {
+	readonly activeSpaceId?: number;
+}
+
 export interface AxTreeChangeSummary {
 	added: number;
 	removed: number;
@@ -89,6 +94,7 @@ export interface AppState {
 	screenshotWidth: number;
 	screenshotHeight: number;
 	screenshotMimeType?: "image/png" | "image/jpeg";
+	/** The display the observed window is on (most of its area); the main display when there is no window on one. */
 	display: DisplayInfo;
 	/** Every online display in global logical coordinates; undefined if inventory is unavailable. */
 	displays?: readonly DisplayInventoryEntry[];
@@ -140,6 +146,12 @@ export interface AppState {
 	windowDisplayId?: number;
 	/** Displays intersecting the observed window, ordered by intersection area descending. */
 	windowDisplayIds?: readonly number[];
+	/** The window's two largest display overlaps are within 10% of each other, so `display` is a near tie. */
+	windowDisplayAmbiguous?: boolean;
+	/** The Spaces the observed window is on, and whether a display shows one of them now. */
+	space?: { readonly ids: readonly number[]; readonly current: boolean };
+	/** The WindowServer could not place the observed window on a Space (unreadable, or a window on every Space). */
+	spaceUnknown?: boolean;
 	/** WindowServer id of the window this observation was scoped to. */
 	windowId?: number;
 	/** Title of that window, when the window server reports one. */

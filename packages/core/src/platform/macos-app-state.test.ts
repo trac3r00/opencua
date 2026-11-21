@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
 type ExecFileCallback = (error: Error | null, stdout: string | Buffer, stderr: string) => void;
@@ -73,6 +73,7 @@ const { setRunningApplicationLookupForTesting } = await import("./app-list.js");
 const displayList = await import("./macos-ffi/display-list.js");
 const { MacOSHostComputer } = await import("./macos.js");
 const { setSystemPromptWindowSourceForTesting } = await import("./system-prompts.js");
+const { setWindowPlacementSourcesForTesting } = await import("./window-minimized.js");
 // The in-process WindowServer listings, current-Space and all-Spaces, are pinned away so the get-windows fixtures
 // above stay authoritative; background observation then keeps that proven current-Space inventory.
 setOpenWindowsSourceForTesting(
@@ -275,6 +276,56 @@ describe("#given one observation #when the driver resolves its target window and
 				screenshotMock.getMainDisplayNativePixelSize.mockImplementation(originalNative);
 			}
 		}
+	});
+});
+
+describe("#given a main and a secondary display #when the observed window is on one of them #then the observation names that window's display and Space", () => {
+	const MAIN = { id: 1, isMain: true, x: 0, y: 0, width: 1728, height: 1117, scaleFactor: 2 };
+	const SECONDARY = { id: 2, isMain: false, x: 1728, y: 0, width: 2560, height: 1440, scaleFactor: 1 };
+
+	async function observeWindowAt(bounds: { x: number; y: number; width: number; height: number }) {
+		vi.spyOn(displayList, "onlineDisplayInfo").mockReturnValue([MAIN, SECONDARY]);
+		windowMock.openWindows.mockResolvedValue([
+			{ id: 99, title: "Documents", owner: { processId: TARGET_PID }, bounds },
+		]);
+		return await new MacOSHostComputer({ delivery: "background" }).getAppState(TARGET_PID, {
+			settleMs: 0,
+			includeScreenshot: false,
+		});
+	}
+
+	afterEach(() => setWindowPlacementSourcesForTesting());
+
+	it("describes the secondary display a window sits on, not the main one", async () => {
+		const state = await observeWindowAt({ x: 2000, y: 100, width: 1200, height: 800 });
+
+		expect(state.display).toEqual(SECONDARY);
+		expect(state.windowDisplayAmbiguous).toBeUndefined();
+	});
+
+	it("flags a window split about evenly across both displays as ambiguous", async () => {
+		const state = await observeWindowAt({ x: 1228, y: 100, width: 1000, height: 800 });
+
+		expect(state.windowDisplayIds).toEqual([1, 2]);
+		expect(state.windowDisplayAmbiguous).toBe(true);
+	});
+
+	it("says which Spaces the window is on and whether a display shows one of them", async () => {
+		setWindowPlacementSourcesForTesting({ placement: () => ({ spaceIds: [6, 9], onShownSpace: true }) });
+
+		const state = await observeWindowAt({ x: 2000, y: 100, width: 1200, height: 800 });
+
+		expect(state.space).toEqual({ ids: [6, 9], current: true });
+		expect(state.spaceUnknown).toBeUndefined();
+	});
+
+	it("says the Space is unknown when the WindowServer cannot place the window", async () => {
+		setWindowPlacementSourcesForTesting({ placement: () => undefined });
+
+		const state = await observeWindowAt({ x: 2000, y: 100, width: 1200, height: 800 });
+
+		expect(state.space).toBeUndefined();
+		expect(state.spaceUnknown).toBe(true);
 	});
 });
 

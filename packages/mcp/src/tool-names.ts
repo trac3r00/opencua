@@ -33,6 +33,7 @@ export const LEAN_TOOL_NAMES = [
 	"list_apps",
 	"open_app",
 	"list_windows",
+	"list_displays",
 	"get_app_state",
 	"find_elements",
 	"run_script",

@@ -129,8 +129,11 @@ Keep one controller for the desktop.
    Target pointer actions at the observed window and use coordinates in the exact
    coordinate space stated by that observation. Do not convert between screenshot
    pixels and global logical points by guesswork. `displays` reports display IDs,
-   global origins, sizes and scales; `windowDisplayId` names the greatest-overlap
-   display and `windowDisplayIds` lists every intersected display. Target the
+   global origins, sizes and scales; `display` and `windowDisplayId` name the
+   greatest-overlap display (`windowDisplayAmbiguous` marks a near tie) and
+   `windowDisplayIds` lists every intersected display. `space` says which Spaces the
+   window is on and whether one is shown; `list_displays` names each display's shown
+   Space and which display holds the cursor. Target the
    window where it already is; never move it to the main display to operate it.
    When you can describe the control you want instead of naming it, prefer one `click_target`
    call over observe-scan-click-verify: it observes, resolves the description, waits up to

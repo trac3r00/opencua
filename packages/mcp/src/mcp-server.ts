@@ -10,6 +10,8 @@ import {
 	UTM,
 	currentSystemPrompts,
 	listWindows,
+	onlineDisplaysWithSpaces,
+	personPointerPosition,
 	probeHostCapabilities,
 	readHidModifierFlags,
 	setSessionCursorName,
@@ -31,6 +33,7 @@ import { AppleScriptGuardSession } from "./applescript-session.js";
 import { registerCapabilityTools, registerSkillResources } from "./capability-tools.js";
 import { registerDecisionTools } from "./decision-tools.js";
 import { elementQueryFromInput, registerDesktopMutationTools } from "./desktop-mutation-tools.js";
+import { listDisplaysResult } from "./display-list-result.js";
 import { DockGuardSession } from "./dock-session.js";
 import { ExtrasGuardSession } from "./extras-session.js";
 import { GuardedSession } from "./guarded-session.js";
@@ -277,11 +280,31 @@ export function createMcpServer(
 		"list_windows",
 		{
 			description:
-				"Windows on every Space: id, pid, app, title, bounds, space (current|other), display. app filters. Listing authorizes no input.",
+				"Windows on every Space: id, pid, app, title, bounds, z_order (0=front), focused, display_id, scale_factor, space (current|other). app filters. Authorizes no input.",
 			inputSchema: listWindowsSchema,
 			annotations: READ_ONLY_ANNOTATIONS,
 		},
 		async ({ app }) => await session.listWindows(app === undefined ? {} : { app }),
+	);
+
+	const displayProbe =
+		options?.displayProbe ??
+		(computer === undefined && process.platform === "darwin" ? onlineDisplaysWithSpaces : undefined);
+	server.registerTool(
+		"list_displays",
+		{
+			description:
+				"Displays: id, main, bounds, scale_factor, active_space_id, has_cursor; plus frontmost_app. Posts no input.",
+			inputSchema: emptySchema,
+			annotations: READ_ONLY_ANNOTATIONS,
+		},
+		async () =>
+			await listDisplaysResult({
+				displays: displayProbe,
+				computer: resolvedComputer,
+				// Which display the person is on comes from their own pointer, read without moving it.
+				...(computer === undefined ? { personPointer: personPointerPosition } : {}),
+			}),
 	);
 
 	server.registerTool(

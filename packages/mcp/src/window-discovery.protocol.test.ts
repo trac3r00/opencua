@@ -40,13 +40,14 @@ describe("window discovery #given a machine with on-screen windows #when the age
 
 		expect(result.isError).toBeFalsy();
 		expect(payload["windows"]).toEqual([
-			{ window_id: 38574, pid: 489, app: "Finder", title: "opencua", bounds: WINDOW_BOUNDS },
+			{ window_id: 38574, pid: 489, app: "Finder", title: "opencua", bounds: WINDOW_BOUNDS, z_order: 0 },
 			{
 				window_id: 38580,
 				pid: 76409,
 				app: "TextEdit",
 				title: "scratch.txt",
 				bounds: { ...WINDOW_BOUNDS, x: 213, y: 77 },
+				z_order: 1,
 			},
 		]);
 	});
@@ -67,7 +68,7 @@ describe("window discovery #given a machine with on-screen windows #when the age
 		const payload = jsonPayload(await harness.client.callTool({ name: "list_windows", arguments: {} }));
 
 		expect(payload["windows"]).toEqual([
-			{ window_id: 8337, pid: 42729, app: "Calculator", title: "Calculator", bounds: WINDOW_BOUNDS },
+			{ window_id: 8337, pid: 42729, app: "Calculator", title: "Calculator", bounds: WINDOW_BOUNDS, z_order: 0 },
 		]);
 	});
 
@@ -106,6 +107,7 @@ describe("window discovery #given a machine with on-screen windows #when the age
 				app: "Finder",
 				title: "here",
 				bounds: WINDOW_BOUNDS,
+				z_order: 0,
 				space: "current",
 				space_ids: [3],
 				display: "main",
@@ -116,6 +118,7 @@ describe("window discovery #given a machine with on-screen windows #when the age
 				app: "Calculator",
 				title: "Calculator",
 				bounds: WINDOW_BOUNDS,
+				z_order: 1,
 				space: "other",
 				space_ids: [4],
 				display: "main",
@@ -139,7 +142,49 @@ describe("window discovery #given a machine with on-screen windows #when the age
 		);
 
 		expect(payload["windows"]).toEqual([
-			{ window_id: 1, pid: 1234, app: "Finder", title: "here", bounds: WINDOW_BOUNDS },
+			{ window_id: 1, pid: 1234, app: "Finder", title: "here", bounds: WINDOW_BOUNDS, z_order: 0 },
+		]);
+	});
+
+	it("says each window's stacking place across every app, its display and scale, and which window its app has focused", async () => {
+		const asked: (TopLevelWindowOptions | undefined)[] = [];
+		const harness = await createHarness(undefined, async (options?: TopLevelWindowOptions) => {
+			asked.push(options);
+			return [
+				{ id: 5, ownerPid: 5678, ownerName: "Other", title: "front", bounds: WINDOW_BOUNDS, displayId: 2 },
+				{
+					id: 1,
+					ownerPid: 1234,
+					ownerName: "Finder",
+					title: "focused",
+					bounds: WINDOW_BOUNDS,
+					displayId: 2,
+					scaleFactor: 1,
+					focused: true,
+				},
+				{ id: 2, ownerPid: 1234, ownerName: "Finder", title: "behind", bounds: WINDOW_BOUNDS },
+			];
+		});
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(
+			await harness.client.callTool({ name: "list_windows", arguments: { app: "Finder" } }),
+		);
+
+		expect(asked).toEqual([expect.objectContaining({ withDisplays: true, withFocus: true })]);
+		expect(payload["windows"]).toEqual([
+			{
+				window_id: 1,
+				pid: 1234,
+				app: "Finder",
+				title: "focused",
+				bounds: WINDOW_BOUNDS,
+				z_order: 1,
+				focused: true,
+				display_id: 2,
+				scale_factor: 1,
+			},
+			{ window_id: 2, pid: 1234, app: "Finder", title: "behind", bounds: WINDOW_BOUNDS, z_order: 2 },
 		]);
 	});
 
@@ -163,6 +208,54 @@ describe("window discovery #given a machine with on-screen windows #when the age
 
 		expect(result.isError).toBeFalsy();
 		expect(jsonPayload(result)["windows"]).toEqual([]);
+	});
+});
+
+class FrontmostComputer extends FakeGuardedComputer {
+	override async listApps() {
+		return [
+			{ name: "Finder", bundleId: "com.apple.finder", pid: 1234, isRunning: true },
+			{ name: "Other", bundleId: "com.example.other", pid: 5678, isRunning: true, isFrontmost: true },
+		];
+	}
+
+	override async getCursorPosition() {
+		return { x: 2000, y: 300 };
+	}
+}
+
+describe("list_displays #given a main display and a secondary display on another Space #when the agent asks #then it learns every display, where the cursor is and which app is in front", () => {
+	it("lists each display's geometry, scale and shown Space, and the frontmost app", async () => {
+		const harness = await createHarness(new FrontmostComputer(), undefined, undefined, {
+			serverOptions: {
+				displayProbe: () => [
+					{ id: 1, isMain: true, x: 0, y: 0, width: 1728, height: 1117, scaleFactor: 2, activeSpaceId: 6 },
+					{ id: 2, x: 1728, y: -200, width: 2560, height: 1440, scaleFactor: 1 },
+				],
+			},
+		});
+		closeHarness = harness.close;
+
+		const result = await harness.client.callTool({ name: "list_displays", arguments: {} });
+
+		expect(result.isError).toBeFalsy();
+		expect(jsonPayload(result)).toMatchObject({
+			displays: [
+				{
+					id: 1,
+					main: true,
+					x: 0,
+					y: 0,
+					width: 1728,
+					height: 1117,
+					scale_factor: 2,
+					active_space_id: 6,
+					has_cursor: false,
+				},
+				{ id: 2, main: false, x: 1728, y: -200, width: 2560, height: 1440, scale_factor: 1, has_cursor: true },
+			],
+			frontmost_app: { name: "Other", pid: 5678, bundle_id: "com.example.other" },
+		});
 	});
 });
 

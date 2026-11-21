@@ -1,4 +1,7 @@
-import { windowTitlesForPid } from "./macos-ffi/accessibility.js";
+import type { DisplayInventoryEntry } from "../accessibility/types.js";
+import { displayOverlaps } from "./display-placement.js";
+import { focusedWindowIdForPid, windowTitlesForPid } from "./macos-ffi/accessibility.js";
+import { onlineDisplayInfo } from "./macos-ffi/display-list.js";
 import { type ManagedDisplaySpaces, managedDisplaySpaces, spacesForWindows } from "./macos-ffi/sls-spaces.js";
 import { openWindowsForTargeting } from "./macos-open-windows.js";
 
@@ -10,6 +13,11 @@ export interface TopLevelWindow {
 	readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 	/** Where the window lives among Spaces; absent when the WindowServer places it on none (unknown or on every Space). */
 	readonly space?: WindowSpace;
+	/** The display holding most of the window, and its backing scale. */
+	readonly displayId?: number;
+	readonly scaleFactor?: number;
+	/** The window its app reports as focused over accessibility. */
+	readonly focused?: true;
 }
 
 export interface WindowSpace {
@@ -32,9 +40,13 @@ export interface TopLevelWindowOptions {
 	readonly titlesFor?: "all" | readonly number[];
 	/** Say which Space and display each window is on, and whether that Space is the one shown now. */
 	readonly withSpaces?: boolean;
+	/** Say which display each window is mostly on, and its scale factor. */
+	readonly withDisplays?: boolean;
+	/** Mark each app's focused window, asking each listed app once over accessibility. */
+	readonly withFocus?: boolean;
 }
 
-/** A source of on-screen top-level windows, as the MCP session consumes it. */
+/** A source of on-screen top-level windows, front to back as the WindowServer stacks them, as the MCP session consumes it. */
 export type WindowProbe = (options?: TopLevelWindowOptions) => Promise<readonly TopLevelWindow[]>;
 
 /** On-screen top-level windows, for detecting side effects an action caused outside the observed window. */
@@ -61,9 +73,40 @@ export async function listTopLevelWindows(options: TopLevelWindowOptions = {}): 
 	}
 	const titled =
 		options.titlesFor === undefined ? summaries : fillWindowTitles(summaries, options.titlesFor, windowTitlesForPid);
-	return options.withSpaces === true
-		? placeOnSpaces(titled, spacesForWindows(titled.map((window) => window.id)), managedDisplaySpaces())
-		: titled;
+	const spaced =
+		options.withSpaces === true
+			? placeOnSpaces(titled, spacesForWindows(titled.map((window) => window.id)), managedDisplaySpaces())
+			: titled;
+	const displayed = options.withDisplays === true ? placeOnDisplays(spaced, onlineDisplayInfo()) : spaced;
+	return options.withFocus === true ? markFocusedWindows(displayed, focusedWindowIdForPid) : displayed;
+}
+
+/** Give each window the display holding most of it; a window on no known display is left as it was. */
+export function placeOnDisplays(
+	windows: readonly TopLevelWindow[],
+	displays: readonly DisplayInventoryEntry[] | undefined,
+): readonly TopLevelWindow[] {
+	return windows.map((window) => {
+		const display = displayOverlaps(window.bounds, displays)[0]?.display;
+		return display === undefined ? window : { ...window, displayId: display.id, scaleFactor: display.scaleFactor };
+	});
+}
+
+/** Mark the window each app has focused, asking each app once; an app that cannot answer marks nothing. */
+export function markFocusedWindows(
+	windows: readonly TopLevelWindow[],
+	focusedWindowOf: (pid: number) => number | undefined,
+): readonly TopLevelWindow[] {
+	const focused = new Map<number, number | undefined>();
+	for (const { ownerPid } of windows) {
+		if (focused.has(ownerPid)) continue;
+		try {
+			focused.set(ownerPid, focusedWindowOf(ownerPid));
+		} catch {
+			focused.set(ownerPid, undefined);
+		}
+	}
+	return windows.map((window) => (focused.get(window.ownerPid) === window.id ? { ...window, focused: true } : window));
 }
 
 /** Give each window its Spaces, their display, and whether one of them is the Space its display shows now. */

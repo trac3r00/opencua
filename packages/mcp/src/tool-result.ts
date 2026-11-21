@@ -1040,6 +1040,9 @@ function observationContext(state: AppState): Record<string, unknown> {
 		...(state.displays === undefined ? {} : { displays: state.displays }),
 		...(state.windowDisplayId === undefined ? {} : { windowDisplayId: state.windowDisplayId }),
 		...(state.windowDisplayIds === undefined ? {} : { windowDisplayIds: state.windowDisplayIds }),
+		...(state.windowDisplayAmbiguous === true ? { windowDisplayAmbiguous: true } : {}),
+		...(state.space === undefined ? {} : { space: state.space }),
+		...(state.spaceUnknown === true ? { spaceUnknown: true } : {}),
 		...(state.contentKind === undefined ? {} : { contentKind: state.contentKind }),
 	};
 }
