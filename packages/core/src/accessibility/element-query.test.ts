@@ -132,8 +132,8 @@ describe("#given nothing matches #when the query misses #then the result is empt
 		}),
 	];
 
-	it("returns no matches for a label nothing carries", () => {
-		expect(matchElements(elements, { label: "Save" })).toEqual([]);
+	it("returns no matches for a label that shares no word or synonym with any element", () => {
+		expect(matchElements(elements, { label: "Zebra" })).toEqual([]);
 	});
 
 	it("suggests the candidates that share words with the query", () => {
@@ -150,6 +150,119 @@ describe("#given nothing matches #when the query misses #then the result is empt
 
 	it("returns nothing when there is neither word overlap nor a role to narrow the field", () => {
 		expect(suggestNearMisses(elements, { label: "Zebra" }, 3)).toEqual([]);
+	});
+});
+
+describe("#given a label that differs in wording but not intent #when queried #then the intended control is found", () => {
+	it("finds Done for OK", () => {
+		const elements = [el({ id: 1, role: "AXButton", label: "Done", actions: ["AXPress"] })];
+
+		expect(matchElements(elements, { label: "OK" }).map((match) => match.element.id)).toEqual([1]);
+	});
+
+	it("finds Send for 보내기", () => {
+		const elements = [el({ id: 1, role: "AXButton", label: "Send", actions: ["AXPress"] })];
+
+		expect(matchElements(elements, { label: "보내기" }).map((match) => match.element.id)).toEqual([1]);
+	});
+
+	it("finds the × control for close", () => {
+		const elements = [el({ id: 1, role: "AXButton", label: "×", actions: ["AXPress"] })];
+
+		expect(matchElements(elements, { label: "close" }).map((match) => match.element.id)).toEqual([1]);
+	});
+});
+
+describe("#given Save Draft, Save, and unrelated controls #when searching the text save draft #then Save Draft ranks first and Save follows above the rest", () => {
+	it("returns Save Draft, then Save, and no unrelated control", () => {
+		const elements = [
+			el({
+				id: 1,
+				role: "AXButton",
+				label: "Save Draft",
+				actions: ["AXPress"],
+				frame: { x: 0, y: 10, width: 60, height: 20 },
+			}),
+			el({
+				id: 2,
+				role: "AXButton",
+				label: "Save",
+				actions: ["AXPress"],
+				frame: { x: 0, y: 40, width: 40, height: 20 },
+			}),
+			el({
+				id: 3,
+				role: "AXButton",
+				label: "Cancel",
+				actions: ["AXPress"],
+				frame: { x: 0, y: 70, width: 40, height: 20 },
+			}),
+			el({
+				id: 4,
+				role: "AXButton",
+				label: "Open",
+				actions: ["AXPress"],
+				frame: { x: 0, y: 100, width: 40, height: 20 },
+			}),
+		];
+
+		expect(matchElements(elements, { text: "save draft" }).map((match) => match.element.id)).toEqual([1, 2]);
+	});
+});
+
+describe("#given an exact label and a synonym for the same query #when ranked #then the exact label outranks the synonym", () => {
+	it("ranks OK above Done for the query OK", () => {
+		const elements = [
+			el({
+				id: 1,
+				role: "AXButton",
+				label: "Done",
+				actions: ["AXPress"],
+				frame: { x: 0, y: 10, width: 40, height: 20 },
+			}),
+			el({
+				id: 2,
+				role: "AXButton",
+				label: "OK",
+				actions: ["AXPress"],
+				frame: { x: 0, y: 40, width: 40, height: 20 },
+			}),
+		];
+
+		const matches = matchElements(elements, { label: "OK" });
+
+		expect(matches.map((match) => match.element.id)).toEqual([2, 1]);
+		expect(matches[0]?.score).toBeGreaterThan(matches[1]?.score ?? 0);
+	});
+});
+
+describe("#given Korean labels sharing whole words #when searched by text with those words #then the overlapping control is found and unrelated ones are not", () => {
+	it("matches 임시 완료 against 임시 저장 완료 but not 삭제", () => {
+		const elements = [
+			el({ id: 1, role: "AXButton", label: "임시 저장 완료", actions: ["AXPress"] }),
+			el({ id: 2, role: "AXButton", label: "삭제", actions: ["AXPress"] }),
+		];
+
+		expect(matchElements(elements, { text: "임시 완료" }).map((match) => match.element.id)).toEqual([1]);
+	});
+});
+
+describe("#given an exact label that only shares words with a control #when queried #then that control is not a stand-in", () => {
+	it("never lands Unmute tab on Mute tab", () => {
+		const elements = [el({ id: 1, role: "AXButton", label: "Mute tab", actions: ["AXPress"] })];
+
+		expect(matchElements(elements, { label: "Unmute tab" })).toEqual([]);
+	});
+});
+
+describe("#given a label that shares no word or synonym with any element #when queried #then nothing is returned", () => {
+	it("does not return Open or Close for OK", () => {
+		const elements = [
+			el({ id: 1, role: "AXButton", label: "Open", actions: ["AXPress"] }),
+			el({ id: 2, role: "AXButton", label: "Close", actions: ["AXPress"] }),
+		];
+
+		expect(matchElements(elements, { label: "OK" })).toEqual([]);
 	});
 });
 
