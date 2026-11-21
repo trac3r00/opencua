@@ -108,7 +108,7 @@ describe("#given the menu bar control #when the user picks Stop then Resume #the
 		});
 	}, 60_000);
 
-	it("#when Stop buddy talking is chosen #then the process recorded in buddy/speaking.pid gets SIGTERM", async () => {
+	it("#when Stop buddy talking is chosen #then the process recorded in buddy/speaking.pid gets SIGUSR2", async () => {
 		if (scratch === undefined) throw new Error("missing scratch directory");
 		const stateDir = join(scratch, "state-buddy");
 		const probe = join(scratch, "buddy-probe.m");
@@ -127,7 +127,7 @@ describe("#given the menu bar control #when the user picks Stop then Resume #the
 		expect((await run([probeBinary], { OPENCUA_STATE_DIR: stateDir })).exitCode).toBe(0);
 
 		await speaker.exited;
-		expect(speaker.signalCode).toBe("SIGTERM");
+		expect(speaker.signalCode).toBe("SIGUSR2");
 		expect(existsSync(join(stateDir, "buddy", "speaking.pid"))).toBe(false);
 	}, 60_000);
 });

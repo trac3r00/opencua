@@ -249,7 +249,8 @@ static void update_status_item(void);
 - (void)stopBuddyTalking:(id)sender {
   (void)sender;
   // The same contract as stopSpeaking in buddy-voice.ts: the speaking process
-  // records its pid and ends its speech and caption on SIGTERM.
+  // records its pid and ends its speech and caption on SIGUSR2 (SIGTERM would
+  // quit `buddy listen`, which speaks in its own process).
   NSString *path = [stop_file_path().stringByDeletingLastPathComponent
       stringByAppendingPathComponent:@"buddy/speaking.pid"];
   NSString *text = [NSString stringWithContentsOfFile:path
@@ -258,7 +259,7 @@ static void update_status_item(void);
   [NSFileManager.defaultManager removeItemAtPath:path error:nil];
   int pid = text.intValue;
   if (pid > 1)
-    kill(pid, SIGTERM);
+    kill(pid, SIGUSR2);
 }
 - (void)openBuddySettings:(id)sender {
   (void)sender;

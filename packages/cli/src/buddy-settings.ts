@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { normalizeSpeechLanguages, uiLanguageOf } from "./buddy-i18n.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -20,8 +21,17 @@ export interface BuddySettings {
 	readonly speak: boolean;
 	readonly captions: boolean;
 	readonly sounds: boolean;
-	/** Speech recognition locale such as en-US or ko-KR; empty uses the system language. */
-	readonly locale: string;
+	/** Dictation locales such as ko-KR and en-US (at most 3); empty is automatic: the Mac's preferred languages. */
+	readonly speechLanguages: readonly string[];
+	/** Settings page language (en, ko, ja, zh, es, fr, de); empty follows the browser. */
+	readonly uiLanguage: string;
+	/** Connected apps by id; their tokens live in the Keychain. */
+	readonly apps: Readonly<Record<string, AppConnection>>;
+}
+
+export interface AppConnection {
+	readonly baseUrl: string;
+	readonly model: string;
 }
 
 export const DEFAULT_BUDDY_SETTINGS: BuddySettings = {
@@ -35,7 +45,9 @@ export const DEFAULT_BUDDY_SETTINGS: BuddySettings = {
 	speak: true,
 	captions: true,
 	sounds: true,
-	locale: "",
+	speechLanguages: [],
+	uiLanguage: "",
+	apps: {},
 };
 
 export function buddySettingsPath(stateDir: string): string {
@@ -63,6 +75,9 @@ export function coerceBuddySettings(input: Record<string, unknown>, base: BuddyS
 		return typeof value === "boolean" ? value : (base[key] as boolean);
 	};
 	const provider = input["voiceProvider"];
+	// Settings written before several languages were supported kept one `locale`.
+	const speech = "speechLanguages" in input ? input["speechLanguages"] : input["locale"];
+	const ui = input["uiLanguage"];
 	return {
 		agent: text("agent"),
 		model: text("model"),
@@ -73,8 +88,23 @@ export function coerceBuddySettings(input: Record<string, unknown>, base: BuddyS
 		speak: flag("speak"),
 		captions: flag("captions"),
 		sounds: flag("sounds"),
-		locale: text("locale"),
+		speechLanguages: speech === undefined ? base.speechLanguages : normalizeSpeechLanguages(speech),
+		uiLanguage: typeof ui === "string" ? (ui === "" ? "" : (uiLanguageOf(ui) ?? base.uiLanguage)) : base.uiLanguage,
+		apps: "apps" in input ? coerceApps(input["apps"]) : base.apps,
 	};
+}
+
+function coerceApps(value: unknown): Readonly<Record<string, AppConnection>> {
+	if (typeof value !== "object" || value === null) return {};
+	const apps: Record<string, AppConnection> = {};
+	for (const [id, entry] of Object.entries(value)) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const { baseUrl, model } = entry as Record<string, unknown>;
+		if (typeof baseUrl === "string" && typeof model === "string" && /^[a-z0-9-]+$/.test(id)) {
+			apps[id] = { baseUrl, model };
+		}
+	}
+	return apps;
 }
 
 export function writeBuddySettings(stateDir: string, settings: BuddySettings): void {
@@ -85,51 +115,62 @@ export function writeBuddySettings(stateDir: string, settings: BuddySettings): v
 	renameSync(temporary, path);
 }
 
-// The ElevenLabs key lives in the login Keychain, never in a settings file.
-const KEYCHAIN_SERVICE = "dev.opencua.buddy.elevenlabs";
+/** A secret in the login Keychain: buddy keeps API keys and app tokens there, never in a settings file. */
+export interface SecretStore {
+	read(service: string): Promise<string | undefined>;
+	/** An empty secret deletes it. */
+	save(service: string, secret: string, label: string): Promise<void>;
+}
+
 const KEYCHAIN_ACCOUNT = "api-key";
 
-export async function readElevenLabsKey(): Promise<string | undefined> {
-	if (process.env["ELEVENLABS_API_KEY"]) return process.env["ELEVENLABS_API_KEY"];
-	try {
-		const { stdout } = await execFileAsync("security", [
-			"find-generic-password",
+export const keychain: SecretStore = {
+	async read(service) {
+		try {
+			const { stdout } = await execFileAsync("security", [
+				"find-generic-password",
+				"-s",
+				service,
+				"-a",
+				KEYCHAIN_ACCOUNT,
+				"-w",
+			]);
+			const secret = stdout.trim();
+			return secret.length > 0 ? secret : undefined;
+		} catch {
+			return undefined;
+		}
+	},
+	async save(service, secret, label) {
+		if (secret.length === 0) {
+			await execFileAsync("security", ["delete-generic-password", "-s", service, "-a", KEYCHAIN_ACCOUNT]).catch(
+				() => undefined,
+			);
+			return;
+		}
+		await execFileAsync("security", [
+			"add-generic-password",
+			"-U",
 			"-s",
-			KEYCHAIN_SERVICE,
+			service,
 			"-a",
 			KEYCHAIN_ACCOUNT,
+			"-l",
+			label,
 			"-w",
+			secret,
 		]);
-		const key = stdout.trim();
-		return key.length > 0 ? key : undefined;
-	} catch {
-		return undefined;
-	}
+	},
+};
+
+const ELEVENLABS_SERVICE = "dev.opencua.buddy.elevenlabs";
+
+export async function readElevenLabsKey(): Promise<string | undefined> {
+	return process.env["ELEVENLABS_API_KEY"] || (await keychain.read(ELEVENLABS_SERVICE));
 }
 
 export async function saveElevenLabsKey(key: string): Promise<void> {
-	if (key.length === 0) {
-		await execFileAsync("security", [
-			"delete-generic-password",
-			"-s",
-			KEYCHAIN_SERVICE,
-			"-a",
-			KEYCHAIN_ACCOUNT,
-		]).catch(() => undefined);
-		return;
-	}
-	await execFileAsync("security", [
-		"add-generic-password",
-		"-U",
-		"-s",
-		KEYCHAIN_SERVICE,
-		"-a",
-		KEYCHAIN_ACCOUNT,
-		"-l",
-		"opencua buddy ElevenLabs API key",
-		"-w",
-		key,
-	]);
+	await keychain.save(ELEVENLABS_SERVICE, key, "opencua buddy ElevenLabs API key");
 }
 
 export type AgentKind = "ask" | "job";
