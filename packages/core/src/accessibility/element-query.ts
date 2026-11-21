@@ -1,4 +1,5 @@
 import { AX_PRESS_ACTION } from "../computer/actions.js";
+import { areSynonyms, intentHit } from "./intent-match.js";
 import type { AXTreeElement } from "./types.js";
 
 /**
@@ -30,7 +31,8 @@ const SCORE_VALUE_CONTAINS = 12;
 const SCORE_ROLE = 6;
 const SCORE_PRESSABLE = 8;
 const SCORE_ACTIONS = 2;
-const SCORE_VISIBLE = 1;
+const SCORE_VISIBLE = 5;
+const SCORE_LABEL_SYNONYM = 30;
 const MIN_TOKEN_LENGTH = 3;
 
 function normalizeText(value: string | null | undefined): string {
@@ -70,11 +72,21 @@ function matchOne(element: AXTreeElement, query: ElementQuery): ElementMatch | u
 	}
 	if (query.label !== undefined) {
 		const wanted = normalizeText(query.label);
-		if (wanted.length === 0 || label !== wanted) {
+		if (wanted.length === 0) {
 			return undefined;
 		}
-		matchedBy.push("label");
-		score = Math.max(score, SCORE_LABEL);
+		if (label === wanted) {
+			matchedBy.push("label");
+			score = Math.max(score, SCORE_LABEL);
+		} else {
+			// An exact label names one control: only a true synonym (OK for Done) may stand in. Shared words do not:
+			// "Unmute tab" must never land on "Mute tab".
+			if (!areSynonyms(wanted, label)) {
+				return undefined;
+			}
+			matchedBy.push("label_synonym");
+			score = Math.max(score, SCORE_LABEL_SYNONYM);
+		}
 	}
 	if (query.labelContains !== undefined) {
 		const wanted = normalizeText(query.labelContains);
@@ -98,11 +110,19 @@ function matchOne(element: AXTreeElement, query: ElementQuery): ElementMatch | u
 			return undefined;
 		}
 		const onLabel = label.includes(wanted);
-		if (!onLabel && !value.includes(wanted)) {
-			return undefined;
+		if (onLabel || value.includes(wanted)) {
+			matchedBy.push("text");
+			score = Math.max(score, onLabel ? SCORE_TEXT_ON_LABEL : SCORE_TEXT_ON_VALUE);
+		} else {
+			const hit = [intentHit(wanted, label), intentHit(wanted, value)]
+				.filter((candidate) => candidate !== undefined)
+				.sort((left, right) => right.score - left.score)[0];
+			if (hit === undefined) {
+				return undefined;
+			}
+			matchedBy.push(`text_${hit.via}`);
+			score = Math.max(score, hit.score);
 		}
-		matchedBy.push("text");
-		score = Math.max(score, onLabel ? SCORE_TEXT_ON_LABEL : SCORE_TEXT_ON_VALUE);
 	}
 
 	if (element.actions.includes(AX_PRESS_ACTION)) {
@@ -177,10 +197,17 @@ export function suggestNearMisses(
 			? [...elements]
 			: elements.filter((element) => roleMatches(element.role, query.role ?? ""));
 	const tokens = queryTokens(query);
+	const phrases = [query.label, query.labelContains, query.text].map(normalizeText);
 	const overlapping = candidates
 		.map((element) => {
-			const haystack = `${normalizeText(element.label)} ${normalizeText(element.value)}`;
-			return { element, overlap: tokens.filter((token) => haystack.includes(token)).length };
+			const label = normalizeText(element.label);
+			const value = normalizeText(element.value);
+			const haystack = `${label} ${value}`;
+			const synonymous = phrases.some((phrase) => areSynonyms(phrase, label) || areSynonyms(phrase, value));
+			return {
+				element,
+				overlap: tokens.filter((token) => haystack.includes(token)).length + (synonymous ? 1 : 0),
+			};
 		})
 		.filter((candidate) => candidate.overlap > 0)
 		.sort((left, right) => right.overlap - left.overlap || readingOrder(left.element, right.element));
