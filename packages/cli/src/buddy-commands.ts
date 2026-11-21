@@ -27,6 +27,7 @@ import {
 	resolveAgent,
 	writeBuddySettings,
 } from "./buddy-settings.js";
+import { StatusHud } from "./buddy-status.js";
 import { speak, stopSpeaking } from "./buddy-voice.js";
 import {
 	type BuddyJob,
@@ -90,6 +91,12 @@ export function buddyAgentCommand(
 	const agent = resolveAgent(settings, env, exists, home);
 	return { executable: agent.executable, args: agent.args(kind, env["OPENCUA_BUDDY_MODEL"] || settings.model) };
 }
+
+const LISTENING = "Listening… let go to send";
+const NOT_HEARD = "Didn't catch that. Hold Control+Option while you talk, then let go.";
+const ERROR_TTL_S = 6;
+const DONE_TTL_S = 3;
+const AGENTS_REFRESH_MS = 2_000;
 
 const SOUNDS = { start: "Pop", done: "Glass", failed: "Basso", listen: "Tink" } as const;
 
@@ -165,6 +172,8 @@ export interface AskOptions {
 	readonly capture?: ScreenCapture;
 	/** Aborts the agent or app call when the person talks over buddy. */
 	readonly signal?: AbortSignal;
+	/** Called with the answer once it is in, before it is spoken. */
+	readonly onAnswer?: (speech: string) => void;
 }
 
 /** Thrown when the warm capture process cannot be reached, so the caller can take the slower path instead. */
@@ -260,6 +269,7 @@ export async function askAboutScreen(
 		}
 		const reply = parseBuddyReply(raw, geometry);
 		if (options.signal?.aborted === true) return { question, answer: "", points: [] };
+		options.onAnswer?.(reply.speech);
 		const pointing = (async () => {
 			if (overlay === undefined) return;
 			overlay.setMode("pointer");
@@ -485,7 +495,7 @@ export interface SpeechCapture {
 }
 
 /** One question through `voice-input --mic`, which sets everything up first (about half a second). */
-export function captureSpeech(binary: string, locales: string): SpeechCapture {
+export function captureSpeech(binary: string, locales: string, onPartial?: (text: string) => void): SpeechCapture {
 	const child: ChildProcessWithoutNullStreams = spawn(binary, ["--mic", "--locale", locales]);
 	const transcript = new Promise<Heard>((resolve, reject) => {
 		let heard: Heard | undefined;
@@ -493,7 +503,10 @@ export function captureSpeech(binary: string, locales: string): SpeechCapture {
 		createInterface({ input: child.stdout }).on("line", (line) => {
 			const message = parseVoiceLine(line);
 			if (message === undefined) return;
-			if (message.partial !== undefined) process.stderr.write(`\r  … ${message.partial}`);
+			if (message.partial !== undefined) {
+				process.stderr.write(`\r  … ${message.partial}`);
+				onPartial?.(message.partial);
+			}
 			if (message.text !== undefined) heard = heardFrom(message);
 			if (message.error !== undefined) failure = message.message ?? message.error;
 		});
@@ -511,6 +524,8 @@ const MAX_SERVER_RESTARTS = 5;
 
 export interface VoiceServerHooks {
 	readonly onReady?: () => void;
+	/** The words heard so far while the person is still talking. */
+	readonly onPartial?: (text: string) => void;
 	readonly onProblem?: (message: string) => void;
 }
 
@@ -554,7 +569,10 @@ export class VoiceServer {
 				this.ready = true;
 				this.hooks.onReady?.();
 			}
-			if (message.partial !== undefined) process.stderr.write(`\r  … ${message.partial}`);
+			if (message.partial !== undefined) {
+				process.stderr.write(`\r  … ${message.partial}`);
+				this.hooks.onPartial?.(message.partial);
+			}
 			if (message.text !== undefined) {
 				process.stderr.write("\n");
 				this.restarts = 0;
@@ -597,7 +615,7 @@ export class VoiceServer {
 
 	capture(): SpeechCapture {
 		const child = this.child;
-		if (child === undefined || !this.isReady) return captureSpeech(this.binary, this.locales);
+		if (child === undefined || !this.isReady) return captureSpeech(this.binary, this.locales, this.hooks.onPartial);
 		const transcript = new Promise<Heard>((resolve, reject) => {
 			this.pending = { resolve, reject };
 		});
@@ -779,7 +797,25 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 				"@opencua/core"
 			);
 			const locales = (): string => command.locale ?? speechLocaleOption(readBuddySettings(deps.stateDir));
-			const voiceServer = new VoiceServer(nativeBinary("voice-input"), locales());
+			const hud = new StatusHud(hudOrUndefined());
+			const voiceServer = new VoiceServer(nativeBinary("voice-input"), locales(), {
+				onPartial: (text) => {
+					const state = hud.current.state;
+					if (state === "listening" || state === "hearing") hud.set({ state: "hearing", text });
+				},
+			});
+			// Background agents keep the pill up ("1 agent working") until they finish, even while buddy is idle.
+			const refreshAgents = (): void => {
+				try {
+					hud.setAgents(
+						listJobs(jobsRoot(deps.stateDir), isAlive).filter((job) => job.status === "running").length,
+					);
+				} catch {
+					hud.setAgents(0);
+				}
+			};
+			refreshAgents();
+			const agentsTimer = setInterval(refreshAgents, AGENTS_REFRESH_MS);
 			voiceServer.start();
 			const stopCaptureDaemon = await ensureCaptureDaemon(deps);
 			const screenCapture = daemonCapture(deps.stateDir);
@@ -802,11 +838,21 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 				try {
 					await askAboutScreen(
 						question,
-						{ voice: command.voice, point: true, marks, language, capture: screenCapture, signal: abort.signal },
+						{
+							voice: command.voice,
+							point: true,
+							marks,
+							language,
+							capture: screenCapture,
+							signal: abort.signal,
+							onAnswer: (speech) => hud.set({ state: "speaking", text: speech }),
+						},
 						deps,
 					);
+					if (!abort.signal.aborted) hud.set({ state: "idle" });
 				} catch (error: unknown) {
 					if (error instanceof CaptureUnavailable) {
+						hud.set({ state: "thinking", text: question });
 						await askInHelper(
 							question,
 							command.voice,
@@ -818,11 +864,13 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 							},
 							() => interrupted,
 						);
+						if (!interrupted) hud.set({ state: "idle" });
 						return;
 					}
 					if (!abort.signal.aborted) {
 						const message = error instanceof Error ? error.message : String(error);
 						process.stderr.write(`buddy: ${message}\n`);
+						hud.set({ state: "error", text: `Couldn't answer: ${message}`, ttl: ERROR_TTL_S });
 						await reportAskFailure(message, command.voice, language, deps);
 					}
 				} finally {
@@ -832,15 +880,22 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 			};
 			const handle = async (heard: Heard, marks: readonly Mark[]): Promise<void> => {
 				const utterance = routeUtterance(heard.text);
-				if (utterance === undefined) return;
+				if (utterance === undefined) {
+					// Nothing heard used to end here in silence, which looked exactly like buddy being broken.
+					hud.set({ state: "error", text: NOT_HEARD, ttl: ERROR_TTL_S });
+					return;
+				}
 				process.stdout.write(`you${heard.locale ? ` (${heard.locale})` : ""}: ${heard.text}\n`);
 				if (utterance.kind === "agent") {
 					const job = startAgentJob(utterance.task, deps, heard.locale);
 					process.stdout.write(`buddy: started agent ${job.id}\n`);
+					hud.set({ state: "done", text: `Agent started: ${utterance.task}`, ttl: DONE_TTL_S });
+					refreshAgents();
 					if (command.voice) await sayPhrase("onIt", deps, heard.locale);
 					return;
 				}
 				interrupted = false;
+				hud.set({ state: "thinking", text: utterance.question });
 				await ask(utterance.question, marks, heard.locale);
 			};
 			const detector = new StopChordDetector({
@@ -868,6 +923,7 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 					}
 					startListening();
 					if (capture === undefined || capture.hud !== undefined) return;
+					hud.set({ state: "listening", text: LISTENING });
 					play("listen", readBuddySettings(deps.stateDir));
 					capture.hud = runHud(hudBinary, "listen");
 				},
@@ -876,6 +932,7 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 					capture = undefined;
 					if (current === undefined) return;
 					busy = true;
+					hud.set({ state: "thinking", text: hud.current.state === "hearing" ? (hud.current.text ?? "") : "" });
 					current.speech.release();
 					current.hud?.release();
 					const drawn = current.hud?.result ?? Promise.resolve({ marks: [] as readonly Mark[], cancelled: false });
@@ -883,7 +940,9 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 					Promise.all([current.speech.transcript, drawn])
 						.then(([heard, drawn]) => handle(heard, drawn.marks))
 						.catch((error: unknown) => {
-							process.stderr.write(`buddy: ${error instanceof Error ? error.message : String(error)}\n`);
+							const message = error instanceof Error ? error.message : String(error);
+							process.stderr.write(`buddy: ${message}\n`);
+							hud.set({ state: "error", text: message, ttl: ERROR_TTL_S });
 						})
 						.finally(() => {
 							busy = false;
@@ -901,8 +960,10 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 				process.once("SIGTERM", resolve);
 			});
 			clearInterval(keepAlive);
+			clearInterval(agentsTimer);
 			detector.stop();
 			voiceServer.stop();
+			hud.close();
 			await stopCaptureDaemon();
 		});
 

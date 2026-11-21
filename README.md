@@ -294,6 +294,11 @@ echo "$TOKEN" | opencua buddy connect hermes --use   # connect an app once; --ur
 opencua buddy disconnect hermes      # forget the app and delete its token
 ```
 
+**Status pill.** While `buddy listen` runs, a small pill at the bottom of the display under the pointer says what
+buddy is doing: listening (with the words heard so far), thinking, speaking, "didn't catch that", or why it
+failed, plus how many background agents are still working. It never takes focus, lets clicks through, and is left
+out of the screenshot buddy asks about. `OPENCUA_BUDDY_HUD=off` turns it off.
+
 **Languages.** Dictation is automatic by default: `voice-input` listens in the Mac's preferred languages (up to
 three). Pick up to three in settings (or `buddy listen --locale ko-KR,en-US`) to talk in any of them; every language
 hears the same audio, the best-heard transcript wins, and buddy answers in that language (its own lines too, and the
