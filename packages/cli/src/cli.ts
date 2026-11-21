@@ -36,6 +36,7 @@ import {
 	registerWindowsListCommand,
 } from "./read-commands.js";
 import { registerSkillsCommands } from "./skills-command.js";
+import { registerSpaceCommands } from "./space-commands.js";
 import { commandPathOf, isInputCommand, stopRefusalFor } from "./stop-gate.js";
 import { registerUtmCommands } from "./utm.js";
 
@@ -491,6 +492,11 @@ registerHistoryCommands(program, { isJsonOutput });
 registerLifecycleCommands(program, { isJsonOutput });
 registerUtmCommands(program, { isJsonOutput });
 registerSkillsCommands(program);
+registerSpaceCommands(program, {
+	isJsonOutput,
+	stateDir: resolveStateDir(),
+	entryScript: fileURLToPath(import.meta.url),
+});
 registerBuddyCommands(program, {
 	isJsonOutput,
 	stateDir: resolveStateDir(),

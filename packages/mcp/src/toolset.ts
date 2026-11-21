@@ -10,6 +10,7 @@ import type { OsascriptRunner } from "./applescript-session.js";
 import type { ExtrasSource } from "./extras-session.js";
 import type { RulesProfile } from "./rules-profile.js";
 import type { TerminalCommandSource, TerminalTextReader } from "./terminal-session.js";
+import type { VirtualSpaceSource } from "./virtual-space-tools.js";
 
 export interface McpServerOptions {
 	/** Defaults to `OPENCUA_TOOLSET`, then `full`. */
@@ -31,6 +32,7 @@ export interface McpServerOptions {
 	readonly hotFramesSource?: HotFrameSource;
 	/** Per-app rules; defaults to the rules profile file for the native host and to none otherwise. */
 	readonly rulesProfile?: () => RulesProfile;
+	readonly virtualSpaceSource?: VirtualSpaceSource;
 }
 
 export interface ResolvedServerOptions {

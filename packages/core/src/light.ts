@@ -37,3 +37,11 @@ export {
 	parseCursorMotion,
 } from "./platform/macos-ffi/cursor-motion-config.js";
 export { StopSwitch, type StopStatusSource, describeUserStop, resolveStateDir } from "./platform/stop-switch.js";
+export {
+	type SpaceCommand,
+	type SpaceRecord,
+	listSpaces,
+	parseSpaceRecord,
+	sendSpaceCommand,
+} from "./platform/virtual-space.js";
+export { VirtualSpace } from "./platform/virtual-space-controller.js";

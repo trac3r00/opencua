@@ -1,7 +1,8 @@
 # Virtual display mode (design)
 
-Status: design only. Nothing here is implemented. Statements about private macOS APIs are marked
-**unverified** unless an experiment in the validation plan has confirmed them.
+Status: implemented (v1); live experiments pending. Option A ships as `opencua space` and the MCP `virtual_space`
+tool (`packages/core/native/virtual-space.m`, `packages/core/src/platform/virtual-space*.ts`). Statements about
+private macOS APIs are marked **unverified** unless an experiment in the validation plan has confirmed them.
 
 ## Goal
 

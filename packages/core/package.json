@@ -52,6 +52,8 @@
 		"native/opencua-surface",
 		"native/guest-axdump.m",
 		"native/guest-axdump",
+		"native/virtual-space.m",
+		"native/virtual-space",
 		"native/surface-pages"
 	],
 	"dependencies": {

@@ -69,6 +69,7 @@ import {
 import { ToolUsageRegistry, installToolTiming } from "./tool-timing.js";
 import { type McpServerOptions, type ToolsetProfile, resolveServerOptions, serverInstructionsFor } from "./toolset.js";
 import { registerUtmTools } from "./utm-tools.js";
+import { nativeVirtualSpaceSource, registerVirtualSpaceTools } from "./virtual-space-tools.js";
 import { registerVisualTools } from "./visual-tools.js";
 import { WorkerCoordinator } from "./worker-coordinator.js";
 import { fileWorkerRegistry } from "./worker-registry.js";
@@ -365,6 +366,7 @@ export function createMcpServer(
 		registerParallelTools(server, session, resolvedComputer);
 		registerWorkerTools(server, workers, () => spawnGuidance(host().name, resolvedComputer.delivery ?? "attended"));
 		registerSurfaceTools(server, resolvedComputer);
+		registerVirtualSpaceTools(server, options?.virtualSpaceSource ?? nativeVirtualSpaceSource(resolveStateDir()));
 	}
 	registerHumanTools(server, session);
 	registerVisualTools(server, session);
