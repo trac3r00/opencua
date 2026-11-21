@@ -266,6 +266,7 @@ export {
 	openArguments,
 	spawnOpenLauncher,
 } from "./platform/macos-open-app.js";
+export { UrlBlockedError } from "./platform/macos-open-url.js";
 export { setWindowFrame } from "./platform/macos-window-frame.js";
 export {
 	type DockAction,

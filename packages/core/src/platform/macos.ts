@@ -105,6 +105,7 @@ import {
 	pressMenuItem,
 	waitForKeyEquivalentEnabled,
 } from "./macos-menu.js";
+import { type OpenUrlReport, openUrlInApp, openableUrl } from "./macos-open-url.js";
 import { observedWindowForPid, openWindowsForTargeting } from "./macos-open-windows.js";
 import { selectSystemEventsTargetWindow } from "./macos-window-target-fallback.js";
 import { resolveTargetWindow, visibleWindowsForPid } from "./macos-window-target.js";
@@ -343,6 +344,21 @@ export class MacOSHostComputer extends HostComputer {
 			}
 		}
 		await this.input.pressKey(key, options);
+	}
+
+	/** Open `url` in the running app `targetPid` belongs to, in the background; see {@link openUrlInApp}. */
+	async openUrl(targetPid: number, url: string): Promise<OpenUrlReport> {
+		this.assertInputAvailable(targetPid);
+		const app = await findRunningApp(targetPid);
+		if (app === undefined) {
+			throw new Error(`No running app matched pid ${targetPid}`);
+		}
+		return await openUrlInApp(app, url, { blocklist: this.urlBlocklist });
+	}
+
+	/** Throws when `url` is not an absolute URL or this host's blocklist covers it; opens nothing. */
+	assertUrlAllowed(url: string): void {
+		openableUrl(url, this.urlBlocklist);
 	}
 
 	/**

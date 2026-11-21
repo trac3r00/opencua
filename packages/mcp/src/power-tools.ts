@@ -58,6 +58,7 @@ interface PowerComputerExtensions {
 		readonly verified: boolean;
 		readonly attempts: number;
 	}>;
+	openUrl?(pid: number, url: string): Promise<{ readonly bundleId: string; readonly url: string }>;
 	readClipboard?(): ReturnType<typeof readClipboard>;
 	writeClipboard?(input: Parameters<typeof writeClipboard>[0]): ReturnType<typeof writeClipboard>;
 }
@@ -86,6 +87,15 @@ export async function dispatchPowerStep(
 			const writeInput = clipboardInput(step);
 			const report = powerComputer.writeClipboard?.(writeInput) ?? writeClipboard(writeInput);
 			return { route: "synthetic_events", delivery: "not_applicable", detail: report };
+		}
+		case "open_url": {
+			if (powerComputer.openUrl === undefined) {
+				throw new Error("this computer cannot open URLs in an app");
+			}
+			const report = await powerComputer.openUrl(targetPid, step.url);
+			// Launch Services delivers the URL (neither an accessibility action nor synthetic input). It opens in the
+			// background, but the app may still activate itself, so the desktop is not known to be untouched.
+			return { route: "unknown", delivery: "unknown", detail: report };
 		}
 		default:
 			return undefined;

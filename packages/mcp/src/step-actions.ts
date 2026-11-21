@@ -162,6 +162,11 @@ function validateStep(step: RunStep, observation: InputObservation): void {
 		case "scroll":
 			validateElement(observation, requiredElementIndex(step));
 			return;
+		case "open_url":
+			if (!URL.canParse(step.url)) {
+				throw new Error("open_url needs an absolute URL with a scheme (zoommtg://..., https://...)");
+			}
+			return;
 		case "clipboard_write":
 			if ([step.text, step.image_path, step.file_path].filter((value) => value !== undefined).length !== 1) {
 				throw new Error("clipboard_write requires exactly one of text, image_path, or file_path");
@@ -224,13 +229,20 @@ async function dispatchStep(
 }
 
 export function createRunStepDriver(computer: GuardedComputerInterface): RunStepDriver {
+	// The host's URL blocklist is checked with the rest of the batch, so a blocked open_url stops it before any step runs.
+	const host: GuardedComputerInterface & { assertUrlAllowed?(url: string): void } = computer;
 	return {
 		elementIndex: stepElementIndex,
 		target: stepTarget,
 		wait: stepWait,
 		resolve: resolveStepElement,
 		resolveAtPoint: resolveStepAtPoint,
-		validate: validateStep,
+		validate: (step, observation) => {
+			validateStep(step, observation);
+			if (step.type === "open_url") {
+				host.assertUrlAllowed?.(step.url);
+			}
+		},
 		dispatch: async (step, targetPid, observation, actions, options) =>
 			await dispatchStep(computer, step, targetPid, observation, actions, options),
 	};

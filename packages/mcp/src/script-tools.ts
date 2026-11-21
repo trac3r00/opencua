@@ -252,6 +252,7 @@ function needsObservedIds(step: RunStep): boolean {
 		case "invoke_menu":
 		case "set_window_frame":
 		case "clipboard_write":
+		case "open_url":
 			return false;
 		default:
 			return !("target" in step && step.target !== undefined) || typeof step.find?.scroll_within === "string";

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { TopLevelWindow } from "@opencua/core";
 import { createHarness, jsonPayload, observe } from "./protocol-client-harness.js";
-import type { Effect } from "./protocol-test-harness.js";
+import { type Effect, FakeGuardedComputer } from "./protocol-test-harness.js";
 import { MAX_RUN_STEPS } from "./tool-schemas.js";
 
 function window(title: string): TopLevelWindow {
@@ -83,6 +83,90 @@ describe("run_steps #given an observed app #when a batch mixes element and input
 			{ kind: "clipboardWrite", input: { type: "text", text: "copied" } },
 		]);
 		expect(payload["runSteps"]).toMatchObject({ requested: 2, completed: 2, stoppedEarly: false });
+	});
+});
+
+describe("run_steps #given a link the target app handles #when open_url and wait_for run in one batch #then the app opens it and the batch waits for its window", () => {
+	it("opens the URL in the target app, then waits for the window it opened", async () => {
+		const computer = new FakeGuardedComputer();
+		// The meeting window exists only once the link was handed over, so the wait cannot pass on a stale window.
+		const harness = await createHarness(computer, async () =>
+			computer.effects.some((effect) => effect.kind === "openUrl")
+				? [window("Documents"), window("Staff Meeting")]
+				: [window("Documents")],
+		);
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_steps",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				steps: [
+					{ type: "open_url", url: "zoommtg://zoom.us/join?action=join&confno=123" },
+					{ type: "wait_for", window_title: "Staff Meeting", timeout_ms: 500 },
+				],
+			},
+		});
+		const payload = jsonPayload(result);
+
+		expect(result.isError).not.toBe(true);
+		expect(inputEffects(harness.computer.effects)).toEqual([
+			{ kind: "openUrl", pid: 1234, url: "zoommtg://zoom.us/join?action=join&confno=123" },
+		]);
+		expect(payload["runSteps"]).toMatchObject({
+			requested: 2,
+			completed: 1,
+			stoppedEarly: false,
+			steps: [
+				{ step: 0, type: "open_url", input_dispatched: true, status: "dispatched" },
+				{ step: 1, type: "wait_for", status: "satisfied" },
+			],
+		});
+	});
+
+	it("refuses a blocked URL before any earlier step of the batch dispatches", async () => {
+		const harness = await createHarness();
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_steps",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				steps: [
+					{ type: "type_text", text: "x" },
+					{ type: "open_url", url: "blocked://anything" },
+				],
+			},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(jsonPayload(result)).toMatchObject({ actionDispatched: false, reason: "url-blocked" });
+		expect(inputEffects(harness.computer.effects)).toEqual([]);
+	});
+
+	it("rejects a URL without a scheme before dispatching any step", async () => {
+		const harness = await createHarness();
+		closeHarness = harness.close;
+		const token = await observe(harness);
+
+		const result = await harness.client.callTool({
+			name: "run_steps",
+			arguments: {
+				app: "Finder",
+				observation_token: token,
+				steps: [
+					{ type: "type_text", text: "x" },
+					{ type: "open_url", url: "zoom.us/join" },
+				],
+			},
+		});
+
+		expect(result.isError).toBe(true);
+		expect(inputEffects(harness.computer.effects)).toEqual([]);
 	});
 });
 

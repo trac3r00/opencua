@@ -94,7 +94,7 @@ mapping; window-scoped AX frames must not be scaled a second time.
   mistaken for a confirmed outcome. It stops at the first field it cannot verify.
 - `run_steps`: up to 20 actions (`MAX_RUN_STEPS`) in order in one call — `click`, `perform_secondary_action`,
   `set_value`, `select_text`, `drag`, `scroll`, `reveal`, `wait_for`, `type_text`, `press_keys`, `invoke_menu`,
-  `set_window_frame` or `clipboard_write` steps — for sequences like fill-then-submit that
+  `set_window_frame`, `clipboard_write` or `open_url` steps — for sequences like fill-then-submit that
   would otherwise need one round trip per action. Every step is validated against the token
   observation up front, element steps are re-checked against a fresh observation right before
   they dispatch, and the batch stops at the first step that fails or whose element no longer

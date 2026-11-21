@@ -1,3 +1,4 @@
+import { UrlBlockedError } from "@opencua/core";
 import { currentInputScope } from "@opencua/core";
 import type {
 	AXTreeElement,
@@ -43,6 +44,7 @@ export type Effect =
 	| { readonly kind: "key"; readonly key: string }
 	| { readonly kind: "invokeMenu"; readonly pid: number; readonly path: readonly string[] }
 	| { readonly kind: "clipboardWrite"; readonly input: ClipboardWriteInput }
+	| { readonly kind: "openUrl"; readonly pid: number; readonly url: string }
 	| { readonly kind: "close" };
 
 function clickEffect(point: Point, options: PointerOptions | undefined): Effect {
@@ -421,6 +423,18 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	async invokeMenu(pid: number, path: readonly string[]): Promise<InvokeMenuResult> {
 		this.dispatch({ kind: "invokeMenu", pid, path });
 		return { resolvedPath: path, action: "AXPress" };
+	}
+
+	/** The fake host blocks every `blocked:` URL, standing in for a configured urlBlocklist. */
+	assertUrlAllowed(url: string): void {
+		if (url.startsWith("blocked:")) {
+			throw new UrlBlockedError(`Computer Use is not allowed to open this URL: ${url}`);
+		}
+	}
+
+	async openUrl(pid: number, url: string): Promise<{ readonly bundleId: string; readonly url: string }> {
+		this.dispatch({ kind: "openUrl", pid, url });
+		return { bundleId: "com.apple.finder", url };
 	}
 
 	writeClipboard(input: ClipboardWriteInput): ClipboardWriteResult {
