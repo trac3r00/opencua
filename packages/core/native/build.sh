@@ -21,7 +21,7 @@ architectures=(-arch arm64 -arch x86_64)
 deployment_target=(-mmacosx-version-min=15.0)
 availability_errors=(-Werror=unguarded-availability -Werror=unguarded-availability-new)
 
-for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m voice-input.m voice-input-Info.plist buddy-hud.m permission-drag.m; do
+for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m voice-input.m voice-input-Info.plist buddy-hud.m permission-drag.m virtual-space.m; do
 	if [[ ! -f "${native_dir}/${source}" ]]; then
 		echo "error: missing ${native_dir}/${source}" >&2
 		exit 1
@@ -130,6 +130,23 @@ clang \
 	-o "${native_dir}/permission-drag"
 echo "built ${native_dir}/permission-drag ($(lipo -archs "${native_dir}/permission-drag"))"
 
+# The agents' own display (a private CGVirtualDisplay) and the picture-in-picture that shows it to the person.
+clang \
+	"${architectures[@]}" \
+	-O2 \
+	-fobjc-arc \
+	"${deployment_target[@]}" \
+	"${availability_errors[@]}" \
+	-framework Cocoa \
+	-framework CoreGraphics \
+	-framework CoreImage \
+	-framework CoreMedia \
+	-framework CoreVideo \
+	-framework ScreenCaptureKit \
+	"${native_dir}/virtual-space.m" \
+	-o "${native_dir}/virtual-space"
+echo "built ${native_dir}/virtual-space ($(lipo -archs "${native_dir}/virtual-space"))"
+
 # Copied into agent-owned guests (Apple virtual Macs, always arm64) by the isolated server; never run on the host.
 clang \
 	-arch arm64 \
@@ -143,7 +160,7 @@ clang \
 	-o "${native_dir}/guest-axdump"
 echo "built ${native_dir}/guest-axdump ($(lipo -archs "${native_dir}/guest-axdump"))"
 
-(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m voice-input.m voice-input-Info.plist buddy-hud.m permission-drag.m >build-inputs.sha256)
+(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m voice-input.m voice-input-Info.plist buddy-hud.m permission-drag.m virtual-space.m >build-inputs.sha256)
 echo "recorded input hashes in ${native_dir}/build-inputs.sha256"
 
 # Sign the helpers with the stable identity (see scripts/sign-native.sh): ad-hoc builds change
@@ -153,7 +170,8 @@ bash "$native_dir/../../../scripts/sign-native.sh" \
 	"$native_dir/cursor-overlay" \
 	"$native_dir/opencua-surface" \
 	"$native_dir/buddy-hud" \
-	"$native_dir/permission-drag"
+	"$native_dir/permission-drag" \
+	"$native_dir/virtual-space"
 
 # The always-on history watcher runs as its own launchd process, so it would otherwise get its own
 # TCC entry and need Accessibility and Input Monitoring granted separately. Signing it with the

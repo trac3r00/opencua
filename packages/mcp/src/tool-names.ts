@@ -25,6 +25,7 @@ export const FULL_ONLY_TOOL_NAMES = [
 	"clipboard_clear",
 	"run_decision",
 	"surface",
+	"virtual_space",
 	"run_applescript",
 ] as const;
 

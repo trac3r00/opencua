@@ -309,6 +309,28 @@ export {
 	resolveStateDir,
 } from "./platform/stop-switch.js";
 export {
+	type PipState,
+	type SpaceBounds,
+	type SpaceCommand,
+	type SpaceHelperEvent,
+	type SpaceRecord,
+	listSpaces,
+	parseSpaceCommand,
+	parseSpaceHelperLine,
+	parseSpaceRecord,
+	sendSpaceCommand,
+	spaceControlPath,
+	spaceRecordPath,
+	virtualSpaceBinary,
+} from "./platform/virtual-space.js";
+export {
+	type SpaceHelperProcess,
+	type SpaceStopSwitch,
+	type VirtualSpaceOptions,
+	TAKEOVER_REASON,
+	VirtualSpace,
+} from "./platform/virtual-space-controller.js";
+export {
 	type StopChordDetectorOptions,
 	type StopChordTimer,
 	STOP_CHORD_LABEL,

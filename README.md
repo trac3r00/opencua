@@ -305,6 +305,27 @@ Speech Recognition once in its own name. Settings live in `~/.opencua/buddy/sett
 and model for one run, and `OPENCUA_BUDDY_SOUNDS=off` silences the sounds.
 The opencua-mcp helper needs Screen Recording for `buddy ask`.
 
+### Virtual agent space (picture-in-picture)
+
+Agents can get a display of their own, so they never work on yours. OpenCUA creates it on demand and shows it as a
+small live picture-in-picture at the bottom left of your main display:
+
+```bash
+opencua space start                  # create a 1920x1080 space (--width/--height to change it)
+opencua space status                 # running spaces: id, display id, bounds
+opencua space takeover               # you drive the space; every agent pauses
+opencua space resume                 # hand it back to the agents
+opencua space stop                   # release the display
+```
+
+Click the thumbnail to expand it to about 60% of your screen, `-` to shrink it to a small pill, and **Take over** to
+step in: agents pause (the same stop switch as `opencua stop`) and your clicks, drags, scrolls and keys inside the
+expanded mirror go to the space. **Resume** hands it back. In the full MCP toolset, agents use `virtual_space`
+(`start`, `status`, `stop`) and move an app window onto the space with `set_window_frame` inside the returned bounds.
+State lives in `~/.opencua/spaces/<id>.json`. The display comes from a private macOS API (`CGVirtualDisplay`);
+where it is missing, `start` refuses with `unsupported`. The opencua-mcp helper needs Screen Recording for the live
+picture, and Accessibility to pass your input through while you have taken over.
+
 ### Concurrent worker sessions
 
 The full MCP toolset accepts `session_id` on `manage_workers` and `run_worker`, so independent
