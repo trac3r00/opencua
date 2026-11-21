@@ -23,6 +23,7 @@ import { forwardToDaemon } from "./daemon.js";
 import { IN_HELPER_ENV, needsHelperPermissions } from "./helper-route.js";
 import { registerHistoryCommands } from "./history-commands.js";
 import { deliveryFromEnv } from "./host-computer.js";
+import { registerHudCommands } from "./hud-commands.js";
 import { registerIosCommands } from "./ios.js";
 import { resolveLayout } from "./layout.js";
 import { registerLifecycleCommands, resolveCursorMotion } from "./lifecycle-commands.js";
@@ -490,6 +491,7 @@ registerBrowserCommands(program, { isJsonOutput });
 registerHistoryCommands(program, { isJsonOutput });
 registerLifecycleCommands(program, { isJsonOutput });
 registerUtmCommands(program, { isJsonOutput });
+registerHudCommands(program, { isJsonOutput });
 registerSkillsCommands(program);
 registerBuddyCommands(program, {
 	isJsonOutput,

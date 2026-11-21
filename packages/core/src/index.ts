@@ -449,3 +449,15 @@ export {
 	setSessionCursorName,
 } from "./platform/owned-surfaces.js";
 export { type SurfaceListening, listenToSurface } from "./platform/surface-listen.js";
+export {
+	type ActivityEntry,
+	ActivityFeed,
+	type ActivityState,
+	type ComposedActivity,
+	activityFeedDir,
+	activityHudDisabled,
+	buddyHudBinary,
+	composeActivity,
+	defaultActivityFeed,
+	hudStarter,
+} from "./platform/activity-feed.js";

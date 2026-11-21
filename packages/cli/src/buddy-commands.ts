@@ -27,7 +27,7 @@ import {
 	resolveAgent,
 	writeBuddySettings,
 } from "./buddy-settings.js";
-import { StatusHud } from "./buddy-status.js";
+import { BuddyStatus } from "./buddy-status.js";
 import { speak, stopSpeaking } from "./buddy-voice.js";
 import {
 	type BuddyJob,
@@ -96,7 +96,7 @@ const LISTENING = "Listening… let go to send";
 const NOT_HEARD = "Didn't catch that. Hold Control+Option while you talk, then let go.";
 const ERROR_TTL_S = 6;
 const DONE_TTL_S = 3;
-const AGENTS_REFRESH_MS = 2_000;
+const JOB_RESULT_TTL_S = 8;
 
 const SOUNDS = { start: "Pop", done: "Glass", failed: "Basso", listen: "Tink" } as const;
 
@@ -389,6 +389,16 @@ async function runAgentJob(id: string, deps: BuddyCommandDeps): Promise<BuddyJob
 	const job = { ...readJob(root, id), pid: process.pid };
 	writeJob(root, job);
 	const settings = readBuddySettings(deps.stateDir);
+	const { defaultActivityFeed } = await import("@opencua/core/light");
+	const feed = defaultActivityFeed(deps.stateDir);
+	const source = `job-${id}`;
+	const report = (entry: Parameters<typeof feed.write>[0]): void => {
+		try {
+			feed.write(entry);
+		} catch {}
+	};
+	// The job's line stays on the pill while its process lives, so the person sees background work is going on.
+	report({ source, agent: "Buddy agent", state: "working", text: job.task, pid: process.pid });
 	let finished: BuddyJob;
 	try {
 		const app = chosenApp(settings);
@@ -419,6 +429,13 @@ async function runAgentJob(id: string, deps: BuddyCommandDeps): Promise<BuddyJob
 		finished = { ...job, status: "failed", finishedAt: new Date().toISOString(), summary: message };
 	}
 	writeJob(root, finished);
+	report({
+		source,
+		agent: "Buddy agent",
+		state: finished.status === "done" ? "done" : "error",
+		text: `${finished.status === "done" ? "Done" : "Failed"}: ${finished.summary ?? job.task}`,
+		ttl: JOB_RESULT_TTL_S,
+	});
 	play(finished.status === "done" ? "done" : "failed", settings);
 	await notify(
 		finished.status === "done" ? "opencua buddy: agent done" : "opencua buddy: agent failed",
@@ -797,25 +814,14 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 				"@opencua/core"
 			);
 			const locales = (): string => command.locale ?? speechLocaleOption(readBuddySettings(deps.stateDir));
-			const hud = new StatusHud(hudOrUndefined());
+			const { defaultActivityFeed } = await import("@opencua/core/light");
+			const hud = new BuddyStatus(defaultActivityFeed(deps.stateDir));
 			const voiceServer = new VoiceServer(nativeBinary("voice-input"), locales(), {
 				onPartial: (text) => {
 					const state = hud.current.state;
 					if (state === "listening" || state === "hearing") hud.set({ state: "hearing", text });
 				},
 			});
-			// Background agents keep the pill up ("1 agent working") until they finish, even while buddy is idle.
-			const refreshAgents = (): void => {
-				try {
-					hud.setAgents(
-						listJobs(jobsRoot(deps.stateDir), isAlive).filter((job) => job.status === "running").length,
-					);
-				} catch {
-					hud.setAgents(0);
-				}
-			};
-			refreshAgents();
-			const agentsTimer = setInterval(refreshAgents, AGENTS_REFRESH_MS);
 			voiceServer.start();
 			const stopCaptureDaemon = await ensureCaptureDaemon(deps);
 			const screenCapture = daemonCapture(deps.stateDir);
@@ -890,7 +896,6 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 					const job = startAgentJob(utterance.task, deps, heard.locale);
 					process.stdout.write(`buddy: started agent ${job.id}\n`);
 					hud.set({ state: "done", text: `Agent started: ${utterance.task}`, ttl: DONE_TTL_S });
-					refreshAgents();
 					if (command.voice) await sayPhrase("onIt", deps, heard.locale);
 					return;
 				}
@@ -960,7 +965,6 @@ export function registerBuddyCommands(program: Command, deps: BuddyCommandDeps):
 				process.once("SIGTERM", resolve);
 			});
 			clearInterval(keepAlive);
-			clearInterval(agentsTimer);
 			detector.stop();
 			voiceServer.stop();
 			hud.close();

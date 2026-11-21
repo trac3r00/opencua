@@ -26,6 +26,7 @@ import type {
 	SystemPrompt,
 	WindowProbe,
 } from "@opencua/core";
+import { defaultActivityFeed } from "@opencua/core/light";
 import { resolveStateDir } from "@opencua/core/stop";
 import { AppleScriptGuardSession } from "./applescript-session.js";
 import { registerCapabilityTools, registerSkillResources } from "./capability-tools.js";
@@ -55,6 +56,7 @@ import { SERVER_INFO } from "./server-info.js";
 import { SUPERVISED_CHILD_FLAG } from "./supervisor.js";
 import { registerSurfaceTools } from "./surface-tools.js";
 import { TerminalGuardSession } from "./terminal-session.js";
+import { activityReporter, agentLabel, installToolActivity } from "./tool-activity.js";
 import { installToolErrorEnvelope } from "./tool-errors.js";
 import { toolNamesFor } from "./tool-names.js";
 import {
@@ -227,6 +229,12 @@ export function createMcpServer(
 	installToolTiming(server, toolUsage);
 	// The harness is known only after initialize, so read it on demand rather than at construction.
 	const host = () => detectHost(server.server.getClientVersion(), process.env);
+	// Agents driving the real Mac show on the person's status pill; servers built around a test computer do not.
+	if (computer === undefined) {
+		const reporter = activityReporter(defaultActivityFeed(resolveStateDir()), () => agentLabel(host()));
+		installToolActivity(server, reporter);
+		process.once("exit", reporter.clear);
+	}
 	// Each server process is one agent or subagent connection; its own cursor carries the client's name.
 	server.server.oninitialized = () => {
 		setSessionCursorName(`${server.server.getClientVersion()?.name ?? "agent"} ${process.pid}`);

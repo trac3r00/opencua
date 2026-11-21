@@ -296,8 +296,23 @@ opencua buddy disconnect hermes      # forget the app and delete its token
 
 **Status pill.** While `buddy listen` runs, a small pill at the bottom of the display under the pointer says what
 buddy is doing: listening (with the words heard so far), thinking, speaking, "didn't catch that", or why it
-failed, plus how many background agents are still working. It never takes focus, lets clicks through, and is left
-out of the screenshot buddy asks about. `OPENCUA_BUDDY_HUD=off` turns it off.
+failed. Background buddy agents and any agent driving OpenCUA show there too ("Claude Code · clicking in Safari",
+second line "2 agents working"). It never takes focus, lets clicks through, and is left out of the screenshot buddy
+asks about. `OPENCUA_HUD=off` turns it off.
+
+Agents that work outside OpenCUA can put themselves on the pill with `opencua hud set <state> [text] --agent <name>`
+and take themselves off with `opencua hud clear --agent <name>` (`opencua hud show` prints what it shows). For Claude
+Code, add hooks to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "opencua hud set thinking --agent 'Claude Code'" }] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "opencua hud set working using tools --agent 'Claude Code'" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "opencua hud clear --agent 'Claude Code'" }] }]
+  }
+}
+```
 
 **Languages.** Dictation is automatic by default: `voice-input` listens in the Mac's preferred languages (up to
 three). Pick up to three in settings (or `buddy listen --locale ko-KR,en-US`) to talk in any of them; every language

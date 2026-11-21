@@ -37,3 +37,15 @@ export {
 	parseCursorMotion,
 } from "./platform/macos-ffi/cursor-motion-config.js";
 export { StopSwitch, type StopStatusSource, describeUserStop, resolveStateDir } from "./platform/stop-switch.js";
+export {
+	type ActivityEntry,
+	ActivityFeed,
+	type ActivityState,
+	type ComposedActivity,
+	activityFeedDir,
+	activityHudDisabled,
+	buddyHudBinary,
+	composeActivity,
+	defaultActivityFeed,
+	hudStarter,
+} from "./platform/activity-feed.js";
