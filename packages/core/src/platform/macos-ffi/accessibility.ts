@@ -1,6 +1,5 @@
 import type { KoffiFunc } from "koffi";
-import type { AXTreeElement } from "../../accessibility/types.js";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
+import type { AXTreeElement, AxUnavailableReason } from "../../accessibility/types.js";
 import { AX_ERROR_CANNOT_COMPLETE, resolveAxMessagingTimeoutSeconds } from "./ax-timeout.js";
 import {
 	type CFArrayRef,
@@ -50,6 +49,8 @@ export const K_AX_SELECTED_TEXT_RANGE_ATTRIBUTE = "AXSelectedTextRange";
 const AX_SUCCESS = 0;
 const AX_VALUE_CG_POINT = 1;
 const AX_VALUE_CG_SIZE = 2;
+const AX_VALUE_CG_RECT = 3;
+const AX_VALUE_CF_RANGE = 4;
 const DOUBLE_SIZE = 8;
 const CG_PAIR_SIZE = DOUBLE_SIZE * 2;
 
@@ -186,17 +187,47 @@ const AXUIElementGetPid = applicationServices.func(
 	"int32_t AXUIElementGetPid(void *element, _Out_ int32_t *pid)",
 ) as KoffiFunc<(element: AXUIElementRef, pidOut: Int32Array) => number>;
 
-function AXUIElementPerformAction(_element: AXUIElementRef, _action: CFStringRef): never {
-	return denyHostInteraction("host-window");
-}
+const AXUIElementPerformAction = applicationServices.func("AXUIElementPerformAction", "int32_t", [
+	AX_UI_ELEMENT_REF,
+	"void *",
+]) as KoffiFunc<(element: AXUIElementRef, action: CFStringRef) => number>;
 
-function AXUIElementSetAttributeValue(_element: AXUIElementRef, _attribute: CFStringRef, _value: CFTypeRef): never {
-	return denyHostInteraction("host-window");
-}
+const AXUIElementSetAttributeValue = applicationServices.func("AXUIElementSetAttributeValue", "int32_t", [
+	AX_UI_ELEMENT_REF,
+	"void *",
+	"void *",
+]) as KoffiFunc<(element: AXUIElementRef, attribute: CFStringRef, value: CFTypeRef) => number>;
 
 const AXUIElementCopyAttributeValue = applicationServices.func(
 	"int32_t AXUIElementCopyAttributeValue(void *element, void *attribute, _Out_ void **value)",
 ) as KoffiFunc<(element: AXUIElementRef, attribute: CFStringRef, value: Array<CFTypeRef | null>) => number>;
+
+/** Bound on first use: only the caret lookup needs them, so the rest of this module loads without them. */
+let caretBindings:
+	| {
+			readonly copyParameterized: KoffiFunc<
+				(
+					element: AXUIElementRef,
+					attribute: CFStringRef,
+					parameter: CFTypeRef,
+					value: Array<CFTypeRef | null>,
+				) => number
+			>;
+			readonly createValue: KoffiFunc<(type: number, value: Buffer) => CFTypeRef | null>;
+	  }
+	| undefined;
+
+function caretFunctions(): NonNullable<typeof caretBindings> {
+	caretBindings ??= {
+		copyParameterized: applicationServices.func(
+			"int32_t AXUIElementCopyParameterizedAttributeValue(void *element, void *attribute, void *parameter, _Out_ void **value)",
+		) as NonNullable<typeof caretBindings>["copyParameterized"],
+		createValue: applicationServices.func("AXValueCreate", "void *", ["int32_t", "void *"]) as NonNullable<
+			typeof caretBindings
+		>["createValue"],
+	};
+	return caretBindings;
+}
 
 const AXUIElementCopyActionNames = applicationServices.func(
 	"int32_t AXUIElementCopyActionNames(void *element, _Out_ void **actions)",
@@ -272,6 +303,8 @@ function assertAppAnswersAccessibility(root: AXUIElementRef, pid: number): void 
 export interface AccessibilityTreeResult {
 	readonly elements: AXTreeElement[];
 	readonly axAvailable: boolean;
+	/** Why the walk read nothing; present exactly when `axAvailable` is false. */
+	readonly axUnavailable?: AxUnavailableReason;
 	/** Title of the exactly matched AX window, never borrowed from an unmatched app-wide walk. */
 	readonly windowTitle?: string;
 	/** True when the walk stopped at the element budget, so the tree is a partial view. */
@@ -511,28 +544,40 @@ export function raiseWindowInApp(pid: number, windowId: number): boolean {
 	}
 }
 
-/** Returns the AXMinimized state for a reachable window, or undefined when unavailable. */
-export function windowMinimizedForPid(pid: number, windowId: number): boolean | undefined {
+/**
+ * The app's AX window for an exact WindowServer id, retained for the caller to release, or null when the app
+ * exposes no window with that id. AXWindows omits a window on another Space while the app is inactive, but its
+ * focused window stays readable, so the focused window is the fallback, and only for the exact id.
+ */
+export function copyWindowElementForPid(pid: number, windowId: number): AXUIElementRef | null {
 	if (!isRunning(pid) || AXUIElementGetWindowSpi === null) {
-		return undefined;
+		return null;
 	}
-	let root: AXUIElementRef | null = null;
+	const root = createApplicationElement(pid);
 	let windows: CFTypeRef | null = null;
-	let minimized: CFTypeRef | null = null;
-	let matchedWindow: AXUIElementRef | null = null;
 	try {
-		root = createApplicationElement(pid);
 		windows = copyOptionalAttributeValue(root, "AXWindows");
 		if (windows !== null && isCFArray(windows)) {
 			for (let index = 0; index < cfArrayLength(windows); index++) {
 				const window = cfArrayValueAt(windows, index);
 				if (window !== null && windowIdOf(window) === windowId) {
-					matchedWindow = cfRetain(window);
-					break;
+					return cfRetain(window);
 				}
 			}
 		}
-		matchedWindow ??= copyFocusedWindowForId(root, windowId);
+		return copyFocusedWindowForId(root, windowId);
+	} finally {
+		cfRelease(windows);
+		releaseAXElement(root);
+	}
+}
+
+/** Returns the AXMinimized state for a reachable window, or undefined when unavailable. */
+export function windowMinimizedForPid(pid: number, windowId: number): boolean | undefined {
+	let minimized: CFTypeRef | null = null;
+	let matchedWindow: AXUIElementRef | null = null;
+	try {
+		matchedWindow = copyWindowElementForPid(pid, windowId);
 		if (matchedWindow === null) {
 			return undefined;
 		}
@@ -543,10 +588,6 @@ export function windowMinimizedForPid(pid: number, windowId: number): boolean | 
 	} finally {
 		cfRelease(minimized);
 		cfRelease(matchedWindow);
-		cfRelease(windows);
-		if (root !== null) {
-			releaseAXElement(root);
-		}
 	}
 }
 
@@ -593,6 +634,11 @@ export function windowTitlesForPid(pid: number): ReadonlyMap<number, string> {
 
 export function releaseAccessibilitySnapshot(pid: number): void {
 	replaceElementSnapshot(pid, undefined);
+}
+
+/** The pids that currently hold an element snapshot. */
+export function accessibilitySnapshotPids(): readonly number[] {
+	return [...elementSnapshots.keys()];
 }
 
 export function releaseSnapshotsForExitedPids(runningPids: readonly number[]): number {
@@ -668,6 +714,127 @@ export function focusedElementFrame(pid: number): AXElementFrame | undefined {
 		}
 	} finally {
 		releaseAXElement(app);
+	}
+}
+
+/**
+ * Where the text caret is, in screen points: the bounds of the empty range at the insertion point, or, when the app
+ * answers that with an empty box, the character just before it. Undefined when the focused element has no text range.
+ */
+export function focusedCaretFrame(pid: number): AXElementFrame | undefined {
+	if (!AXIsProcessTrusted() || !isRunning(pid)) {
+		return undefined;
+	}
+	const app = createApplicationElement(pid);
+	let focused: AXUIElementRef | null = null;
+	try {
+		focused = copyOptionalAttributeValue(app, K_AX_FOCUSED_UI_ELEMENT_ATTRIBUTE);
+		if (focused === null) {
+			return undefined;
+		}
+		const range = copyRangeAttribute(focused, K_AX_SELECTED_TEXT_RANGE_ATTRIBUTE);
+		if (range === null) {
+			return undefined;
+		}
+		const insertion = range.location + range.length;
+		const atCaret = boundsForRange(focused, { location: insertion, length: 0 });
+		const before = insertion > 0 ? boundsForRange(focused, { location: insertion - 1, length: 1 }) : undefined;
+		return caretFrameFrom(atCaret, before);
+	} catch {
+		return undefined;
+	} finally {
+		if (focused !== null) releaseAXElement(focused);
+		releaseAXElement(app);
+	}
+}
+
+/**
+ * The caret box from the insertion point's bounds and the character before it. Apps (Notes) answer the empty range at
+ * the end of a line with the right x but the line above, so when the caret sits on the right edge of the character
+ * before it, that character's line wins. After a newline the two differ, and the insertion point's box is kept.
+ */
+export function caretFrameFrom(
+	atCaret: AXElementFrame | undefined,
+	before: AXElementFrame | undefined,
+): AXElementFrame | undefined {
+	const sameLine =
+		atCaret !== undefined && before !== undefined && Math.abs(atCaret.x - (before.x + before.width)) < 2;
+	if (sameLine && before.height > 0) {
+		return { x: before.x + before.width, y: before.y, width: 1, height: before.height };
+	}
+	if (atCaret !== undefined && atCaret.height > 0) {
+		return { x: atCaret.x, y: atCaret.y, width: Math.max(1, atCaret.width), height: atCaret.height };
+	}
+	if (before !== undefined && before.height > 0) {
+		return { x: before.x + before.width, y: before.y, width: 1, height: before.height };
+	}
+	return undefined;
+}
+
+function copyRangeAttribute(
+	element: AXUIElementRef,
+	attribute: string,
+): { readonly location: number; readonly length: number } | null {
+	const value = copyOptionalAttributeValue(element, attribute);
+	if (value === null) {
+		return null;
+	}
+	try {
+		if (!isAXValue(value) || AXValueGetType(value) !== AX_VALUE_CF_RANGE) {
+			return null;
+		}
+		const buffer = Buffer.alloc(CG_PAIR_SIZE);
+		if (!AXValueGetValue(value, AX_VALUE_CF_RANGE, buffer)) {
+			return null;
+		}
+		return { location: Number(buffer.readBigInt64LE(0)), length: Number(buffer.readBigInt64LE(DOUBLE_SIZE)) };
+	} finally {
+		cfRelease(value);
+	}
+}
+
+function boundsForRange(
+	element: AXUIElementRef,
+	range: { readonly location: number; readonly length: number },
+): AXElementFrame | undefined {
+	const input = Buffer.alloc(CG_PAIR_SIZE);
+	input.writeBigInt64LE(BigInt(range.location), 0);
+	input.writeBigInt64LE(BigInt(range.length), DOUBLE_SIZE);
+	const { copyParameterized, createValue } = caretFunctions();
+	const parameter = createValue(AX_VALUE_CF_RANGE, input);
+	if (parameter === null) {
+		return undefined;
+	}
+	try {
+		return withCFString("AXBoundsForRange", (attributeReference) => {
+			const out: Array<CFTypeRef | null> = [null];
+			if (copyParameterized(element, attributeReference, parameter, out) !== AX_SUCCESS) {
+				return undefined;
+			}
+			const value = out[0];
+			if (value === null || value === undefined) {
+				return undefined;
+			}
+			try {
+				if (!isAXValue(value) || AXValueGetType(value) !== AX_VALUE_CG_RECT) {
+					return undefined;
+				}
+				const rect = Buffer.alloc(CG_PAIR_SIZE * 2);
+				if (!AXValueGetValue(value, AX_VALUE_CG_RECT, rect)) {
+					return undefined;
+				}
+				return {
+					x: rect.readDoubleLE(0),
+					y: rect.readDoubleLE(DOUBLE_SIZE),
+					width: rect.readDoubleLE(DOUBLE_SIZE * 2),
+					height: rect.readDoubleLE(DOUBLE_SIZE * 3),
+				};
+			} finally {
+				cfRelease(value);
+			}
+		});
+	} finally {
+		cfRelease(parameter);
 	}
 }
 
@@ -816,11 +983,18 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 	const maxDepth = options.maxDepth ?? DEFAULT_AX_MAX_DEPTH;
 	const maxElements = options.maxElements ?? DEFAULT_AX_MAX_ELEMENTS;
 	const keepIndexSpace = options.signatureOnly === true;
-	if (!AXIsProcessTrusted() || !isRunning(pid) || maxDepth < 0 || maxElements <= 0) {
+	const trusted = AXIsProcessTrusted();
+	if (!trusted || !isRunning(pid) || maxDepth < 0 || maxElements <= 0) {
 		if (!keepIndexSpace) {
 			replaceElementSnapshot(pid, undefined);
 		}
-		return { elements: [], axAvailable: false, truncated: false, walkKey: unavailableWalkKey(maxDepth, maxElements) };
+		return {
+			elements: [],
+			axAvailable: false,
+			axUnavailable: trusted ? "app-not-accessible" : "accessibility-permission",
+			truncated: false,
+			walkKey: unavailableWalkKey(maxDepth, maxElements),
+		};
 	}
 
 	const root = createApplicationElement(pid);
@@ -842,6 +1016,7 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 			return {
 				elements: [],
 				axAvailable: false,
+				axUnavailable: "app-not-accessible",
 				truncated: false,
 				walkKey: unavailableWalkKey(maxDepth, maxElements),
 			};
@@ -870,6 +1045,7 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 			return {
 				elements: [],
 				axAvailable: false,
+				axUnavailable: "app-not-accessible",
 				truncated: false,
 				walkKey: unavailableWalkKey(maxDepth, maxElements),
 				...contentUnavailable,
@@ -1346,6 +1522,61 @@ export function isWebElementByIndex(pid: number, elementIndex: number): boolean 
 		return isInsideWebArea(element);
 	} finally {
 		releaseAXElement(element);
+	}
+}
+
+/**
+ * Give keyboard focus to the web page holding an observed control, when focus is elsewhere in its app (the address
+ * bar after typing a URL). A browser in the background spends a pointer click that moves focus into the page on the
+ * move itself, so the click never reaches the page. The page's own AXFocused stays true while the address bar has
+ * focus, so the app's focused element decides. Focusing the page over accessibility does not activate the app.
+ * True when focus was moved.
+ */
+export function focusWebAreaOfElement(pid: number, elementIndex: number): boolean {
+	const element = refetchElement(pid, elementIndex);
+	let webArea: CFTypeRef | null = cfRetain(element);
+	try {
+		for (let depth = 0; webArea !== null && depth < MAX_WEB_AREA_ANCESTORS; depth++) {
+			if (copyStringAttribute(webArea as AXUIElementRef, K_AX_ROLE_ATTRIBUTE) === "AXWebArea") break;
+			const parent = copyOptionalAttributeValue(webArea as AXUIElementRef, "AXParent");
+			cfRelease(webArea);
+			webArea = parent;
+		}
+		if (webArea === null || copyStringAttribute(webArea as AXUIElementRef, K_AX_ROLE_ATTRIBUTE) !== "AXWebArea") {
+			return false;
+		}
+		const app = createApplicationElement(pid);
+		try {
+			const focused = copyOptionalAttributeValue(app, K_AX_FOCUSED_UI_ELEMENT_ATTRIBUTE);
+			const focusInPage = focused !== null && isInsideWebArea(focused as AXUIElementRef);
+			if (focused !== null) releaseAXElement(focused as AXUIElementRef);
+			if (focusInPage) return false;
+			setAttributeValue(webArea as AXUIElementRef, "AXFocused", cfBooleanTrue());
+			return true;
+		} catch {
+			return false;
+		} finally {
+			releaseAXElement(app);
+		}
+	} finally {
+		cfRelease(webArea);
+		releaseAXElement(element);
+	}
+}
+
+/** True when the app's keyboard focus is inside a web page. */
+export function appFocusInWebArea(pid: number): boolean {
+	const app = createApplicationElement(pid);
+	try {
+		const focused = copyOptionalAttributeValue(app, K_AX_FOCUSED_UI_ELEMENT_ATTRIBUTE);
+		if (focused === null) return false;
+		try {
+			return isInsideWebArea(focused as AXUIElementRef);
+		} finally {
+			releaseAXElement(focused as AXUIElementRef);
+		}
+	} finally {
+		releaseAXElement(app);
 	}
 }
 

@@ -256,65 +256,64 @@ def require_success(result):
 def semantic(params):
 	node = resolve(params["ref"])
 	action = params["action"]
-	match action:
-		case "setValue" | "type":
-			editable = node.get_editable_text_iface()
-			if editable:
-				if action == "type":
-					text_iface = node.get_text_iface()
-					if not text_iface:
-						fail("UNSUPPORTED_ACTION", "EditableText has no Text interface")
-					content = params["text"]
-					return require_success(editable.insert_text(text_iface.get_caret_offset(),
-						content, len(content.encode("utf-8"))))
-				return require_success(editable.set_text_contents(params["value"]))
-			value = node.get_value_iface()
-			if value and action == "setValue":
-				return require_success(value.set_current_value(float(params["value"])))
-			fail("UNSUPPORTED_ACTION", "Element does not support EditableText/Value")
-		case "selectText":
-			text_iface = node.get_text_iface()
-			if not text_iface:
-				fail("UNSUPPORTED_ACTION", "Element does not support Text")
-			options = params["options"]
-			content = Atspi.Text.get_text(text_iface, 0, -1)
-			needle = options.get("text", "")
-			prefix = options.get("prefix", "")
-			suffix = options.get("suffix", "")
-			match_at = content.find(prefix + needle + suffix)
-			if match_at < 0:
-				fail("TEXT_NOT_FOUND", "Requested text/context is absent")
-			start = match_at + len(prefix)
-			end = start + len(needle)
-			mode = options["selection"]
-			if mode != "text":
-				return require_success(text_iface.set_caret_offset(start if mode == "before" else end))
-			if text_iface.get_n_selections():
-				return require_success(text_iface.set_selection(0, start, end))
-			return require_success(text_iface.add_selection(start, end))
-		case "select":
-			parent = node.get_parent()
-			selection = parent.get_selection_iface() if parent else None
-			if not selection:
-				fail("UNSUPPORTED_ACTION", "Parent has no Selection interface")
-			return require_success(selection.select_child(node.get_index_in_parent()))
-		case "frame":
-			return frame(node)
-		case _:
-			names = action_names(node)
-			aliases = {
-				"AXPress": ["click", "press", "activate"],
-				"click": ["click", "press", "activate"],
-				"toggle": ["toggle", "click", "press"],
-				"doubleClick": ["double click", "doubleclick"],
-				"rightClick": ["show menu", "popup", "context menu"],
-			}
-			candidates = aliases.get(action, [action])
-			for candidate in candidates:
-				for index, name in enumerate(names):
-					if name.lower() == candidate.lower():
-						return require_success(node.get_action_iface().do_action(index))
-			fail("UNSUPPORTED_ACTION", "No AT-SPI action " + action + "; available: " + ", ".join(names))
+	if action in ("setValue", "type"):
+		editable = node.get_editable_text_iface()
+		if editable:
+			if action == "type":
+				text_iface = node.get_text_iface()
+				if not text_iface:
+					fail("UNSUPPORTED_ACTION", "EditableText has no Text interface")
+				content = params["text"]
+				return require_success(editable.insert_text(text_iface.get_caret_offset(),
+					content, len(content.encode("utf-8"))))
+			return require_success(editable.set_text_contents(params["value"]))
+		value = node.get_value_iface()
+		if value and action == "setValue":
+			return require_success(value.set_current_value(float(params["value"])))
+		fail("UNSUPPORTED_ACTION", "Element does not support EditableText/Value")
+	elif action == "selectText":
+		text_iface = node.get_text_iface()
+		if not text_iface:
+			fail("UNSUPPORTED_ACTION", "Element does not support Text")
+		options = params["options"]
+		content = Atspi.Text.get_text(text_iface, 0, -1)
+		needle = options.get("text", "")
+		prefix = options.get("prefix", "")
+		suffix = options.get("suffix", "")
+		match_at = content.find(prefix + needle + suffix)
+		if match_at < 0:
+			fail("TEXT_NOT_FOUND", "Requested text/context is absent")
+		start = match_at + len(prefix)
+		end = start + len(needle)
+		mode = options["selection"]
+		if mode != "text":
+			return require_success(text_iface.set_caret_offset(start if mode == "before" else end))
+		if text_iface.get_n_selections():
+			return require_success(text_iface.set_selection(0, start, end))
+		return require_success(text_iface.add_selection(start, end))
+	elif action == "select":
+		parent = node.get_parent()
+		selection = parent.get_selection_iface() if parent else None
+		if not selection:
+			fail("UNSUPPORTED_ACTION", "Parent has no Selection interface")
+		return require_success(selection.select_child(node.get_index_in_parent()))
+	elif action == "frame":
+		return frame(node)
+	else:
+		names = action_names(node)
+		aliases = {
+			"AXPress": ["click", "press", "activate"],
+			"click": ["click", "press", "activate"],
+			"toggle": ["toggle", "click", "press"],
+			"doubleClick": ["double click", "doubleclick"],
+			"rightClick": ["show menu", "popup", "context menu"],
+		}
+		candidates = aliases.get(action, [action])
+		for candidate in candidates:
+			for index, name in enumerate(names):
+				if name.lower() == candidate.lower():
+					return require_success(node.get_action_iface().do_action(index))
+		fail("UNSUPPORTED_ACTION", "No AT-SPI action " + action + "; available: " + ", ".join(names))
 
 
 def focused_text(pid, text):
@@ -544,86 +543,85 @@ def physical(params):
 	if params.get("options", {}).get("modifiers"):
 		if method != "key":
 			fail("UNSUPPORTED_ACTION", "Physical pointer modifiers are not supported; use key explicitly")
-	match method:
-		case "move":
-			move(params["position"])
-		case "click" | "rightClick" | "middleClick" | "doubleClick":
-			move(params["position"])
-			count = 2 if method == "doubleClick" else 1
-			for _ in range(count):
-				button({"rightClick": 3, "middleClick": 2}.get(method, 1))
-		case "type":
-			run([tool, "type", "--", params["text"]])
-		case "key":
-			options = params.get("options", {})
-			keys = list(options.get("modifiers", [])) + params["key"].split("+")
-			hold = options.get("holdMilliseconds", 0)
-			if not math.isfinite(hold) or hold < 0 or hold > 5000:
-				fail("INVALID_ARGUMENT", "Key hold must be between 0 and 5000 milliseconds")
-			if wayland():
-				codes = []
-				for key in keys:
-					code = KEY_CODES.get(key.lower())
-					if code is None:
-						fail("UNSUPPORTED_ACTION", "Unknown evdev key: " + key)
-					codes.append(code)
-				press = [str(code) + ":1" for code in codes]
-				release = [str(code) + ":0" for code in reversed(codes)]
-				if hold:
-					run([tool, "key"] + press)
-					try:
-						time.sleep(hold / 1000)
-					finally:
-						run([tool, "key"] + release)
-				else:
-					run([tool, "key"] + press + release)
+	if method == "move":
+		move(params["position"])
+	elif method in ("click", "rightClick", "middleClick", "doubleClick"):
+		move(params["position"])
+		count = 2 if method == "doubleClick" else 1
+		for _ in range(count):
+			button({"rightClick": 3, "middleClick": 2}.get(method, 1))
+	elif method == "type":
+		run([tool, "type", "--", params["text"]])
+	elif method == "key":
+		options = params.get("options", {})
+		keys = list(options.get("modifiers", [])) + params["key"].split("+")
+		hold = options.get("holdMilliseconds", 0)
+		if not math.isfinite(hold) or hold < 0 or hold > 5000:
+			fail("INVALID_ARGUMENT", "Key hold must be between 0 and 5000 milliseconds")
+		if wayland():
+			codes = []
+			for key in keys:
+				code = KEY_CODES.get(key.lower())
+				if code is None:
+					fail("UNSUPPORTED_ACTION", "Unknown evdev key: " + key)
+				codes.append(code)
+			press = [str(code) + ":1" for code in codes]
+			release = [str(code) + ":0" for code in reversed(codes)]
+			if hold:
+				run([tool, "key"] + press)
+				try:
+					time.sleep(hold / 1000)
+				finally:
+					run([tool, "key"] + release)
 			else:
-				aliases = {"enter": "Return", "return": "Return", "escape": "Escape", "esc": "Escape",
-					"option": "alt", "opt": "alt", "command": "super", "cmd": "super",
-					"left": "Left", "right": "Right", "up": "Up", "down": "Down",
-					"backspace": "BackSpace", "delete": "Delete", "tab": "Tab"}
-				chord = "+".join(aliases.get(key.lower(), key) for key in keys)
-				if hold:
-					run([tool, "keydown", chord])
-					try:
-						time.sleep(hold / 1000)
-					finally:
-						run([tool, "keyup", chord])
-				else:
-					run([tool, "key", "--clearmodifiers", chord])
-		case "scroll":
-			options = params["options"]
-			if options.get("position"):
-				move(options["position"])
-			amount = max(0, round(options["amount"]))
-			direction = options["direction"]
-			if not amount:
-				return True
-			if wayland():
-				delta_x = amount if direction == "right" else -amount if direction == "left" else 0
-				delta_y = amount if direction == "up" else -amount if direction == "down" else 0
-				run([tool, "mousemove", "--wheel", "-x", str(delta_x), "-y", str(delta_y)])
+				run([tool, "key"] + press + release)
+		else:
+			aliases = {"enter": "Return", "return": "Return", "escape": "Escape", "esc": "Escape",
+				"option": "alt", "opt": "alt", "command": "super", "cmd": "super",
+				"left": "Left", "right": "Right", "up": "Up", "down": "Down",
+				"backspace": "BackSpace", "delete": "Delete", "tab": "Tab"}
+			chord = "+".join(aliases.get(key.lower(), key) for key in keys)
+			if hold:
+				run([tool, "keydown", chord])
+				try:
+					time.sleep(hold / 1000)
+				finally:
+					run([tool, "keyup", chord])
 			else:
-				run([tool, "click", "--repeat", str(amount),
-					str({"up": 4, "down": 5, "left": 6, "right": 7}[direction])])
-		case "drag":
-			options = params["options"]
-			number = {"left": 1, "middle": 2, "right": 3}.get(options.get("button", "left"), 1)
-			duration = options.get("duration", 0)
-			if not math.isfinite(duration) or duration < 0 or duration > 5000:
-				fail("INVALID_ARGUMENT", "Drag duration must be between 0 and 5000 milliseconds")
-			positions = options.get("waypoints", []) + [options["to"]]
-			move(options["from"])
-			button(number, True)
-			try:
-				for position in positions:
-					if duration:
-						time.sleep(duration / len(positions) / 1000)
-					move(position)
-			finally:
-				button(number, False)
-		case _:
-			fail("UNSUPPORTED_ACTION", "Unknown physical operation")
+				run([tool, "key", "--clearmodifiers", chord])
+	elif method == "scroll":
+		options = params["options"]
+		if options.get("position"):
+			move(options["position"])
+		amount = max(0, round(options["amount"]))
+		direction = options["direction"]
+		if not amount:
+			return True
+		if wayland():
+			delta_x = amount if direction == "right" else -amount if direction == "left" else 0
+			delta_y = amount if direction == "up" else -amount if direction == "down" else 0
+			run([tool, "mousemove", "--wheel", "-x", str(delta_x), "-y", str(delta_y)])
+		else:
+			run([tool, "click", "--repeat", str(amount),
+				str({"up": 4, "down": 5, "left": 6, "right": 7}[direction])])
+	elif method == "drag":
+		options = params["options"]
+		number = {"left": 1, "middle": 2, "right": 3}.get(options.get("button", "left"), 1)
+		duration = options.get("duration", 0)
+		if not math.isfinite(duration) or duration < 0 or duration > 5000:
+			fail("INVALID_ARGUMENT", "Drag duration must be between 0 and 5000 milliseconds")
+		positions = options.get("waypoints", []) + [options["to"]]
+		move(options["from"])
+		button(number, True)
+		try:
+			for position in positions:
+				if duration:
+					time.sleep(duration / len(positions) / 1000)
+				move(position)
+		finally:
+			button(number, False)
+	else:
+		fail("UNSUPPORTED_ACTION", "Unknown physical operation")
 	return True
 
 
@@ -724,36 +722,35 @@ def dispatch(method, params):
 		return audio_record(params)
 	if dependency_error:
 		fail("MISSING_DEPENDENCY", "Python GI/AT-SPI unavailable: " + dependency_error)
-	match method:
-		case "listApps":
-			return [app_info(node) for node in applications()]
-		case "listWindows":
-			return windows(params["pid"])
-		case "snapshot":
-			return snapshot(params)
-		case "act":
-			return semantic(params)
-		case "focusedType":
-			return focused_text(params["pid"], params["text"])
-		case "physical":
-			return physical(params)
-		case "screenshot":
-			return capture(params)
-		case "cursor":
-			return cursor_position()
-		case "screenSize":
-			if wayland():
-				if last_screen_size:
-					return last_screen_size
-				desktop_bounds = frame(Atspi.get_desktop(0))
-				if desktop_bounds["width"] > 0 and desktop_bounds["height"] > 0:
-					return dict(width=desktop_bounds["width"], height=desktop_bounds["height"])
-				fail("UNSUPPORTED_OPERATION", "Wayland has no display geometry; capture a full screen first")
-			raw = run(["xwininfo", "-root"]).decode()
-			return dict(width=int(re.search(r"Width:\s*(\d+)", raw).group(1)),
-				height=int(re.search(r"Height:\s*(\d+)", raw).group(1)))
-		case _:
-			fail("UNSUPPORTED_OPERATION", "Unknown Linux helper operation: " + method)
+	if method == "listApps":
+		return [app_info(node) for node in applications()]
+	elif method == "listWindows":
+		return windows(params["pid"])
+	elif method == "snapshot":
+		return snapshot(params)
+	elif method == "act":
+		return semantic(params)
+	elif method == "focusedType":
+		return focused_text(params["pid"], params["text"])
+	elif method == "physical":
+		return physical(params)
+	elif method == "screenshot":
+		return capture(params)
+	elif method == "cursor":
+		return cursor_position()
+	elif method == "screenSize":
+		if wayland():
+			if last_screen_size:
+				return last_screen_size
+			desktop_bounds = frame(Atspi.get_desktop(0))
+			if desktop_bounds["width"] > 0 and desktop_bounds["height"] > 0:
+				return dict(width=desktop_bounds["width"], height=desktop_bounds["height"])
+			fail("UNSUPPORTED_OPERATION", "Wayland has no display geometry; capture a full screen first")
+		raw = run(["xwininfo", "-root"]).decode()
+		return dict(width=int(re.search(r"Width:\s*(\d+)", raw).group(1)),
+			height=int(re.search(r"Height:\s*(\d+)", raw).group(1)))
+	else:
+		fail("UNSUPPORTED_OPERATION", "Unknown Linux helper operation: " + method)
 
 
 for line in sys.stdin:

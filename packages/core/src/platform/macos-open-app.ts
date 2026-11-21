@@ -1,7 +1,7 @@
+import { spawn } from "node:child_process";
 import type { AppInfo } from "../accessibility/types.js";
 import { findMatchingApp } from "../computer/actions.js";
-import { denyHostInteraction } from "../computer/host-interaction-policy.js";
-import { activateApplication } from "./macos-ffi/workspace.js";
+import { unhideApplication } from "./macos-ffi/workspace.js";
 
 /** Launches or activates an application by name or bundle id. */
 export interface AppOpenLauncher {
@@ -13,6 +13,20 @@ export interface AppOpenLauncher {
 	 * activate themselves on launch despite open -g). Answers whether the app is in front again.
 	 */
 	restoreFrontmost?(pid: number): boolean;
+	/**
+	 * Make an app this background launch started visible without activating it. open -j launches hidden so nothing
+	 * flashes over the person, but a hidden app never loads or draws its content (a hidden Safari loads no page).
+	 */
+	reveal?(pid: number): boolean;
+	/** Whether the app has a window on screen. A background open of a running app with none reopens it. */
+	hasWindows?(pid: number): boolean;
+	/**
+	 * Ask a running app for a window the way a Dock click does (a reopen event), without activating it. Background
+	 * opens use this only for an app with no window: a windowless app has nothing to observe or act on.
+	 */
+	reopen?(target: string): Promise<void>;
+	/** Told the pid of an app this background open launched or reopened, and of the app in front before it. */
+	opened?(pid: number, frontBefore: number | undefined): void;
 }
 
 export interface AppLister {
@@ -28,6 +42,10 @@ export interface OpenApplicationOptions {
 }
 
 export interface OpenApplicationResult {
+	/** True when a running app with no window was reopened in the background to give it one. */
+	readonly reopened?: boolean;
+	/** True when a background launch made the launched app visible behind the person's app. */
+	readonly revealed?: boolean;
 	readonly name: string;
 	readonly bundleId: string;
 	readonly pid: number;
@@ -43,23 +61,91 @@ const DEFAULT_TIMEOUT_MILLISECONDS = 10_000;
 const DEFAULT_POLL_INTERVAL_MILLISECONDS = 200;
 const BUNDLE_ID_SHAPE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
 
+const CHROMIUM_BROWSERS = new Set([
+	"google chrome",
+	"com.google.chrome",
+	"brave browser",
+	"com.brave.browser",
+	"microsoft edge",
+	"com.microsoft.edgemac",
+	"chromium",
+	"org.chromium.chromium",
+	"vivaldi",
+	"com.vivaldi.vivaldi",
+]);
+
+/**
+ * A Chromium browser stops rendering a window another app covers, so a page behind the person's apps would be
+ * blank and unreadable. These switches keep covered windows rendered; they apply only to a fresh launch.
+ */
+const CHROMIUM_BACKGROUND_SWITCHES = [
+	"--disable-backgrounding-occluded-windows",
+	"--disable-renderer-backgrounding",
+	"--disable-features=CalculateNativeWinOcclusion",
+];
+
 /**
  * A bundle id goes to open -b, an app name to open -a. In the background, -g launches the app
  * without bringing it forward and -j keeps its initial windows hidden.
  */
 export function openArguments(target: string, background = true): readonly string[] {
-	return [...(background ? ["-g", "-j"] : []), ...(BUNDLE_ID_SHAPE.test(target) ? ["-b", target] : ["-a", target])];
+	const switches =
+		background && CHROMIUM_BROWSERS.has(target.toLowerCase()) ? ["--args", ...CHROMIUM_BACKGROUND_SWITCHES] : [];
+	return [
+		...(background ? ["-g", "-j"] : []),
+		...(BUNDLE_ID_SHAPE.test(target) ? ["-b", target] : ["-a", target]),
+		...switches,
+	];
 }
 
+/**
+ * Host activation is refused (host-focus), so no default restoreFrontmost exists: an app that takes the front
+ * despite open -g keeps it, and the result carries no frontmostRestored.
+ */
 export function spawnOpenLauncher(
-	options: { readonly background?: boolean; readonly restoreFrontmost?: (pid: number) => boolean } = {},
+	options: {
+		readonly background?: boolean;
+		readonly restoreFrontmost?: (pid: number) => boolean;
+		readonly reveal?: (pid: number) => boolean;
+		readonly hasWindows?: (pid: number) => boolean;
+		readonly opened?: (pid: number, frontBefore: number | undefined) => void;
+	} = {},
 ): AppOpenLauncher {
 	const background = options.background !== false;
+	const restoreFrontmost = options.restoreFrontmost;
+	const reveal = options.reveal;
+	const hasWindows = options.hasWindows;
+	const opened = options.opened;
+	const run = (args: readonly string[]): Promise<void> =>
+		new Promise<void>((resolve, reject) => {
+			const child = spawn("open", [...args], { stdio: ["ignore", "ignore", "pipe"] });
+			let stderr = "";
+			child.stderr.on("data", (chunk: Buffer) => {
+				stderr += chunk.toString("utf8");
+			});
+			child.once("error", reject);
+			child.once("close", (code) => {
+				if (code === 0) {
+					resolve();
+					return;
+				}
+				reject(new Error(stderr.trim().length > 0 ? stderr.trim() : `open exited with code ${String(code)}`));
+			});
+		});
 	return {
 		background,
-		...(background ? { restoreFrontmost: options.restoreFrontmost ?? activateApplication } : {}),
-		async launch(_target: string): Promise<void> {
-			denyHostInteraction("host-window");
+		...(background && restoreFrontmost !== undefined ? { restoreFrontmost } : {}),
+		...(background && reveal !== undefined ? { reveal } : {}),
+		...(background && opened !== undefined ? { opened } : {}),
+		...(background && hasWindows !== undefined
+			? {
+					hasWindows,
+					// -g without -j: the reopen event makes the app show a window, and nothing comes forward.
+					reopen: (target: string) => run(["-g", ...openArguments(target, false)]),
+				}
+			: {}),
+		async launch(target: string): Promise<void> {
+			await run(openArguments(target, background));
 		},
 	};
 }
@@ -81,7 +167,7 @@ export async function openApplication(
 	name: string,
 	options: OpenApplicationOptions = {},
 ): Promise<OpenApplicationResult> {
-	const launcher = options.launcher ?? spawnOpenLauncher();
+	const launcher = options.launcher ?? spawnOpenLauncher({ reveal: unhideApplication });
 	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MILLISECONDS;
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MILLISECONDS;
 	const listApps = lister.listAppIdentities?.bind(lister) ?? lister.listApps.bind(lister);
@@ -106,13 +192,25 @@ export async function openApplication(
 		if (launcher.background !== true) {
 			await launcher.launch(running.bundleId);
 		}
-		// Nothing was launched in the background, so a front app seen now is the person's own choice, not a theft.
+		// Except a windowless one: with no window there is nothing to observe, so it is reopened for one.
+		const reopen =
+			launcher.background === true && launcher.reopen !== undefined && launcher.hasWindows?.(running.pid) === false
+				? launcher.reopen
+				: undefined;
+		if (reopen !== undefined) {
+			launcher.opened?.(running.pid, frontBefore);
+			await reopen(running.bundleId);
+		}
+		const restored = reopen === undefined ? undefined : await restoreIfStolen(running.pid);
+		// Otherwise nothing was opened in the background, so a front app seen now is the person's own choice.
 		return {
 			name: running.name,
 			bundleId: running.bundleId,
 			pid: running.pid,
 			launched: false,
 			activated: launcher.background !== true,
+			...(reopen === undefined ? {} : { reopened: true }),
+			...(restored === undefined ? {} : { frontmostRestored: restored }),
 		};
 	}
 	await launcher.launch(name);
@@ -120,7 +218,12 @@ export async function openApplication(
 	while (true) {
 		const appeared = findMatchingApp(await listApps(), name);
 		if (appeared !== undefined) {
+			if (launcher.background === true) {
+				launcher.opened?.(appeared.pid, frontBefore);
+			}
 			const restored = await restoreIfStolen(appeared.pid);
+			// Only an app this call launched is revealed: one the person hid themselves stays hidden.
+			const revealed = launcher.background === true ? launcher.reveal?.(appeared.pid) : undefined;
 			return {
 				name: appeared.name,
 				bundleId: appeared.bundleId,
@@ -128,6 +231,7 @@ export async function openApplication(
 				launched: true,
 				activated: false,
 				...(restored === undefined ? {} : { frontmostRestored: restored }),
+				...(revealed === undefined ? {} : { revealed }),
 			};
 		}
 		if (Date.now() >= deadline) {

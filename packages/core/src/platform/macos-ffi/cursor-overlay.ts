@@ -5,8 +5,8 @@ import { type Socket, connect } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { planMove } from "../../../vendor/cua-cursor-motion.js";
 import { type CursorOwner, currentCursorIdentity, currentCursorOwner } from "../../computer/cursor-scope.js";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
 import type { Point, Rect } from "../../types/index.js";
 import {
 	CURSOR_MOTION_ENV,
@@ -28,7 +28,11 @@ export interface PointerOverlay {
 	set(point: Point, pid?: number, direct?: boolean): void;
 	/** Already-paced input samples must not start another glide behind the real gesture. */
 	track?(point: Point, pid?: number): void;
+	/** Glide from `from` to `point` and resolve when the drawn cursor has arrived (bounded), so input follows the cursor. */
+	glide?(point: Point, from: Point, pid?: number): Promise<void>;
 	highlight(rect: Rect, pid?: number): void;
+	/** Keep the window an app's agent works in marked (border and badge) until that app's cursor is hidden. */
+	frame?(rect: Rect, pid: number): void;
 	setMode(mode: PointerMode, pid?: number): void;
 	setScrollMode?(direction: ScrollDirection, pid?: number): void;
 	keyPress?(pid?: number): void;
@@ -112,18 +116,21 @@ export function createCursorOverlay(
 	transportFactory?: OverlayTransportFactory,
 	motion?: CursorMotionConfig | null,
 ): PointerOverlay {
-	if (transportFactory === undefined) denyHostInteraction("host-overlay");
 	const environmentMotion = process.env[CURSOR_MOTION_ENV]?.trim();
 	// Default the renderer, not the shared parser used by persisted CLI settings.
-	const configuration =
+	const configuration = agentPaced(
 		motion !== undefined
 			? parseCursorMotion(motion)
 			: environmentMotion === undefined || environmentMotion === ""
 				? { style: "adaptive" as const }
-				: cursorMotionFromEnvironment();
+				: cursorMotionFromEnvironment(),
+	);
 	const transportsByIdentity = new Map<string | undefined, OverlayTransport | undefined>();
 	const pidsByIdentity = new Map<string | undefined, Set<number>>();
-	const factory = transportFactory;
+	const factory: OverlayTransportFactory =
+		transportFactory ??
+		((scopedIdentity, _owner, configured) =>
+			defaultSocketTransport(Date.now, spawn, configured, cursorOverlaySocketPath(scopedIdentity)));
 
 	function send(command: string, pid?: number, direct = false): void {
 		const identity = currentCursorIdentity();
@@ -159,12 +166,23 @@ export function createCursorOverlay(
 		set(point: Point, pid?: number, direct?: boolean): void {
 			send(`set ${Math.round(point.x)} ${Math.round(point.y)}\n`, pid, direct);
 		},
+		async glide(point: Point, from: Point, pid?: number): Promise<void> {
+			send(`set ${Math.round(point.x)} ${Math.round(point.y)}\n`, pid);
+			// Motion off (configuration undefined) draws the cursor in place: there is nothing to wait for.
+			if (configuration !== undefined) await delay(glideWaitMilliseconds(configuration, from, point));
+		},
 		track(point: Point, pid?: number): void {
 			send(`track ${Math.round(point.x)} ${Math.round(point.y)}\n`, pid, true);
 		},
 		highlight(rect: Rect, pid?: number): void {
 			send(
 				`highlight ${Math.round(rect.x)} ${Math.round(rect.y)} ${Math.round(rect.width)} ${Math.round(rect.height)}\n`,
+				pid,
+			);
+		},
+		frame(rect: Rect, pid: number): void {
+			send(
+				`frame ${Math.round(rect.x)} ${Math.round(rect.y)} ${Math.round(rect.width)} ${Math.round(rect.height)}\n`,
 				pid,
 			);
 		},
@@ -216,6 +234,29 @@ function safeTransport(
 	}
 }
 
+/**
+ * How long the drawn cursor takes to reach a target when the configuration names no duration. Each action waits
+ * for the cursor to arrive before its input goes out, so this sets the floor of every click; the glide stays
+ * visible without slowing the agent the way a human-paced (Fitts) glide of 300 to 450 ms did.
+ */
+export const AGENT_GLIDE_MILLISECONDS = 160;
+
+/** A motion with no explicit duration glides at agent pace; an explicit duration or fixed timing is kept. */
+export function agentPaced(motion: CursorMotionConfig | undefined): CursorMotionConfig | undefined {
+	if (motion === undefined || motion.glideDurationMs !== undefined || motion.timing === "fixed") return motion;
+	return { ...motion, glideDurationMs: AGENT_GLIDE_MILLISECONDS };
+}
+
+/** The longest an action waits for the drawn cursor to reach its target. */
+export const GLIDE_WAIT_CAP_MILLISECONDS = 450;
+
+/** How long the planned glide from `from` to `to` takes, capped so a far move never stalls input. */
+export function glideWaitMilliseconds(motion: CursorMotionConfig, from: Point, to: Point): number {
+	if (Math.hypot(to.x - from.x, to.y - from.y) < 2) return 0;
+	const planned = planMove(motion, { from, to, reducedMotion: false }).arrivalT * 1000;
+	return Math.min(GLIDE_WAIT_CAP_MILLISECONDS, Math.max(0, Math.round(planned)));
+}
+
 export function overlayBinaryPath(): string | undefined {
 	return overlayBinaryCandidatePaths.find((candidate) => existsSync(candidate));
 }
@@ -241,7 +282,6 @@ export function defaultSocketTransport(
 	socketPath = cursorOverlaySocketPath(),
 	connectSocket: ConnectOverlaySocket = connect,
 ): OverlayTransport {
-	if (spawnProcess === spawn || connectSocket === connect) denyHostInteraction("host-overlay");
 	let lastSpawnAt = Number.NEGATIVE_INFINITY;
 	// A binary that cannot be executed (ENOENT/EACCES) will not become executable by retrying every
 	// second, so one failure turns daemon spawning off; the overlay then stays a silent no-op.

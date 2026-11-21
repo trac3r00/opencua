@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StopSwitch } from "@opencua/core/stop";
 import { z } from "zod";
-import { BrowserBridge } from "./bridge.js";
+import { BrowserBridge, NOT_CONNECTED } from "./bridge.js";
 import { connectionToken, writeConnection } from "./connection.js";
 import { BrowserController } from "./controller.js";
 import {
@@ -86,7 +86,14 @@ export function registerBrowserTools(server: McpServer, controller: BrowserContr
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 		},
-		async (_input, extra) => call({ action: "status" }, extra.signal),
+		async (_input, extra) =>
+			respond(async () => {
+				const status = z
+					.object({ connected: z.boolean() })
+					.loose()
+					.parse(await controller.dispatch({ action: "status" }, extra.signal));
+				return status.connected ? status : { ...status, next_step: NOT_CONNECTED };
+			}),
 	);
 	server.registerTool(
 		"browser_handoff",

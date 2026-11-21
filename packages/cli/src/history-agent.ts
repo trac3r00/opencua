@@ -6,6 +6,7 @@ import { basename, join } from "node:path";
 const MAX_PROMPT_BYTES = 120_000;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const TIMEOUT_MILLISECONDS = 120_000;
+const FAILURE_DETAIL_CHARACTERS = 300;
 const ARGUMENTS = [
 	"--print",
 	"--no-session",
@@ -23,6 +24,11 @@ export interface HistoryAgentOptions {
 	readonly executable?: string;
 	readonly args?: readonly string[];
 	readonly timeoutMs?: number;
+	/** Names the work in error messages (default "History generation"). */
+	readonly label?: string;
+	readonly cwd?: string;
+	/** Add the child's last output line to a nonzero-exit error. Off by default: history output is private. */
+	readonly includeFailureDetail?: boolean;
 }
 
 export interface HistoryAgentCommand {
@@ -61,23 +67,28 @@ function defaultExecutable(): string {
 }
 
 export async function generateHistoryText(prompt: string, options: HistoryAgentOptions = {}): Promise<string> {
+	const label = options.label ?? "History generation";
 	if (Buffer.byteLength(prompt, "utf8") > MAX_PROMPT_BYTES) {
-		throw new Error(`History generation prompt exceeds ${MAX_PROMPT_BYTES} UTF-8 bytes.`);
+		throw new Error(`${label} prompt exceeds ${MAX_PROMPT_BYTES} UTF-8 bytes.`);
 	}
 	if (options.signal?.aborted) {
-		throw new Error("History generation aborted.");
+		throw new Error(`${label} aborted.`);
 	}
 
 	const executable = options.executable ?? defaultExecutable();
 
 	return await new Promise<string>((resolve, reject) => {
 		const stdoutChunks: Buffer[] = [];
+		let stderrTail = "";
 		let stderrBytes = 0;
 		let stdoutBytes = 0;
 		let stopReason: StopReason | undefined;
 		let spawnError: Error | undefined;
 		let settled = false;
-		const child = spawn(executable, [...(options.args ?? ARGUMENTS)], { stdio: ["pipe", "pipe", "pipe"] });
+		const child = spawn(executable, [...(options.args ?? ARGUMENTS)], {
+			stdio: ["pipe", "pipe", "pipe"],
+			...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+		});
 		const timeoutMs = options.timeoutMs ?? TIMEOUT_MILLISECONDS;
 		const timer = setTimeout(() => stop("timeout"), timeoutMs);
 
@@ -106,6 +117,7 @@ export async function generateHistoryText(prompt: string, options: HistoryAgentO
 		});
 		child.stderr.on("data", (chunk: Buffer) => {
 			stderrBytes += chunk.length;
+			stderrTail = (stderrTail + chunk.toString("utf8")).slice(-FAILURE_DETAIL_CHARACTERS);
 			if (stderrBytes > MAX_OUTPUT_BYTES) {
 				stop("oversize");
 			}
@@ -120,17 +132,25 @@ export async function generateHistoryText(prompt: string, options: HistoryAgentO
 			settled = true;
 			cleanup();
 			if (stopReason === "abort") {
-				reject(new Error("History generation aborted."));
+				reject(new Error(`${label} aborted.`));
 			} else if (stopReason === "timeout") {
-				reject(new Error(`History generation timed out after ${timeoutMs / 1000} seconds.`));
+				reject(new Error(`${label} timed out after ${timeoutMs / 1000} seconds.`));
 			} else if (stopReason === "oversize") {
-				reject(new Error(`History generation output exceeds ${MAX_OUTPUT_BYTES} bytes.`));
+				reject(new Error(`${label} output exceeds ${MAX_OUTPUT_BYTES} bytes.`));
 			} else if (spawnError) {
-				reject(new Error(`History generation executable is unavailable: ${executable}.`));
+				reject(new Error(`${label} executable is unavailable: ${executable}.`));
 			} else if (code !== 0) {
-				reject(new Error(`History generation failed with exit code ${code ?? "unknown"}.`));
+				const said =
+					options.includeFailureDetail !== true
+						? undefined
+						: `${Buffer.concat(stdoutChunks).toString("utf8")}\n${stderrTail}`
+								.trim()
+								.split("\n")
+								.at(-1)
+								?.slice(-FAILURE_DETAIL_CHARACTERS);
+				reject(new Error(`${label} failed with exit code ${code ?? "unknown"}${said ? `: ${said}` : "."}`));
 			} else if (Buffer.concat(stdoutChunks).toString("utf8").trim().length === 0) {
-				reject(new Error("History generation returned empty text."));
+				reject(new Error(`${label} returned empty text.`));
 			} else {
 				resolve(Buffer.concat(stdoutChunks).toString("utf8").trim());
 			}

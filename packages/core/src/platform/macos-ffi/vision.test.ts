@@ -87,25 +87,36 @@ describe.if(realMac)(
 	},
 );
 
+function intersectionOverUnion(
+	left: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+	right: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+): number {
+	const width = Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x);
+	const height = Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y);
+	const shared = Math.max(0, width) * Math.max(0, height);
+	return shared / (left.width * left.height + right.width * right.height - shared);
+}
+
 describe.if(realMac)(
 	"#given a region of the image #when Vision OCR reads it #then only that region is read and boxes stay in whole-image pixels",
 	() => {
 		it("returns the text inside the region at the same pixels as an uncropped read, and nothing outside it", () => {
 			const bytes = readFileSync(twoByOne);
 			const whole = find(recognizeTextInImage(bytes), "ZQX-4471");
+			// Vision clips a line's box to a crop's edge and pads it by context, so the margin is a third of the line
+			// height and the boxes are compared by overlap: a cut-out box left in crop pixels lands about 100 px away.
+			const margin = Math.round(whole.box.height / 3);
 			const region = {
-				x: whole.box.x - 10,
-				y: whole.box.y - 10,
-				width: whole.box.width + 20,
-				height: whole.box.height + 20,
+				x: whole.box.x - margin,
+				y: whole.box.y - margin,
+				width: whole.box.width + 2 * margin,
+				height: whole.box.height + 2 * margin,
 			};
 
 			const cropped = recognizeTextInImage(bytes, { region });
 
 			const hit = find(cropped, "ZQX-4471");
-			expect(Math.abs(hit.box.x - whole.box.x)).toBeLessThan(4);
-			expect(Math.abs(hit.box.y - whole.box.y)).toBeLessThan(4);
-			expect(Math.abs(hit.box.width - whole.box.width)).toBeLessThan(whole.box.width * 0.1);
+			expect(intersectionOverUnion(hit.box, whole.box)).toBeGreaterThan(0.6);
 			expect(cropped.map((observation) => observation.text)).not.toContain("Wi-Fi");
 			for (const observation of cropped) {
 				expect(observation.box.y).toBeGreaterThanOrEqual(region.y - 2);

@@ -103,8 +103,11 @@ export class BrowserController {
 
 	private readonly bridge: BrowserBridge;
 
-	constructor(bridge: BrowserBridge) {
+	private readonly buildId: string | undefined;
+
+	constructor(bridge: BrowserBridge, buildId?: string) {
 		this.bridge = bridge;
+		this.buildId = buildId;
 	}
 
 	async dispatch(value: unknown, signal?: AbortSignal): Promise<unknown> {
@@ -120,6 +123,7 @@ export class BrowserController {
 			case "status": {
 				const handoff = this.bridge.handoffRequest;
 				return {
+					...(this.buildId === undefined ? {} : { build_id: this.buildId }),
 					connected: this.bridge.connected,
 					stopped: this.bridge.paused,
 					control: this.bridge.control,

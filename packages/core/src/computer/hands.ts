@@ -52,6 +52,26 @@ function isAbort(error: unknown): boolean {
 	return error instanceof Error && error.name === "AbortError";
 }
 
+/** Time with at least two lanes active; triple overlap counts once. Lanes from several runs may be measured together. */
+export function measureOverlapMs(lanes: readonly Pick<HandLaneResult<unknown>, "startedMs" | "finishedMs">[]): number {
+	const edges = lanes.flatMap((lane) => [
+		{ time: lane.startedMs, delta: 1 },
+		{ time: lane.finishedMs, delta: -1 },
+	]);
+	edges.sort((a, b) => a.time - b.time);
+	let active = 0;
+	let previousMs = edges[0]?.time ?? 0;
+	let overlapMs = 0;
+	for (const edge of edges) {
+		if (active > 1) {
+			overlapMs += edge.time - previousMs;
+		}
+		active += edge.delta;
+		previousMs = edge.time;
+	}
+	return overlapMs;
+}
+
 /** Resource ownership is shared by auto/never runs on this coordinator. */
 export class HandsCoordinator {
 	private readonly held = new Set<HandResource>();
@@ -187,28 +207,12 @@ export class HandsCoordinator {
 		lanes.sort((a, b) => a.index - b.index);
 		notStarted.sort((a, b) => a - b);
 
-		// Integrate time with at least two active lanes; triple overlap counts once.
-		const edges = lanes.flatMap((lane) => [
-			{ time: lane.startedMs, delta: 1 },
-			{ time: lane.finishedMs, delta: -1 },
-		]);
-		edges.sort((a, b) => a.time - b.time);
-		let active = 0;
-		let previousMs = queuedMs;
-		let overlapMs = 0;
-		for (const edge of edges) {
-			if (active > 1) {
-				overlapMs += edge.time - previousMs;
-			}
-			active += edge.delta;
-			previousMs = edge.time;
-		}
 		return {
 			policy,
 			aborted: controller.signal.aborted,
 			lanes,
 			notStarted,
-			overlapMs,
+			overlapMs: measureOverlapMs(lanes),
 			sequentialEstimateMs: lanes.reduce((sum, lane) => sum + lane.durationMs, 0),
 		};
 	}

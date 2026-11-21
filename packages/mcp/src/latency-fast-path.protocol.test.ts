@@ -138,6 +138,8 @@ describe("#given a text-only call #when run_hands types #then it does not probe 
 
 describe("#given a final type_text step #when run_hands has no expectation #then the final write skips its settlement fence", () => {
 	it("keeps the fence on the earlier write only", async () => {
+		// Settlement fences belong to the constant rhythm's one-shot accessibility write.
+		process.env["OPENCUA_TYPE_RHYTHM"] = "constant";
 		const computer = new FakeGuardedComputer();
 		computer.delivery = "background";
 		const harness = await createHarness(computer);
@@ -157,6 +159,7 @@ describe("#given a final type_text step #when run_hands has no expectation #then
 		});
 
 		expect(computer.typeOptions).toEqual([{ settleWrite: true }, { settleWrite: false }]);
+		Reflect.deleteProperty(process.env, "OPENCUA_TYPE_RHYTHM");
 	});
 });
 

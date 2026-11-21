@@ -554,9 +554,7 @@ export async function findByScrolling(
 				if (!("entries" in read)) {
 					if (find.vision === "only") {
 						return missing(
-							read.unavailable === "isolated-session-required"
-								? `vision "only" cannot read the window: host capture is refused by design (isolated-session-required); use vision "auto" with an accessibility target, or an agent-owned isolated desktop`
-								: `vision "only" cannot read the window (${read.unavailable}); grant Screen Recording to the app that runs this server, or use vision "auto" with an accessibility target`,
+							`vision "only" cannot read the window (${read.unavailable}); grant Screen Recording to the app that runs this server, or use vision "auto" with an accessibility target`,
 						);
 					}
 				} else {

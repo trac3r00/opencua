@@ -42,7 +42,7 @@ afterAll(async () => {
 });
 
 describe("#given a background cursor marker #when choosing where to stack it #then it sits only above its own app", () => {
-	it("picks the target's frontmost normal window and hides when the target has none on screen", async () => {
+	it("stacks above the target window that holds the marker, and hides a frame whose window closed", async () => {
 		const result = await run([binary]);
 		expect(result.exitCode).toBe(0);
 		expect(result.stderr).toBe("");
@@ -54,7 +54,12 @@ describe("#given a background cursor marker #when choosing where to stack it #th
 					.map((line) => line.split("=")),
 			),
 		).toEqual({
-			"front-normal": "7",
+			"cursor-dialog": "7",
+			"cursor-main": "8",
+			"cursor-side": "11",
+			"cursor-outside": "7",
+			"frame-main": "8",
+			"frame-closed": "0",
 			absent: "0",
 			"user-front": "5",
 			empty: "0",

@@ -8,7 +8,7 @@ import type { OcrTextEntry, WindowInventoryEntry } from "../accessibility/types.
 import { resolveAppInstructions } from "../app-instructions/index.js";
 import { resolveDisplayMetadata } from "../computer/display-metadata.js";
 import type { InputObservation, PreflightOptions, PreflightResult } from "../computer/guarded-interface.js";
-import { denyHostInteraction } from "../computer/host-interaction-policy.js";
+import { setAttendedHostDelivery } from "../computer/host-interaction-policy.js";
 import { assertElementInInputRegion, assertFocusInInputRegion } from "../computer/input-region.js";
 import { currentInputScope } from "../computer/input-scope.js";
 import type { ComputerInterface, ScreenshotResult, WindowTextRead } from "../computer/interface.js";
@@ -27,7 +27,7 @@ import type {
 	ScrollOptions,
 	SelectTextOptions,
 } from "../types/index.js";
-import { type RunningAppInfo, collectAppUsage, getRunningMacOSApps } from "./app-list.js";
+import { type RunningAppInfo, collectAppUsage, findRunningApp, getRunningMacOSApps } from "./app-list.js";
 import { CursorKeyedObservations } from "./cursor-observations.js";
 import { execFileStdout, execFileStdoutBuffer } from "./exec-util.js";
 import { HostComputer, type HostComputerOptions } from "./host.js";
@@ -35,9 +35,12 @@ import { parseImageDimensions, sniffImageMimeType } from "./image-format.js";
 import { InputLock } from "./input-lock.js";
 import { type KeyboardFenceClock, awaitAccessibilityWriteSettled, awaitKeyboardFence } from "./keyboard-fence.js";
 import {
+	accessibilitySnapshotPids,
+	appFocusInWebArea,
 	currentObservationKey,
 	elementFrameByIndex,
 	extractAccessibilityTree,
+	focusWebAreaOfElement,
 	focusedElementFrame,
 	focusedWindowIdsForObservationPid,
 	focusedWindowIsModal,
@@ -45,6 +48,7 @@ import {
 	isWebElementByIndex,
 	performActionByIndex,
 	pressElementAtScreenPoint,
+	raiseWindowInApp,
 	rebaselineObservedElement,
 	releaseAccessibilitySnapshot,
 	releaseSnapshotsForExitedPids,
@@ -52,17 +56,17 @@ import {
 	scrollToVisibleByIndex,
 	setValueByIndex,
 	typeIntoFocusedAXElement,
-	windowMinimizedForPid,
 	windowTitlesForPid,
 } from "./macos-ffi/accessibility.js";
 import type { AccessibilityTreeOptions } from "./macos-ffi/accessibility.js";
 import { createAxEventWaiter, waitForAxQuiet } from "./macos-ffi/ax-observer.js";
+import { cursorBackgroundCuesEnabled } from "./macos-ffi/cursor-background-cues.js";
 import {
 	type CursorMotionConfig,
 	cursorMotionFromEnvironment,
 	parseCursorMotion,
 } from "./macos-ffi/cursor-motion-config.js";
-import { NOOP_POINTER_OVERLAY, type PointerOverlay } from "./macos-ffi/cursor-overlay.js";
+import { NOOP_POINTER_OVERLAY, type PointerOverlay, createCursorOverlay } from "./macos-ffi/cursor-overlay.js";
 import { onlineDisplayInfo } from "./macos-ffi/display-list.js";
 import { isScreenLocked } from "./macos-ffi/lock-screen.js";
 import { readClipboard, writeClipboard } from "./macos-ffi/pasteboard.js";
@@ -70,7 +74,7 @@ import { NOOP_DISPLAY_SLEEP } from "./macos-ffi/power.js";
 import {
 	captureDisplayImage,
 	captureDisplayRegionImage,
-	captureWindowImage,
+	captureWindowImageAsync,
 	getMainDisplayId,
 	getMainDisplayLogicalSize,
 	getMainDisplayNativePixelSize,
@@ -84,7 +88,7 @@ import {
 } from "./macos-ffi/select-text.js";
 import type { SkyLightTargetWindow } from "./macos-ffi/skylight.js";
 import { recognizeTextInImage } from "./macos-ffi/vision.js";
-import { listWindows as listOwnedCandidateWindows } from "./macos-ffi/window-list.js";
+import { activateApplication } from "./macos-ffi/workspace.js";
 import { MacOSInputController } from "./macos-input.js";
 import type { InputDelivery } from "./macos-input.js";
 import { currentOnscreenWindowIds, guardAgainstFocusSteal } from "./macos-input.js";
@@ -108,7 +112,12 @@ import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveOcrCrop } from "./ocr-region.js";
 import { isOwnedSurfacePid, surfaceAudioState } from "./owned-surfaces.js";
 import { currentSystemPrompts } from "./system-prompts.js";
+import { settleWebFocus } from "./web-focus-settle.js";
+import { windowMinimizedState, windowOnHiddenSpace } from "./window-minimized.js";
 
+/** How long a background web click waits for the page to take keyboard focus, and how often it looks. */
+const WEB_FOCUS_SETTLE_LIMIT_MILLISECONDS = 400;
+const WEB_FOCUS_POLL_MILLISECONDS = 15;
 const execFileAsync = promisify(execFile);
 
 const FINDER_DESKTOP_BOUNDS_TIMEOUT_MILLISECONDS = 2_000;
@@ -118,6 +127,11 @@ const SCREENSHOT_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 const DEFAULT_APP_STATE_SETTLE_MILLISECONDS = 300;
 const WINDOW_APPEAR_WAIT_MILLISECONDS = 3_000;
 const WINDOW_APPEAR_POLL_MILLISECONDS = 150;
+const SPACE_SLIDE_POLL_MILLISECONDS = 50;
+const SPACE_SLIDE_WAIT_MILLISECONDS = 1_000;
+/** How long an Edit command waits for the focused field of an app just told it is active: 10 x 30 ms. */
+const EDIT_FOCUS_POLLS = 10;
+const EDIT_FOCUS_POLL_MILLISECONDS = 30;
 const KEYBOARD_FENCE_CLOCK: KeyboardFenceClock = {
 	now: () => performance.now(),
 	sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -140,8 +154,9 @@ export interface MacOSHostComputerOptions extends HostComputerOptions {
 	appApproval?: AppApprovalStore;
 	urlBlocklist?: readonly string[];
 	/**
-	 * The shared host is observation-only. "attended" is rejected; "background" does not
-	 * grant input capability. Mutations require an agent-owned isolated backend.
+	 * "background" (the default): input reaches the target app per process (SLEventPostToPid) without changing the
+	 * frontmost app, raising windows or moving the pointer. "attended" is the opt-in direct mode: the target app is
+	 * activated and raised, and input goes through the global HID tap under the real, moving pointer.
 	 */
 	delivery?: InputDelivery;
 	/** Reports whether the Mac is locked. Defaults to the console session's lock flag. */
@@ -150,10 +165,10 @@ export interface MacOSHostComputerOptions extends HostComputerOptions {
 
 export class MacOSHostComputer extends HostComputer {
 	readonly capabilities: ComputerInterface["capabilities"] = Object.freeze({
-		supportsScreenshot: false,
-		supportsInput: false,
+		supportsScreenshot: true,
+		supportsInput: true,
 		supportsAccessibility: true,
-		supportsClipboard: false,
+		supportsClipboard: true,
 	});
 
 	private readonly input: MacOSInputController;
@@ -176,14 +191,21 @@ export class MacOSHostComputer extends HostComputer {
 
 	constructor(options: MacOSHostComputerOptions = {}) {
 		super();
-		if (options.delivery === "attended") denyHostInteraction("global-input");
+		if (options.delivery === "attended") setAttendedHostDelivery(true);
 		this.appApproval = options.appApproval;
 		this.delivery = options.delivery ?? "background";
 		this.urlBlocklist = options.urlBlocklist ?? [];
 		const cursorMotion =
 			options.cursorMotion !== undefined ? parseCursorMotion(options.cursorMotion) : cursorMotionFromEnvironment();
 		const cursorTravelEnabled = cursorMotion !== undefined;
-		this.overlay = options.overlay ?? NOOP_POINTER_OVERLAY;
+		// The agent's drawn cursor is on by default (OPENCUA_CURSOR=off hides it); it shows where each action lands.
+		this.overlay =
+			options.overlay ??
+			(this.delivery === "background" && !cursorBackgroundCuesEnabled()
+				? NOOP_POINTER_OVERLAY
+				: agentCursorEnabled()
+					? createCursorOverlay(undefined, options.cursorMotion)
+					: NOOP_POINTER_OVERLAY);
 		this.isLocked = options.isLocked ?? isScreenLocked;
 		this.input = new MacOSInputController(
 			options.defaultTargetPid,
@@ -191,6 +213,7 @@ export class MacOSHostComputer extends HostComputer {
 			this.isLocked,
 			NOOP_DISPLAY_SLEEP,
 			this.delivery,
+			// Background activation (no raise, front app unchanged) follows OPENCUA_BACKGROUND_ACTIVATION; on by default.
 			undefined,
 			cursorTravelEnabled,
 		);
@@ -210,13 +233,16 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	private async captureScreenshot(options?: ScreenshotOptions, windowId?: number): Promise<ScreenshotResult> {
-		// Even an otherwise permitted host capture can raise macOS capture-consent UI.
-		if (!this.capabilities.supportsScreenshot && !this.isOwnedWindow(windowId)) denyHostInteraction("host-window");
 		if (!screenCaptureAllowed()) {
 			throw new Error(
 				"Screen Recording permission is not granted to the process running opencua, so no image was captured (capturing would raise macOS's permission prompt). Grant it in System Settings > Privacy & Security > Screen Recording to the app that launches this server, then restart the server.",
 			);
 		}
+		return await this.captureAllowedScreenshot(options, windowId);
+	}
+
+	/** The capture behind captureScreenshot, for callers that have just checked Screen Recording themselves. */
+	private async captureAllowedScreenshot(options?: ScreenshotOptions, windowId?: number): Promise<ScreenshotResult> {
 		const size = options?.targetSize ?? (await this.getScreenSize());
 		if (options?.region !== undefined) {
 			if (windowId !== undefined) {
@@ -254,37 +280,30 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async move(position: Point): Promise<void> {
-		this.assertInputAvailable();
 		await this.pointerBurst(() => this.input.move(position));
 	}
 
 	async click(position: Point, options?: PointerOptions): Promise<void> {
-		this.assertInputAvailable();
 		await this.pointerBurst(() => this.input.click(position, "left", options?.modifiers), options?.modifiers);
 	}
 
 	async rightClick(position: Point, options?: PointerOptions): Promise<void> {
-		this.assertInputAvailable();
 		await this.inputLock.run(() => this.input.click(position, "right", options?.modifiers));
 	}
 
 	async middleClick(position: Point, options?: PointerOptions): Promise<void> {
-		this.assertInputAvailable();
 		await this.inputLock.run(() => this.input.click(position, "middle", options?.modifiers));
 	}
 
 	async doubleClick(position: Point, options?: PointerOptions): Promise<void> {
-		this.assertInputAvailable();
 		await this.pointerBurst(() => this.input.doubleClick(position, options?.modifiers), options?.modifiers);
 	}
 
 	async type(text: string): Promise<void> {
-		this.assertInputAvailable();
 		await this.inputLock.run(() => this.input.typeText(text));
 	}
 
 	async key(key: string, options?: KeyOptions): Promise<void> {
-		this.assertInputAvailable();
 		const pid = this.input.currentTargetPid;
 		const modifiers = options?.modifiers ?? [];
 		if (this.delivery === "background" && pid !== undefined && commandChordMask(modifiers) !== undefined) {
@@ -335,7 +354,6 @@ export class MacOSHostComputer extends HostComputer {
 	 * told it is active when that is what keeps the command disabled (see invokeWindowMenu).
 	 */
 	async invokeMenu(targetPid: number, path: readonly string[]): Promise<InvokeMenuResult> {
-		this.assertInputAvailable(targetPid);
 		const normalized = normalizeMenuPath(path);
 		await this.assertBackgroundFinderCommand(targetPid, { path: normalized });
 		const command = normalized.length === 2 && normalized[0] === "Edit" ? normalized[1] : undefined;
@@ -352,7 +370,20 @@ export class MacOSHostComputer extends HostComputer {
 			result = await invokeMenu(targetPid, normalized);
 		} else {
 			result = await invokeWindowMenu(targetPid, normalized, (disabled, run) =>
-				this.input.withWindowCommand(targetPid, window, disabled, run),
+				this.input.withWindowCommand(
+					targetPid,
+					window,
+					command === undefined ? disabled : () => true,
+					async (held) => {
+						// An app behind the person's has no key window, so its focused field answers only once it is told
+						// it is active; the Edit item itself stays disabled, since AppKit validates it only while shown.
+						if (held && command !== undefined && (await this.editCommandOnceFocused(targetPid, command))) {
+							this.input.showKeyboard();
+							return { resolvedPath: normalized, action: "accessibility" };
+						}
+						return await run(held);
+					},
+				),
 			);
 		}
 		this.input.noteKeyboardInput(targetPid);
@@ -456,6 +487,17 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	/** True when the Edit command ran on the focused native text field; false hands it to the menu. */
+	/** The Edit command on the focused field, retried (bounded) while an app just told it is active takes focus. */
+	private async editCommandOnceFocused(pid: number, command: string): Promise<boolean> {
+		for (let poll = 0; poll < EDIT_FOCUS_POLLS; poll += 1) {
+			if (await this.editCommandOnTextField(pid, command)) {
+				return true;
+			}
+			await new Promise((resolve) => setTimeout(resolve, EDIT_FOCUS_POLL_MILLISECONDS));
+		}
+		return false;
+	}
+
 	private async editCommandOnTextField(pid: number, command: string): Promise<boolean> {
 		switch (command) {
 			case "Select All":
@@ -490,7 +532,7 @@ export class MacOSHostComputer extends HostComputer {
 	 * extension, which only the real key does.
 	 */
 	private selectAllInTextField(pid: number): boolean {
-		return !focusedWindowIsModal(pid) && selectAllInFocusedTextElement(pid);
+		return !focusedWindowShowsFilePanel(pid) && selectAllInFocusedTextElement(pid);
 	}
 
 	/** Carries out a Command chord for a background app; false hands the chord back to real key events. */
@@ -534,12 +576,10 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async scroll(options: ScrollOptions): Promise<void> {
-		this.assertInputAvailable();
 		await this.inputLock.run(() => this.input.scroll(options));
 	}
 
 	async drag(options: DragOptions): Promise<void> {
-		this.assertInputAvailable();
 		const burst = () => this.input.drag(options);
 		await ((options.button ?? "left") === "left"
 			? this.pointerBurst(burst, options.modifiers)
@@ -559,7 +599,6 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async getCursorPosition(): Promise<Point> {
-		this.assertInputAvailable();
 		return this.input.getCursorPosition();
 	}
 
@@ -624,6 +663,19 @@ export class MacOSHostComputer extends HostComputer {
 		}
 	}
 
+	/** The app's frontmost window that sits on a Space no display shows, if it has one. */
+	private async windowOnHiddenSpaceFor(pid: number): Promise<number | undefined> {
+		const listed = await openWindowsForTargeting(undefined, { includeOffscreen: true }).catch(() => []);
+		const onscreen = new Set(currentOnscreenWindowIds() ?? []);
+		return listed.find(
+			(window) =>
+				window.owner?.processId === pid &&
+				(window.layer ?? 0) === 0 &&
+				!onscreen.has(window.id) &&
+				windowOnHiddenSpace(window.id) === true,
+		)?.id;
+	}
+
 	private async resolveObservationWindow(
 		pid: number,
 		requestedWindowId?: number,
@@ -653,13 +705,40 @@ export class MacOSHostComputer extends HostComputer {
 		// observation would return a useless image and a whole-app tree. Stop with the ask instead.
 		assertScreenUnlocked(this.isLocked());
 		const settleMs = options?.settleMs ?? DEFAULT_APP_STATE_SETTLE_MILLISECONDS;
-		const apps = await getRunningMacOSApps();
-		releaseSnapshotsForExitedPids(apps.map((runningApp) => runningApp.pid));
-		const app = resolveTargetApp(apps, targetPid);
+		const app = await resolveObservedApp(targetPid);
 		this.assertAppApproved(app);
 		await this.assertBrowserUrlAllowed(app, options?.requireWindow === true);
 		let windows = await openWindowsForTargeting();
 		let targetWindow = await this.resolveObservationWindow(app.pid, options?.windowId, windows);
+		if (options?.requireWindow === true && targetWindow === undefined && this.delivery === "attended") {
+			// Attended delivery drives the app like a person: an app whose windows are hidden, behind its own
+			// Space or on another display is brought forward, which puts a window on screen for the wait below. As attended
+			// input does, the window is raised too: activation alone can leave the person on a covering app's Space.
+			activateApplication(app.pid);
+			const hiddenWindowId = options.windowId ?? focusedWindowIdsForObservationPid(app.pid).focusedWindowId;
+			if (hiddenWindowId !== undefined) {
+				raiseWindowInApp(app.pid, hiddenWindowId);
+			}
+		}
+		// An inactive app whose window sits on a Space no display shows has no window on screen and none over
+		// accessibility. Background delivery works on it where it is: its pixels and their text are the observation,
+		// and nothing switches the person's Space.
+		if (
+			options?.requireWindow === true &&
+			targetWindow === undefined &&
+			this.delivery === "background" &&
+			options.windowId === undefined
+		) {
+			const parkedId = await this.windowOnHiddenSpaceFor(app.pid);
+			if (parkedId !== undefined) {
+				targetWindow = await this.input.rememberTargetWindow(app.pid, parkedId);
+			}
+		}
+		const onHiddenSpace =
+			this.delivery === "background" &&
+			targetWindow !== undefined &&
+			currentOnscreenWindowIds()?.includes(targetWindow.id) !== true &&
+			windowOnHiddenSpace(targetWindow.id) === true;
 		// A window that was just opened (open_app, a new document, a reopened app) can take a moment to
 		// reach the window server. Wait a bounded time for it instead of failing the first observation.
 		const windowDeadline = Date.now() + WINDOW_APPEAR_WAIT_MILLISECONDS;
@@ -670,6 +749,19 @@ export class MacOSHostComputer extends HostComputer {
 		}
 		if (options?.requireWindow === true && targetWindow === undefined) {
 			throw new Error(`No visible target window available for pid ${app.pid}`);
+		}
+		const recorded = this.lastViewportByPid.get(app.pid)?.windowBounds;
+		if (
+			this.delivery === "attended" &&
+			targetWindow !== undefined &&
+			(recorded === undefined || !sameRect(recorded, targetWindow.bounds))
+		) {
+			// Attended input switches Spaces, and the bounds read mid-slide are not where the window comes to rest.
+			const listed = targetWindow;
+			const bounds = await settledWindowBounds(
+				async () => (await this.resolveObservationWindow(app.pid, listed.id))?.bounds,
+			);
+			targetWindow = bounds === undefined ? listed : { ...listed, bounds };
 		}
 		const windowInventory = await this.describeWindowsForPid(app.pid, windows);
 		const listedTargetTitle = windowInventory.find((entry) => entry.id === targetWindow?.id)?.title;
@@ -687,35 +779,42 @@ export class MacOSHostComputer extends HostComputer {
 		const walkOptions = {
 			...(options?.maxElements === undefined ? {} : { maxElements: options.maxElements }),
 			...(options?.includeMenuBar === undefined ? {} : { includeMenuBar: options.includeMenuBar }),
-			...(targetWindow === undefined ? {} : { windowId: targetWindow.id }),
+			// macOS hides a hidden-Space window from accessibility: the app's own root is what can still be read.
+			...(targetWindow === undefined || onHiddenSpace ? {} : { windowId: targetWindow.id }),
 			...(options?.subtreeOf === undefined ? {} : { subtreeOf: options.subtreeOf }),
 			...(options?.visibleOnly === true ? { visibleOnly: true } : {}),
 		};
 		const captureTree = options?.includeAccessibilityTree !== false;
-		if (settleMs > 0 && captureTree) {
-			await this.waitForUiSettle(app.pid, settleMs, walkOptions);
-		}
 		// Scope the screenshot to the target window at its own aspect ratio (capped),
 		// so the model sees an undistorted window image and coordinates invert cleanly.
 		// Without a target window, fall back to the full display.
 		const size =
 			options?.screenshotSize ??
 			(targetWindow !== undefined ? resolveWindowScreenshotSize(targetWindow.bounds) : await this.getScreenSize());
-		// The person's desktop is never captured, and without Screen Recording a capture would raise macOS's
-		// permission prompt mid-task; observe the elements anyway and say why the image is missing.
+		// Without Screen Recording a capture would raise macOS's permission prompt mid-task; observe the
+		// elements anyway and say why the image is missing.
 		const screenshotUnavailable =
 			options?.includeScreenshot === false
 				? undefined
-				: !this.capabilities.supportsScreenshot && !this.isOwnedWindow(targetWindow?.id)
-					? ("isolated-session-required" as const)
-					: screenCaptureAllowed()
-						? undefined
-						: ("screen-recording-permission" as const);
-		const screenshot =
-			options?.includeScreenshot === false || screenshotUnavailable !== undefined
-				? { data: Buffer.alloc(0), mimeType: "image/png" as const, width: size.width, height: size.height }
-				: await this.captureScreenshot({ targetSize: size, format: "jpeg" }, targetWindow?.id);
-		const tree = captureTree ? extractAccessibilityTree(app.pid, walkOptions) : undefined;
+				: screenCaptureAllowed()
+					? undefined
+					: ("screen-recording-permission" as const);
+		const captured = await this.captureSettledObservation({
+			pid: app.pid,
+			settleMs,
+			walkOptions: captureTree ? walkOptions : undefined,
+			screenshot:
+				options?.includeScreenshot === false || screenshotUnavailable !== undefined
+					? undefined
+					: { size, windowId: targetWindow?.id },
+		});
+		const screenshot = captured.screenshot ?? {
+			data: Buffer.alloc(0),
+			mimeType: "image/png" as const,
+			width: size.width,
+			height: size.height,
+		};
+		const { tree } = captured;
 		// WindowServer can hide titles without Screen Recording while the matched AX window still
 		// exposes them. Use that observed title, not an unrelated window from an app-wide fallback.
 		const targetWindowTitle = tree?.windowTitle ?? inventoryTitle;
@@ -737,7 +836,7 @@ export class MacOSHostComputer extends HostComputer {
 			});
 		}
 		const ocrText =
-			tree?.windowContentUnavailable === true && targetWindow !== undefined
+			(tree?.windowContentUnavailable === true || onHiddenSpace) && targetWindow !== undefined
 				? await this.readWindowText(screenshot, size, targetWindow)
 				: undefined;
 		const displays = displayInventory;
@@ -759,9 +858,14 @@ export class MacOSHostComputer extends HostComputer {
 			this.lastViewportByPid.set(app.pid, viewport);
 			windowBounds = viewport.windowBounds;
 			elements = tree === undefined ? [] : remapElementFramesToScreenshot(tree.elements, viewport);
-			if (this.capabilities.supportsInput && !this.highlightedApps.has(app.pid)) {
-				this.highlightedApps.add(app.pid);
-				this.overlay.highlight(viewport.windowBounds, app.pid);
+			if (this.delivery !== "background" || cursorBackgroundCuesEnabled()) {
+				// The window stays marked while the agent works in it; an overlay without frames flashes it once.
+				if (this.overlay.frame !== undefined) {
+					this.overlay.frame(viewport.windowBounds, app.pid);
+				} else if (!this.highlightedApps.has(app.pid)) {
+					this.highlightedApps.add(app.pid);
+					this.overlay.highlight(viewport.windowBounds, app.pid);
+				}
 			}
 		} else {
 			this.lastViewportByPid.delete(app.pid);
@@ -791,6 +895,7 @@ export class MacOSHostComputer extends HostComputer {
 			...(audio === undefined ? {} : { audio }),
 			frontmost: app.isActive,
 			axAvailable: tree?.axAvailable ?? true,
+			...(tree?.axUnavailable === undefined ? {} : { axUnavailable: tree.axUnavailable }),
 			elements: diffOnly ? [] : elements,
 			...(observationKey === undefined ? {} : { observationKey }),
 			...(tree?.truncated === true ? { elementsTruncated: true } : {}),
@@ -813,8 +918,13 @@ export class MacOSHostComputer extends HostComputer {
 			...(targetWindowTitle !== undefined ? { windowTitle: targetWindowTitle } : {}),
 			...(windowCandidates !== undefined ? { windowCandidates } : {}),
 			...(tree?.windowContentUnavailable === true ? { windowContentUnavailable: true } : {}),
+			...(onHiddenSpace ? { windowOnHiddenSpace: true } : {}),
 			...(ocrText !== undefined ? { ocrText } : {}),
-			...(screenshotUnavailable === undefined ? {} : { screenshotUnavailable }),
+			...(screenshotUnavailable !== undefined
+				? { screenshotUnavailable }
+				: captured.captureFailed !== undefined
+					? { screenshotUnavailable: "window-capture-failed" as const }
+					: {}),
 			...(systemPrompts.length > 0 ? { systemPrompts } : {}),
 		};
 		if (targetWindow === undefined) {
@@ -836,7 +946,7 @@ export class MacOSHostComputer extends HostComputer {
 			});
 		}
 		// The agent reads this observation next, so the overlay dot pulses until the next action.
-		if (this.capabilities.supportsInput && options?.probe !== true) {
+		if (options?.probe !== true) {
 			this.input.showThinking();
 		}
 		return state;
@@ -911,47 +1021,77 @@ export class MacOSHostComputer extends HostComputer {
 		}
 	}
 
-	/** The person's own apps stay refused; only windows opencua launched itself take host input. */
-	private assertInputAvailable(targetPid: number | undefined = this.input.currentTargetPid): void {
-		if (this.capabilities.supportsInput || (targetPid !== undefined && isOwnedSurfacePid(targetPid))) return;
-		denyHostInteraction("host-window");
+	/**
+	 * Capture the screenshot and the accessibility tree once the target app's UI has stopped changing, instead of
+	 * sleeping a fixed duration. Accessibility notifications say when the app changes, so the quiet window runs while
+	 * the capture does rather than before it: when no change arrives from the observer's start through the end of the
+	 * capture, and that span covers the quiet window, the capture already shows a settled UI. When something changed,
+	 * the observation waits for quiet (within `settleMs`, as before) and captures again. Without the observer, polling
+	 * the tree before the capture stays as the fallback.
+	 */
+	private async captureSettledObservation(request: ObservationCaptureRequest): Promise<CapturedObservation> {
+		const { pid, settleMs, walkOptions } = request;
+		const waiter = settleMs > 0 && walkOptions !== undefined ? createAxEventWaiter(pid) : null;
+		if (waiter === null) {
+			if (settleMs > 0 && walkOptions !== undefined) {
+				await this.pollForUiSettle(pid, settleMs, walkOptions);
+			}
+			return await this.captureObservation(request);
+		}
+		try {
+			const started = Date.now();
+			const captured = await this.captureObservation(request);
+			const quietRemainder = Math.max(0, AX_SETTLE_QUIET_MILLISECONDS - (Date.now() - started));
+			if (waiter.drain(quietRemainder) === 0) {
+				return captured;
+			}
+			waitForAxQuiet(waiter, {
+				quietMs: AX_SETTLE_QUIET_MILLISECONDS,
+				deadlineMs: settleMs - (Date.now() - started),
+				now: () => Date.now(),
+			});
+			return await this.captureObservation(request);
+		} finally {
+			waiter.release();
+		}
 	}
 
-	private isOwnedWindow(windowId: number | undefined): boolean {
-		if (windowId === undefined) return false;
-		const window = listOwnedCandidateWindows()?.find((candidate) => candidate.id === windowId);
-		return window !== undefined && isOwnedSurfacePid(window.ownerPid);
+	/** The window capture waits on ScreenCaptureKit off this thread, so the tree is walked meanwhile. */
+	private async captureObservation(request: ObservationCaptureRequest): Promise<CapturedObservation> {
+		const { screenshot } = request;
+		const image =
+			screenshot === undefined
+				? undefined
+				: this.captureAllowedScreenshot({ targetSize: screenshot.size, format: "jpeg" }, screenshot.windowId);
+		let tree: ReturnType<typeof extractAccessibilityTree> | undefined;
+		try {
+			tree =
+				request.walkOptions === undefined ? undefined : extractAccessibilityTree(request.pid, request.walkOptions);
+		} catch (error) {
+			// The tree's failure is the one this observation reports; the capture still finishes before it does.
+			await image?.catch(() => undefined);
+			throw error;
+		}
+		if (image === undefined) {
+			return { screenshot: undefined, tree };
+		}
+		try {
+			return { screenshot: await image, tree };
+		} catch (error) {
+			// ScreenCaptureKit refuses a window for a moment while it is resized or re-ordered; a capture that failed twice
+			// costs the observation its image, not its elements and token.
+			if (error instanceof Error && error.message.startsWith("window capture failed (transient)")) {
+				return { screenshot: undefined, tree, captureFailed: error.message };
+			}
+			throw error;
+		}
 	}
 
 	/**
-	 * Wait for the target app's UI to stop changing before capturing state, instead of
-	 * sleeping a fixed duration. Polls the accessibility tree and returns as soon as two
-	 * consecutive snapshots are identical (the UI has settled) or the `settleMs` cap
-	 * elapses, whichever comes first. This is the ChatGPT computer-use "skyshot settle"
-	 * technique: faster when the UI is already stable, more robust when it is still moving.
+	 * Without accessibility notifications, poll the tree until two consecutive snapshots are identical (the UI has
+	 * settled) or the `settleMs` cap elapses, whichever comes first.
 	 */
-	private async waitForUiSettle(pid: number, settleMs: number, walkOptions: AccessibilityTreeOptions): Promise<void> {
-		if (settleMs <= 0) {
-			return;
-		}
-		// Accessibility notifications say when the app changes, so the common "nothing moved"
-		// case costs one quiet window instead of repeated signature walks, and changes past the
-		// signature cap are still noticed. Polling stays as the fallback when the observer is
-		// unavailable, and remains the source of truth whenever no notifications arrive.
-		const waiter = createAxEventWaiter(pid);
-		if (waiter !== null) {
-			try {
-				waitForAxQuiet(waiter, {
-					quietMs: AX_SETTLE_QUIET_MILLISECONDS,
-					deadlineMs: settleMs,
-					now: () => Date.now(),
-				});
-				return;
-			} finally {
-				waiter.release();
-			}
-		}
-
+	private async pollForUiSettle(pid: number, settleMs: number, walkOptions: AccessibilityTreeOptions): Promise<void> {
 		// Stability only needs the shape of the visible tree, so each poll walks a capped
 		// slice instead of the whole window; the observation that follows is a full walk.
 		const signatureOptions: AccessibilityTreeOptions = {
@@ -1034,24 +1174,22 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async setValue(targetPid: number, elementIndex: number, value: string): Promise<void> {
-		this.assertInputAvailable(targetPid);
 		assertElementInInputRegion(
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`set_value on element ${elementIndex}`,
 		);
-		this.showElement(targetPid, elementIndex, false);
+		await this.showElement(targetPid, elementIndex, false);
 		setValueByIndex(targetPid, elementIndex, value);
 		this.input.showKeyboard();
 		await this.settleAccessibilityWrite(targetPid);
 	}
 
 	async selectText(targetPid: number, elementIndex: number, options: SelectTextOptions): Promise<void> {
-		this.assertInputAvailable(targetPid);
 		assertElementInInputRegion(
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`select_text on element ${elementIndex}`,
 		);
-		this.showElement(targetPid, elementIndex, false);
+		await this.showElement(targetPid, elementIndex, false);
 		selectTextByIndex(targetPid, elementIndex, options);
 		this.input.showKeyboard();
 	}
@@ -1060,12 +1198,11 @@ export class MacOSHostComputer extends HostComputer {
 		if (this.delivery === "background" && action === "AXRaise") {
 			throw new Error("AXRaise requires foreground delivery; refusing to raise a window over the user's work");
 		}
-		this.assertInputAvailable(targetPid);
 		assertElementInInputRegion(
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`${action} on element ${elementIndex}`,
 		);
-		this.showElement(targetPid, elementIndex, !action.startsWith("AXScroll"), action.startsWith("AXScroll"));
+		await this.showElement(targetPid, elementIndex, !action.startsWith("AXScroll"), action.startsWith("AXScroll"));
 		// Pressing or focusing an element can make its app activate itself (Safari does for a web
 		// field); background delivery hands the front back to the person's app when that happens.
 		const observation = this.inputObservations.get(targetPid);
@@ -1101,8 +1238,21 @@ export class MacOSHostComputer extends HostComputer {
 		return isWebElementByIndex(targetPid, elementIndex);
 	}
 
+	aimPointer(targetPid: number, point: Point): void {
+		this.input.aimPointer(point, targetPid);
+	}
+
+	async focusWebPage(targetPid: number, elementIndex: number): Promise<boolean> {
+		if (!focusWebAreaOfElement(targetPid, elementIndex)) return false;
+		// The browser applies the focus change asynchronously; a click sent before it lands is still spent on focus.
+		await settleWebFocus(() => appFocusInWebArea(targetPid), {
+			limitMs: WEB_FOCUS_SETTLE_LIMIT_MILLISECONDS,
+			pollMs: WEB_FOCUS_POLL_MILLISECONDS,
+		});
+		return true;
+	}
+
 	async pressAtPosition(targetPid: number, position: Point): Promise<boolean> {
-		this.assertInputAvailable(targetPid);
 		this.input.showPointer(position, true, targetPid);
 		// A press inside a dispatch bound to an observed window only takes an element of that window.
 		const target = currentInputScope()?.target;
@@ -1115,7 +1265,8 @@ export class MacOSHostComputer extends HostComputer {
 	 * centre first to keep every action visible. The frame lookup is display only: when it fails the
 	 * action still runs and reports its own error, so a lookup failure is not surfaced here.
 	 */
-	private showElement(targetPid: number, elementIndex: number, press: boolean, scroll = false): void {
+	/** Glide the drawn cursor onto the element and wait for it, so the action happens where the cursor is. */
+	private async showElement(targetPid: number, elementIndex: number, press: boolean, scroll = false): Promise<void> {
 		let frame: Rect | undefined;
 		try {
 			frame = elementFrameByIndex(targetPid, elementIndex);
@@ -1127,6 +1278,7 @@ export class MacOSHostComputer extends HostComputer {
 			if (scroll) {
 				this.input.showScrollPointer(position, targetPid);
 			} else {
+				await this.input.glidePointer(position, targetPid);
 				this.input.showPointer(position, press, targetPid);
 			}
 		}
@@ -1137,7 +1289,6 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async scrollElementIntoView(targetPid: number, elementIndex: number): Promise<Rect | undefined> {
-		this.assertInputAvailable(targetPid);
 		assertElementInInputRegion(
 			() => elementFrameByIndex(targetPid, elementIndex),
 			`scroll-to-visible on element ${elementIndex}`,
@@ -1165,9 +1316,6 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async recognizeWindowText(targetPid: number, options?: { readonly region?: Rect }): Promise<WindowTextRead> {
-		if (!this.capabilities.supportsScreenshot && !isOwnedSurfacePid(targetPid)) {
-			return { unavailable: "isolated-session-required" };
-		}
 		if (!screenCaptureAllowed()) {
 			return { unavailable: "screen-recording-permission" };
 		}
@@ -1186,7 +1334,6 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	showPointerAt(position: Point, press: boolean): void {
-		this.assertInputAvailable();
 		this.input.showPointer(position, press);
 	}
 
@@ -1195,7 +1342,6 @@ export class MacOSHostComputer extends HostComputer {
 		text: string,
 		options?: { readonly settleWrite?: boolean },
 	): Promise<boolean> {
-		this.assertInputAvailable();
 		// Keys posted just before (Cmd+A) still wait in the app's event queue, while this write lands at
 		// once: without the fence the text lands at the old caret instead of replacing the selection.
 		await awaitKeyboardFence(
@@ -1244,9 +1390,6 @@ export class MacOSHostComputer extends HostComputer {
 	}
 
 	async preflightInput(expected: InputObservation, options?: PreflightOptions): Promise<PreflightResult> {
-		if (!this.capabilities.supportsInput && !(expected !== undefined && isOwnedSurfacePid(expected.pid))) {
-			return { ok: false, reason: "isolated-session-required" };
-		}
 		const stored = this.inputObservations.get(expected.pid);
 		if (stored === undefined || !sameObservation(stored, expected)) {
 			return { ok: false, reason: "observation-replaced" };
@@ -1262,10 +1405,9 @@ export class MacOSHostComputer extends HostComputer {
 			throw error;
 		}
 		const app = apps.find((candidate) => candidate.pid === expected.pid);
-		// Background delivery routes every action to the target process, so a window the user is
-		// not looking at is a legal target and the refusal would defeat the mode. Attended delivery
-		// may still take focus, so it keeps requiring the frontmost app.
-		if (app === undefined || (!app.isActive && this.delivery !== "background")) {
+		// A window the user is not looking at is a legal target in either mode: background delivery routes every
+		// action to the target process, and attended delivery brings the app forward itself before its input.
+		if (app === undefined) {
 			return { ok: false, reason: "app-not-frontmost" };
 		}
 		if (app.bundleId !== expected.bundleId) {
@@ -1287,7 +1429,9 @@ export class MacOSHostComputer extends HostComputer {
 
 		let targetWindow: Awaited<ReturnType<typeof queryVisibleTargetWindow>>;
 		try {
-			targetWindow = await queryVisibleTargetWindow(expected.pid, expected.windowId, this.delivery === "background");
+			// Off-Space windows stay legal targets in both modes: attended input brings the app forward first, and another
+			// app's activation (a parallel batch) can move an observed window off the current Space.
+			targetWindow = await queryVisibleTargetWindow(expected.pid, expected.windowId, true);
 		} catch (error) {
 			if (error instanceof Error) {
 				return { ok: false, reason: "window-missing" };
@@ -1302,14 +1446,24 @@ export class MacOSHostComputer extends HostComputer {
 			return { ok: false, reason: "app-not-approved" };
 		}
 		if (targetWindow === undefined) {
-			const otherWindows = await queryVisibleWindowsForPid(expected.pid, this.delivery === "background");
+			const otherWindows = await queryVisibleWindowsForPid(expected.pid, true);
 			return { ok: false, reason: otherWindows.length > 0 ? "window-changed" : "window-missing" };
 		}
 		if (targetWindow.id !== expected.windowId) {
 			return { ok: false, reason: "window-changed" };
 		}
 		if (options?.requireSameBounds !== false && !sameRect(targetWindow.bounds, expected.windowBounds)) {
-			return { ok: false, reason: "window-bounds-changed" };
+			// A Space switch (attended input brings windows forward) lists the same window shifted until its slide ends;
+			// attended input waits that out, and a window that really moved is still refused. Background stays strict.
+			const settled =
+				this.delivery === "attended"
+					? await settledWindowBounds(
+							async () => (await queryVisibleTargetWindow(expected.pid, expected.windowId, true))?.bounds,
+						)
+					: undefined;
+			if (settled === undefined || !sameRect(settled, expected.windowBounds)) {
+				return { ok: false, reason: "window-bounds-changed" };
+			}
 		}
 		return { ok: true };
 	}
@@ -1348,7 +1502,7 @@ async function queryVisibleTargetWindow(pid: number, windowId?: number, allowOff
 		if (requested.kind !== "resolved") {
 			return undefined;
 		}
-		if (allowOffscreen && !onscreen?.includes(windowId) && windowMinimizedForPid(pid, windowId) !== false) {
+		if (allowOffscreen && !onscreen?.includes(windowId) && windowMinimizedState(pid, windowId) !== false) {
 			return undefined;
 		}
 		return requested.window;
@@ -1508,7 +1662,7 @@ async function captureWindowScreenshot(
 	quality: number,
 ): Promise<Buffer> {
 	try {
-		const captured = captureWindowImage(windowId, targetSize.width, targetSize.height, format, quality);
+		const captured = await captureWindowImageAsync(windowId, targetSize.width, targetSize.height, format, quality);
 		parseImageDimensions(captured.data);
 		return captured.data;
 	} catch (error) {
@@ -1516,7 +1670,7 @@ async function captureWindowScreenshot(
 			return await captureWindowScreenshotViaCli(targetSize, windowId, format, quality);
 		}
 		try {
-			const retried = captureWindowImage(windowId, targetSize.width, targetSize.height, format, quality);
+			const retried = await captureWindowImageAsync(windowId, targetSize.width, targetSize.height, format, quality);
 			parseImageDimensions(retried.data);
 			return retried.data;
 		} catch {
@@ -1699,6 +1853,26 @@ function resolveDisplayInfo(id: number): DisplayInfo {
 	return { ...metadata, id, isMain: true, x: 0, y: 0 };
 }
 
+/**
+ * A window's bounds once any Space switch has finished sliding it. While macOS animates a Space change, the
+ * WindowServer lists every window of the incoming Space shifted along x by the slide's progress (a live probe read
+ * TextEdit 309 -> 1288 and Calculator 740 -> 1719 in the same listing, both back about 100 ms later, while their AX
+ * frames never moved). Two equal reads one poll apart mean no slide is in progress; the wait is bounded.
+ */
+async function settledWindowBounds(read: () => Promise<Rect | undefined>): Promise<Rect | undefined> {
+	let previous = await read();
+	const deadline = Date.now() + SPACE_SLIDE_WAIT_MILLISECONDS;
+	while (previous !== undefined && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, SPACE_SLIDE_POLL_MILLISECONDS));
+		const next = await read();
+		if (next === undefined || sameRect(previous, next)) {
+			return next;
+		}
+		previous = next;
+	}
+	return previous;
+}
+
 function displaysForWindow(
 	window: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
 	displays: ReturnType<typeof onlineDisplayInfo>,
@@ -1716,6 +1890,49 @@ function displaysForWindow(
 		.filter(({ intersectionArea }) => intersectionArea > 0)
 		.sort((left, right) => right.intersectionArea - left.intersectionArea)
 		.map(({ display }) => display);
+}
+
+interface ObservationCaptureRequest {
+	readonly pid: number;
+	readonly settleMs: number;
+	/** Undefined when the observation skips the accessibility tree. */
+	readonly walkOptions: AccessibilityTreeOptions | undefined;
+	/** Undefined when the observation carries no image. */
+	readonly screenshot:
+		| { readonly size: { readonly width: number; readonly height: number }; readonly windowId: number | undefined }
+		| undefined;
+}
+
+interface CapturedObservation {
+	readonly screenshot: ScreenshotResult | undefined;
+	readonly tree: ReturnType<typeof extractAccessibilityTree> | undefined;
+	/** Set when the window image failed transiently (twice): the observation keeps its elements and token. */
+	readonly captureFailed?: string;
+}
+
+/**
+ * The app an observation targets, after releasing element snapshots of apps that have quit. A known pid is looked up
+ * on its own: enumerating every running app costs tens of milliseconds, while asking whether each snapshot's app
+ * still runs answers the same question for the few pids that hold one.
+ */
+async function resolveObservedApp(targetPid: number | undefined): Promise<RunningAppInfo> {
+	if (targetPid === undefined) {
+		const apps = await getRunningMacOSApps();
+		releaseSnapshotsForExitedPids(apps.map((runningApp) => runningApp.pid));
+		return resolveTargetApp(apps, targetPid);
+	}
+	const stillRunning: number[] = [];
+	for (const pid of accessibilitySnapshotPids()) {
+		if ((await findRunningApp(pid)) !== undefined) {
+			stillRunning.push(pid);
+		}
+	}
+	releaseSnapshotsForExitedPids(stillRunning);
+	const app = await findRunningApp(targetPid);
+	if (app === undefined) {
+		throw new Error(`No running app matched pid ${targetPid}`);
+	}
+	return app;
 }
 
 function resolveTargetApp(apps: readonly RunningAppInfo[], targetPid: number | undefined): RunningAppInfo {

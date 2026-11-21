@@ -277,7 +277,7 @@ when the needed target cannot be established.
    `--background`; `OPENCUA_DELIVERY=attended` opts out): input goes to the app's own window,
    the frontmost app and the person's cursor are left alone, `open_app` launches without bringing
    the app forward, and an action that would need the foreground is refused rather than taking
-   over the machine. A running app is left untouched and a new one launches hidden. Background work draws no cursor, highlight, or click ripple. Attended
+   over the machine. A running app is left untouched and a new one launches hidden. Background work draws the agent's own cursor and frames the window it drives, without touching the real pointer. Attended
    delivery can show an adaptive agent cursor without moving the real pointer for semantic
    actions (`OPENCUA_CURSOR=off` hides that feedback).
 
@@ -371,6 +371,11 @@ app, not every operation within it. A model-supplied `confirmed` flag or written
 human consent. The server cannot infer the user's intent or classify every UI consequence.
 
 ## Phone and FaceTime call banners
+
+Menu bar apps (LSUIElement, such as Raycast or a dev build of a status-bar tool) are targets like any app when
+they live outside /System: name them, give their bundle id, or their pid. One with no window open answers
+`No visible target window`; open its window first. Apple's own accessory processes (permission, password and
+alert prompts) stay out of reach unless listed below.
 
 On macOS 26, the top-right "Click to Call" banner is composited by
 `com.apple.notificationcenterui`, with background FaceTime helpers behind it.

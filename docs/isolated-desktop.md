@@ -5,10 +5,10 @@ running applications. It does not use the host mouse, clipboard, display
 windows, focus, Spaces, audio devices or USB accessories. There is no host-input
 fallback. The experimental VNC transport is not used.
 
-The legacy shared-host computer also refuses screenshots before calling capture
-APIs, because capture can raise a consent prompt on the human desktop. Host
-Accessibility metadata remains a separate read-only capability, not an
-isolated execution session.
+The shared-host computer is a separate path: it captures and drives the
+person's own apps in the background (per-PID input, no focus steal, no cursor
+warp), gated by the app allowlist, observation tokens and the global stop. Use
+this guest when the work must not touch the host at all.
 
 ## Requirements
 

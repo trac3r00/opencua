@@ -21,7 +21,7 @@ architectures=(-arch arm64 -arch x86_64)
 deployment_target=(-mmacosx-version-min=15.0)
 availability_errors=(-Werror=unguarded-availability -Werror=unguarded-availability-new)
 
-for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m permission-drag.m; do
+for source in sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m voice-input.m voice-input-Info.plist buddy-hud.m permission-drag.m; do
 	if [[ ! -f "${native_dir}/${source}" ]]; then
 		echo "error: missing ${native_dir}/${source}" >&2
 		exit 1
@@ -89,6 +89,34 @@ clang \
 	-o "${native_dir}/opencua-surface"
 echo "built ${native_dir}/opencua-surface ($(lipo -archs "${native_dir}/opencua-surface"))"
 
+# Speech to text for the buddy's push-to-talk. Its Info.plist is embedded so the microphone and speech-recognition
+# dialogs can name it; it re-spawns itself disclaimed, so those grants belong to it rather than to its caller.
+clang \
+	"${architectures[@]}" \
+	-O2 \
+	-fobjc-arc \
+	"${deployment_target[@]}" \
+	"${availability_errors[@]}" \
+	-framework Foundation \
+	-framework AVFoundation \
+	-framework Speech \
+	-sectcreate __TEXT __info_plist "${native_dir}/voice-input-Info.plist" \
+	"${native_dir}/voice-input.m" \
+	-o "${native_dir}/voice-input"
+echo "built ${native_dir}/voice-input ($(lipo -archs "${native_dir}/voice-input"))"
+
+# The buddy's on-screen layer: the Listening pill and the circles and boxes the person draws while asking.
+clang \
+	"${architectures[@]}" \
+	-O2 \
+	-fobjc-arc \
+	"${deployment_target[@]}" \
+	"${availability_errors[@]}" \
+	-framework Cocoa \
+	"${native_dir}/buddy-hud.m" \
+	-o "${native_dir}/buddy-hud"
+echo "built ${native_dir}/buddy-hud ($(lipo -archs "${native_dir}/buddy-hud"))"
+
 clang \
 	"${architectures[@]}" \
 	-O2 \
@@ -115,7 +143,7 @@ clang \
 	-o "${native_dir}/guest-axdump"
 echo "built ${native_dir}/guest-axdump ($(lipo -archs "${native_dir}/guest-axdump"))"
 
-(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m permission-drag.m >build-inputs.sha256)
+(cd "${native_dir}" && shasum -a 256 build.sh sckit.m cursor-overlay.m history-recorder.m opencua-surface.m guest-axdump.m voice-input.m voice-input-Info.plist buddy-hud.m permission-drag.m >build-inputs.sha256)
 echo "recorded input hashes in ${native_dir}/build-inputs.sha256"
 
 # Sign the helpers with the stable identity (see scripts/sign-native.sh): ad-hoc builds change
@@ -124,6 +152,7 @@ bash "$native_dir/../../../scripts/sign-native.sh" \
 	"$native_dir/libsckit.dylib" \
 	"$native_dir/cursor-overlay" \
 	"$native_dir/opencua-surface" \
+	"$native_dir/buddy-hud" \
 	"$native_dir/permission-drag"
 
 # The always-on history watcher runs as its own launchd process, so it would otherwise get its own
@@ -134,3 +163,7 @@ bash "$native_dir/../../../scripts/sign-native.sh" \
 OPENCUA_CODESIGN_IDENTIFIER="${OPENCUA_BUNDLE_ID:-dev.opencua.mcp}" \
 	bash "$native_dir/../../../scripts/sign-native.sh" \
 	"$native_dir/history-recorder"
+
+OPENCUA_CODESIGN_IDENTIFIER=dev.opencua.voice-input \
+	bash "$native_dir/../../../scripts/sign-native.sh" \
+	"$native_dir/voice-input"

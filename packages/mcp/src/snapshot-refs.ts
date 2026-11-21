@@ -27,7 +27,11 @@ export function resolveSnapshotRefs(input: unknown): unknown {
 	return visit(fields, "");
 }
 
-/** Add refs beside existing ids, including compact rows and find results, without changing their shape. */
+/**
+ * Say how to write a ref for the ids this result names: `@<token>:e<id>`, which binds an id to this exact observation.
+ * One template instead of one ref per id: the map repeated the 36-character token for every element and was a third of
+ * an observation's bytes.
+ */
 export function withSnapshotRefs(result: ToolResult): ToolResult {
 	const content = result.content.map((item) => {
 		if (item.type !== "text") return item;
@@ -74,11 +78,12 @@ export function withSnapshotRefs(result: ToolResult): ToolResult {
 				if (Number.isSafeInteger(id) && id >= 0) ids.add(id);
 			}
 		}
+		if (ids.size === 0) return item;
 		return {
 			...item,
 			text: JSON.stringify({
 				...payload,
-				element_refs: Object.fromEntries([...ids].map((id) => [id, `@${token}:e${id}`])),
+				element_ref_format: `@${token}:e{id}`,
 			}),
 		};
 	});

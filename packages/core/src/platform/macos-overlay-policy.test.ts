@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
 const overlayMock = vi.hoisted(() => ({
@@ -18,16 +18,23 @@ vi.mock("./macos-ffi/cursor-overlay.js", () => ({
 }));
 
 describe("#given host cursor overlay policy", () => {
+	const previousCursor = process.env["OPENCUA_CURSOR"];
 	beforeEach(() => {
 		overlayMock.createCursorOverlay.mockClear();
+		// The suite runs with the drawn cursor off; these cases read the product default, with the overlay mocked.
+		Reflect.deleteProperty(process.env, "OPENCUA_CURSOR");
+	});
+	afterEach(() => {
+		if (previousCursor === undefined) Reflect.deleteProperty(process.env, "OPENCUA_CURSOR");
+		else process.env["OPENCUA_CURSOR"] = previousCursor;
 	});
 
-	it("#when background delivery has cues enabled by default #then it draws no overlay on the human desktop", async () => {
+	it("#when background delivery runs with default options #then the agent's drawn cursor is created", async () => {
 		const { MacOSHostComputer } = await import("./macos.js");
 
 		const host = new MacOSHostComputer({ delivery: "background" });
 
-		expect(overlayMock.createCursorOverlay).not.toHaveBeenCalled();
+		expect(overlayMock.createCursorOverlay).toHaveBeenCalledOnce();
 		await host.close();
 	});
 
@@ -49,14 +56,17 @@ describe("#given host cursor overlay policy", () => {
 		}
 	});
 
-	it("#when attended delivery is requested #then construction is refused before any overlay exists", async () => {
+	it("#when attended delivery is requested #then it creates the drawn cursor too", async () => {
 		const { MacOSHostComputer } = await import("./macos.js");
+		const { setAttendedHostDelivery } = await import("../computer/host-interaction-policy.js");
+		try {
+			const host = new MacOSHostComputer({ delivery: "attended" });
 
-		expect(() => new MacOSHostComputer({ delivery: "attended" })).toThrow(
-			/global-input cannot operate on the human desktop/,
-		);
-
-		expect(overlayMock.createCursorOverlay).not.toHaveBeenCalled();
+			expect(overlayMock.createCursorOverlay).toHaveBeenCalledOnce();
+			await host.close();
+		} finally {
+			setAttendedHostDelivery(false);
+		}
 	});
 
 	it("#when an overlay is injected #then background delivery uses it instead of creating one", async () => {

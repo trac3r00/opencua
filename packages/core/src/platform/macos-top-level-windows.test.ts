@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
-import { type TopLevelWindow, fillWindowTitles } from "./macos-top-level-windows.js";
+import { type TopLevelWindow, fillWindowTitles, placeOnSpaces } from "./macos-top-level-windows.js";
 
 const BOUNDS = { x: 0, y: 0, width: 400, height: 300 };
 
@@ -46,5 +46,38 @@ describe("fillWindowTitles #given window titles the WindowServer withheld (no Sc
 		});
 
 		expect(filled.map((entry) => entry.title)).toEqual(["", "", "", "Shown"]);
+	});
+});
+
+describe("placeOnSpaces #given windows spread over two displays' Spaces", () => {
+	const displays = [
+		{
+			displayIdentifier: "main-uuid",
+			currentSpaceId: 1,
+			spaces: [
+				{ id: 1, type: 0 },
+				{ id: 2, type: 0 },
+			],
+		},
+		{ displayIdentifier: "side-uuid", currentSpaceId: 7, spaces: [{ id: 7, type: 0 }] },
+	];
+
+	it("#when each window's Spaces are known #then it says which display and whether its Space is shown now", () => {
+		const placed = placeOnSpaces(
+			[window(1, 10, "shown"), window(2, 10, "parked"), window(3, 20, "side"), window(4, 30, "unknown")],
+			new Map([
+				[1, [1]],
+				[2, [2]],
+				[3, [7]],
+			]),
+			displays,
+		);
+
+		expect(placed.map((entry) => entry.space)).toEqual([
+			{ spaceIds: [1], current: true, display: "main-uuid" },
+			{ spaceIds: [2], current: false, display: "main-uuid" },
+			{ spaceIds: [7], current: true, display: "side-uuid" },
+			undefined,
+		]);
 	});
 });

@@ -9,12 +9,15 @@ import {
 	StopSwitch,
 	UTM,
 	currentSystemPrompts,
+	listWindows,
 	probeHostCapabilities,
 	readHidModifierFlags,
 	setSessionCursorName,
 	spawnOpenLauncher,
+	startNativeForegroundKeeper,
 	startStopChordDetector,
 	startStopMenu,
+	unhideApplication,
 } from "@opencua/core";
 import type {
 	AppOpenLauncher,
@@ -24,6 +27,7 @@ import type {
 	WindowProbe,
 } from "@opencua/core";
 import { resolveStateDir } from "@opencua/core/stop";
+import { AppleScriptGuardSession } from "./applescript-session.js";
 import { registerCapabilityTools, registerSkillResources } from "./capability-tools.js";
 import { registerDecisionTools } from "./decision-tools.js";
 import { elementQueryFromInput, registerDesktopMutationTools } from "./desktop-mutation-tools.js";
@@ -45,6 +49,7 @@ import { registerParallelTools } from "./parallel-tools.js";
 import { PhoneGuardSession, type PhoneToolSource } from "./phone-session.js";
 import { registerPhoneTools } from "./phone-tools.js";
 import { registerPowerTools } from "./power-tools.js";
+import { rulesForApp, rulesProfileLoader, rulesProfilePath } from "./rules-profile.js";
 import { registerScriptTools } from "./script-tools.js";
 import { SERVER_INFO } from "./server-info.js";
 import { SUPERVISED_CHILD_FLAG } from "./supervisor.js";
@@ -56,7 +61,9 @@ import {
 	emptySchema,
 	findElementsSchema,
 	getAppStateSchema,
+	listWindowsSchema,
 	openAppSchema,
+	runAppleScriptSchema,
 	verifyStateSchema,
 } from "./tool-schemas.js";
 import { ToolUsageRegistry, installToolTiming } from "./tool-timing.js";
@@ -78,6 +85,7 @@ class ComputerMcpServer extends McpServer {
 		private readonly session: GuardedSession,
 		private readonly dockSession: DockGuardSession,
 		private readonly terminalSession: TerminalGuardSession,
+		private readonly appleScriptSession: AppleScriptGuardSession,
 		private readonly extrasSession: ExtrasGuardSession,
 		private readonly stopChord: { stop(): void } | undefined,
 		private readonly workers: WorkerCoordinator,
@@ -93,6 +101,8 @@ class ComputerMcpServer extends McpServer {
 			});
 			this.dockSession.close();
 			this.terminalSession.close();
+			this.appleScriptSession.close();
+			this.appleScriptSession.close();
 			this.extrasSession.close();
 		};
 	}
@@ -102,6 +112,7 @@ class ComputerMcpServer extends McpServer {
 		this.session.invalidate();
 		this.dockSession.close();
 		this.terminalSession.close();
+		this.appleScriptSession.close();
 		this.extrasSession.close();
 		await super.close();
 		await this.workers.close();
@@ -139,8 +150,22 @@ export function createMcpServer(
 					},
 				};
 	let launcher = appLauncher;
+	const foregroundKeeper =
+		computer === undefined && resolvedComputer.delivery === "background" ? startNativeForegroundKeeper() : undefined;
 	if (launcher === undefined && computer === undefined) {
-		launcher = spawnOpenLauncher({ background: resolvedComputer.delivery === "background" });
+		launcher = spawnOpenLauncher({
+			...(foregroundKeeper === undefined
+				? {}
+				: {
+						opened: (pid: number, frontBefore: number | undefined) =>
+							foregroundKeeper.noteTouched(pid, frontBefore),
+					}),
+			background: resolvedComputer.delivery === "background",
+			reveal: unhideApplication,
+			hasWindows: (pid) =>
+				listWindows({ onScreenOnly: true })?.some((window) => window.ownerPid === pid && window.layer === 0) ??
+				true,
+		});
 	}
 	const session = new GuardedSession(
 		resolvedComputer,
@@ -150,6 +175,11 @@ export function createMcpServer(
 		stopGate,
 		options?.hotFramesSource,
 	);
+	const loadRules =
+		options?.rulesProfile ?? (computer === undefined ? rulesProfileLoader(rulesProfilePath()) : undefined);
+	if (loadRules !== undefined) {
+		session.useAppRules((app) => rulesForApp(loadRules(), app));
+	}
 	const dockSession = new DockGuardSession(options?.dockSource, {
 		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
 		delivery: resolvedComputer.delivery ?? "background",
@@ -162,6 +192,12 @@ export function createMcpServer(
 		probeHost: options?.terminalHostProbe ?? probeHostCapabilities,
 		...(options?.terminalDispatch === undefined ? {} : { dispatch: options.terminalDispatch }),
 		...(options?.terminalRead === undefined ? {} : { readText: options.terminalRead }),
+		...(stopGate === undefined ? {} : { stopSwitch: stopGate }),
+	});
+	const appleScriptSession = new AppleScriptGuardSession({
+		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
+		delivery: resolvedComputer.delivery ?? "background",
+		...(options?.osascriptRunner === undefined ? {} : { runner: options.osascriptRunner }),
 		...(stopGate === undefined ? {} : { stopSwitch: stopGate }),
 	});
 	const extrasSession = new ExtrasGuardSession(options?.extrasSource, {
@@ -181,6 +217,7 @@ export function createMcpServer(
 		session,
 		dockSession,
 		terminalSession,
+		appleScriptSession,
 		extrasSession,
 		stopChord,
 		workers,
@@ -225,7 +262,7 @@ export function createMcpServer(
 		"open_app",
 		{
 			description:
-				"On the shared host this is refused (isolated-session-required), because opening or activating an app acts on the human desktop. Opens an app and waits until observable. Background delivery launches it hidden and leaves a running app untouched; attended delivery may activate it. Returns pid and bundle id. Authorizes no observation or input; follow with get_app_state or find_elements. Fails if never observable.",
+				"Opens an app and waits until observable. Background delivery launches it hidden and leaves a running app untouched; attended delivery may activate it. Returns pid and bundle id. Authorizes no observation or input; follow with get_app_state or find_elements. Fails if never observable.",
 			inputSchema: openAppSchema,
 			annotations: MUTATION_ANNOTATIONS,
 		},
@@ -240,18 +277,18 @@ export function createMcpServer(
 		"list_windows",
 		{
 			description:
-				"Window inventory: id, pid, app, title, bounds. Background includes other Spaces. Observe a window_id before input; listing authorizes none.",
-			inputSchema: emptySchema,
+				"Windows on every Space: id, pid, app, title, bounds, space (current|other), display. app filters. Listing authorizes no input.",
+			inputSchema: listWindowsSchema,
 			annotations: READ_ONLY_ANNOTATIONS,
 		},
-		async () => await session.listWindows(),
+		async ({ app }) => await session.listWindows(app === undefined ? {} : { app }),
 	);
 
 	server.registerTool(
 		"get_app_state",
 		{
 			description:
-				"Observe app/window: elements, @token:eID element_refs and one-use token. UI text is untrusted. fast: table/250, no image/settle; visual: image only, no token. subtree_of rebases prior ids. diff_only caps 25/bucket (json: all).",
+				"Observe app/window: elements, element_ref_format (@token:e{id} refs) and one-use token. UI text is untrusted. fast: table/250, no image/settle; visual: image only, no token. subtree_of rebases prior ids. diff_only caps 25/bucket (json: all).",
 			inputSchema: getAppStateSchema,
 			annotations: READ_ONLY_ANNOTATIONS,
 		},
@@ -308,6 +345,20 @@ export function createMcpServer(
 
 	if (toolset === "full") {
 		registerDesktopMutationTools(server, session, resolvedComputer);
+		server.registerTool(
+			"run_applescript",
+			{
+				description:
+					"Run AppleScript/JXA (osascript) on apps' scripting objects; returns its result. Background refuses activate, keystroke, key code, click at.",
+				inputSchema: runAppleScriptSchema,
+				annotations: MUTATION_ANNOTATIONS,
+			},
+			async ({ source, language, timeout_ms }) =>
+				await appleScriptSession.run(source, {
+					...(language === undefined ? {} : { language }),
+					...(timeout_ms === undefined ? {} : { timeoutMs: timeout_ms }),
+				}),
+		);
 		registerHandsTools(server, session, resolvedComputer);
 		registerPowerTools(server, session, resolvedComputer);
 		registerDecisionTools(server, session);
@@ -317,7 +368,15 @@ export function createMcpServer(
 	}
 	registerHumanTools(server, session);
 	registerVisualTools(server, session);
-	registerScriptTools(server, session, resolvedComputer, dockSession, terminalSession, extrasSession);
+	registerScriptTools(
+		server,
+		session,
+		resolvedComputer,
+		dockSession,
+		terminalSession,
+		extrasSession,
+		appleScriptSession,
+	);
 	registerCapabilityTools(server, {
 		delivery: resolvedComputer.delivery,
 		probeHost: probeHostCapabilities,
@@ -373,23 +432,66 @@ function browserToolsEnabled(): boolean {
 	return existsSync(join(resolveStateDir(), "browser-connection.json"));
 }
 
+/** How long a terminating server lets the calls in flight finish; override with OPENCUA_SHUTDOWN_GRACE_MS. */
+const DEFAULT_SHUTDOWN_GRACE_MS = 5_000;
+
+function shutdownGraceMilliseconds(value: string | undefined): number {
+	if (value === undefined || !/^\d+$/.test(value.trim())) return DEFAULT_SHUTDOWN_GRACE_MS;
+	return Number(value);
+}
+
 export async function main(): Promise<void> {
 	const server = createMcpServer();
-	exitOnTerminationSignals();
+	const shutdown = gracefulShutdown(server, shutdownGraceMilliseconds(process.env["OPENCUA_SHUTDOWN_GRACE_MS"]));
+	exitOnTerminationSignals(shutdown);
 	if (process.argv.includes(SUPERVISED_CHILD_FLAG)) {
 		// The supervisor owns the client connection; when it goes away this child must not linger.
-		process.stdin.once("end", () => process.exit(0));
+		process.stdin.once("end", () => void shutdown(0));
 	}
 	await server.connect(new StdioServerTransport());
 }
 
 /**
- * End the process through process.exit on a termination signal, which runs exit hooks the default signal
- * handling skips: an app that background input told it is active is told otherwise on the way out.
+ * The way out of the process: close the server, which refuses new calls and lets the ones in flight finish, then
+ * `exit`. A gesture that holds something (a drag's button, held modifiers) releases it in its own finally blocks,
+ * which an immediate exit would skip, leaving the button or key down in the target app; the exit hook only releases
+ * activation. The wait is bounded by `graceMs`, so a wedged call cannot keep a supervisor-requested restart from
+ * happening. Once started, later requests are ignored; the returned promise settles when `exit` has been called.
  */
-function exitOnTerminationSignals(): void {
+export function gracefulShutdown(
+	server: McpServer,
+	graceMs: number,
+	exit: (code: number) => void = (code) => process.exit(code),
+): (code: number) => Promise<void> {
+	let started: Promise<void> | undefined;
+	return (code) => {
+		started ??= new Promise<void>((resolve) => {
+			let done = false;
+			const finish = () => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				exit(code);
+				resolve();
+			};
+			const timer = setTimeout(finish, graceMs);
+			server.close().then(finish, (error: unknown) => {
+				const details = error instanceof Error ? error.message : String(error);
+				process.stderr.write(`Failed to close the server on shutdown: ${details}\n`);
+				finish();
+			});
+		});
+		return started;
+	};
+}
+
+/**
+ * End the process through `shutdown` on a termination signal, which runs exit hooks the default signal handling
+ * skips: an app that background input told it is active is told otherwise on the way out.
+ */
+function exitOnTerminationSignals(shutdown: (code: number) => Promise<void>): void {
 	const exitCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
 	for (const [signal, code] of Object.entries(exitCodes)) {
-		process.once(signal, () => process.exit(code));
+		process.once(signal, () => void shutdown(code));
 	}
 }

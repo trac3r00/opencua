@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { readFileSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GuardedSession } from "./guarded-session.js";
@@ -63,12 +64,64 @@ describe("#given the shared worker registry #when processes claim workers #then 
 
 	it("takes over a lock a crashed process left behind", async () => {
 		await writeFile(join(directory, "registry.json"), JSON.stringify({ workers: [] }));
-		const { mkdir, utimes } = await import("node:fs/promises");
 		await mkdir(join(directory, "registry.lock"));
 		const old = new Date(Date.now() - 60_000);
 		await utimes(join(directory, "registry.lock"), old, old);
 		fileWorkerRegistry(directory).claim([entry()]);
 		expect(fileWorkerRegistry(directory).find("one")?.worker_id).toBe("one");
+	});
+
+	it.each([
+		["not JSON", '{"workers": [', /is not valid JSON/],
+		["not a worker list", JSON.stringify({ workers: [{ worker_id: 1 }] }), /does not hold a valid worker list/],
+	])(
+		"#given a registry file that is %s #when it is read #then it throws instead of looking empty",
+		async (_, text, error) => {
+			await writeFile(join(directory, "registry.json"), text);
+			const registry = fileWorkerRegistry(directory);
+			expect(() => registry.find("one")).toThrow(error);
+			expect(() => registry.claim([entry()])).toThrow(error);
+			expect(await readFile(join(directory, "registry.json"), "utf8")).toBe(text);
+		},
+	);
+
+	it("#given an old lock whose owner is still alive #when another process claims #then the lock is not stolen", async () => {
+		const lock = join(directory, "registry.lock");
+		const holder = `${process.pid} other-holder`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), holder);
+		const old = new Date(Date.now() - 60_000);
+		await utimes(lock, old, old);
+
+		expect(() => fileWorkerRegistry(directory).claim([entry()])).toThrow(/registry is busy/);
+
+		expect(await readFile(join(lock, "owner"), "utf8")).toBe(holder);
+		expect(fileWorkerRegistry(directory).find("one")).toBeUndefined();
+	});
+
+	it("#given a lock whose owner exited #when another process claims #then it takes the lock over at once", async () => {
+		const lock = join(directory, "registry.lock");
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "999999 exited-holder");
+
+		fileWorkerRegistry(directory, (pid) => pid !== 999_999).claim([entry()]);
+
+		expect(fileWorkerRegistry(directory).find("one")?.worker_id).toBe("one");
+	});
+
+	it("#given a holder whose lock another process took #when the holder finishes #then the other process's lock stays", () => {
+		fileWorkerRegistry(directory).claim([entry()]);
+		const owner = join(directory, "registry.lock", "owner");
+		const successor = "1 successor";
+		// Liveness is checked while the lock is held, so this stands in for another process taking the lock mid-work.
+		const preempted = fileWorkerRegistry(directory, () => {
+			writeFileSync(owner, successor);
+			return true;
+		});
+
+		preempted.claim([entry({ worker_id: "two", appPid: 42 })]);
+
+		expect(readFileSync(owner, "utf8")).toBe(successor);
 	});
 });
 
@@ -125,6 +178,7 @@ describe("#given a worker lookup that fails before anything is sent #when the er
 		['worker "w" is busy', "WORKER_BUSY"],
 		['app "Finder" is already owned', "WORKER_CONFLICT"],
 		['app "Finder" is already owned by worker "one" in another opencua session', "WORKER_CONFLICT"],
+		['app "Finder" is owned by worker "one"; act through run_worker for that worker', "APP_OWNED_BY_WORKER"],
 	])("%s -> %s", (message, code) => {
 		const normalized = normalizeToolError({
 			isError: true,
@@ -133,6 +187,23 @@ describe("#given a worker lookup that fails before anything is sent #when the er
 		const text = normalized.content[0]?.type === "text" ? normalized.content[0].text : "";
 		expect(JSON.parse(text)).toMatchObject({ code, retry: "safe" });
 	});
+
+	it.each([
+		["worker-owned-elsewhere", "WORKER_OWNED_ELSEWHERE"],
+		["worker-running-elsewhere", "WORKER_RUNNING_ELSEWHERE"],
+	])(
+		"#given a lease refusal with reason %s #when normalized #then its code is %s and retry is safe",
+		(reason, code) => {
+			const normalized = normalizeToolError({
+				isError: true,
+				content: [
+					{ type: "text", text: JSON.stringify({ error: 'worker "w" refused', reason, actionDispatched: false }) },
+				],
+			});
+			const text = normalized.content[0]?.type === "text" ? normalized.content[0].text : "";
+			expect(JSON.parse(text)).toMatchObject({ code, retry: "safe" });
+		},
+	);
 });
 
 describe("#given shared-surface regions #when processes claim workers #then regions travel with the claim and must stay disjoint", () => {

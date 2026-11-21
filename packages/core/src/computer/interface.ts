@@ -24,13 +24,7 @@ export interface ScreenshotResult {
 /** Text read from the pixels of an app window, or why the pixels could not be read. */
 export type WindowTextRead =
 	| { readonly entries: readonly OcrTextEntry[] }
-	| {
-			readonly unavailable:
-				| "isolated-session-required"
-				| "screen-recording-permission"
-				| "no-window"
-				| "recognition-failed";
-	  };
+	| { readonly unavailable: "screen-recording-permission" | "no-window" | "recognition-failed" };
 
 export interface ComputerInterface {
 	readonly capabilities: ComputerCapabilities;
@@ -92,6 +86,10 @@ export interface ComputerInterface {
 	elementFrame?(targetPid: number, elementIndex: number): Promise<Rect | undefined>;
 	/** Whether this current observed element belongs to a live web accessibility subtree. */
 	isWebElement?(targetPid: number, elementIndex: number): Promise<boolean>;
+	/** Start the drawn cursor toward a click point ahead of the click; sends nothing to the app. */
+	aimPointer?(targetPid: number, point: Point): void;
+	/** Give the web page holding an observed control keyboard focus before a pointer click; true when moved. */
+	focusWebPage?(targetPid: number, elementIndex: number): Promise<boolean>;
 	/**
 	 * Scroll an observed element into view through accessibility (AXScrollToVisible), with no pointer
 	 * and no keyboard. Resolves to the element's settled on-screen frame (global logical points) and

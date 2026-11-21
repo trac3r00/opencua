@@ -50,6 +50,38 @@ describe("tool error normalization", () => {
 		expect(retryFor('{"reason":"window-missing"}')).toBe("unsafe");
 	});
 
+	const normalized = (text: string, readOnly = false): Record<string, unknown> => {
+		const item = normalizeToolError({ isError: true, content: [{ type: "text", text }] }, readOnly).content[0];
+		return item?.type === "text" ? JSON.parse(item.text) : {};
+	};
+
+	it("#given an app that is not running #when normalizing #then nothing was sent and the agent is told to open it", () => {
+		const closed = normalized('{"error":"No running app matched \\"Aside\\""}');
+		expect(closed).toMatchObject({ code: "APP_NOT_RUNNING", retry: "safe", disposition: { retry: "safe" } });
+		expect(String(closed["suggestion"])).toContain("open_app");
+		expect(normalized('{"error":"No running app matched pid 58374"}')["code"]).toBe("APP_NOT_RUNNING");
+		// Input that already went out keeps the post-dispatch envelope even when the app then vanished.
+		expect(normalized('{"actionDispatched":true,"error":"No running app matched pid 42"}')["code"]).toBe(
+			"POST_ACTION_ERROR",
+		);
+	});
+
+	it("#given a subtree of an observation that is gone #when normalizing #then it is a stale ref, safe to re-observe", () => {
+		expect(
+			normalized(
+				'{"error":"element 89 is not part of the current observation of pid 30926; observe the app again before drilling into a subtree"}',
+			),
+		).toMatchObject({ code: "STALE_REF", retry: "safe" });
+	});
+
+	it("#given a read-only tool's unexplained failure #when normalizing #then nothing was sent and retry is safe", () => {
+		expect(normalized('{"error":"window list unreadable"}', true)).toMatchObject({
+			code: "TOOL_ERROR",
+			retry: "safe",
+		});
+		expect(normalized('{"error":"window list unreadable"}')).toMatchObject({ code: "TOOL_ERROR", retry: "unsafe" });
+	});
+
 	it("#given a report appended after the failure #when normalizing #then the error payload is the one annotated", () => {
 		const result = normalizeToolError({
 			isError: true,

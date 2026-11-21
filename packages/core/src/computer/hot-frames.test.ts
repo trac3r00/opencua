@@ -49,3 +49,23 @@ describe("#given JPEG bytes #when hot frames are delivered #then hashes are stab
 		expect(changedHash).not.toBe(firstHash);
 	});
 });
+
+describe("#given a refresher #when it has not delivered a frame yet #then it reports warming until the first frame", () => {
+	it("is warming after start, not after a frame, and warming again after a retarget", () => {
+		const worker = fakeWorker();
+		const source = new HotFrameSource({ spawnWorker: () => worker, idleStopMs: 60_000 });
+		sources.push(source);
+
+		expect(source.warming(1234, 71)).toBe(false);
+		source.start(1234, 71, { width: 1000, height: 800 });
+		const warmingAfterStart = source.warming(1234, 71);
+		worker.deliver({ type: "frame", bytes: new Uint8Array(Buffer.from("jpeg")), hash: "h" });
+		const warmingAfterFrame = source.warming(1234, 71);
+		source.start(1234, 72, { width: 1000, height: 800 });
+
+		expect(warmingAfterStart).toBe(true);
+		expect(warmingAfterFrame).toBe(false);
+		expect(source.warming(1234, 72)).toBe(true);
+		expect(source.warming(1234, 71)).toBe(false);
+	});
+});

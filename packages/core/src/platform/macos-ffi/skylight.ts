@@ -1,6 +1,5 @@
 import type { KoffiFunc } from "koffi";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
-import { isOwnedSurfacePid } from "../owned-surfaces.js";
+import { requireAttendedHostDelivery } from "../../computer/host-interaction-policy.js";
 import type { CGEventRef, CGPoint } from "./coregraphics-types.js";
 import { koffi } from "./koffi.js";
 
@@ -23,18 +22,14 @@ export interface FocusRestoreToken {
 }
 
 const skyLight = koffi.load("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight");
+const coreGraphics = koffi.load("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics");
 const objc = koffi.load("/usr/lib/libobjc.A.dylib");
 const CG_POINT = koffi.struct("SLCGPoint", { x: "double", y: "double" });
 
-const SLEventPostToPidNative = skyLight.func("SLEventPostToPid", "void", ["int32_t", "void *"]) as KoffiFunc<
+/** Background per-process delivery: the event reaches one app without the HID stream, focus or the pointer. */
+const SLEventPostToPid = skyLight.func("SLEventPostToPid", "void", ["int32_t", "void *"]) as KoffiFunc<
 	(pid: number, event: CGEventRef) => void
 >;
-
-/** Host events reach only windows opencua launched itself; every other process stays refused. */
-function SLEventPostToPid(pid: number, event: CGEventRef): void {
-	if (!isOwnedSurfacePid(pid)) denyHostInteraction("host-window");
-	SLEventPostToPidNative(pid, event);
-}
 
 const SLEventSetAuthenticationMessage = skyLight.func("SLEventSetAuthenticationMessage", "void", [
 	"void *",
@@ -53,9 +48,19 @@ const CGEventSetWindowLocation = skyLight.func("CGEventSetWindowLocation", "void
 
 const CGSMainConnectionID = skyLight.func("CGSMainConnectionID", "uint32_t", []) as KoffiFunc<() => number>;
 
-function SLPSPostEventRecordTo(_psn: Buffer, _eventRecord: object): never {
-	return denyHostInteraction("host-window");
-}
+const SLPSPostEventRecordTo = skyLight.func("SLPSPostEventRecordTo", "int32_t", ["void *", "void *"]) as KoffiFunc<
+	(psn: Buffer, eventRecord: object) => number
+>;
+
+const SLPSSetFrontProcessWithOptions = skyLight.func("SLPSSetFrontProcessWithOptions", "int32_t", [
+	"void *",
+	"uint32_t",
+	"uint32_t",
+]) as KoffiFunc<(psn: Buffer, windowId: number, options: number) => number>;
+
+/** kCPSNoWindows: the process comes forward without raising or ordering any of its windows. */
+const K_CPS_NO_WINDOWS = 0x400;
+const K_CPS_USER_GENERATED = 0x200;
 
 const _SLPSGetFrontProcess = skyLight.func("_SLPSGetFrontProcess", "int32_t", ["void *"]) as KoffiFunc<
 	(psn: Buffer) => number
@@ -71,9 +76,9 @@ const SLSGetConnectionPSN = skyLight.func("SLSGetConnectionPSN", "int32_t", ["ui
 	(connection: number, psn: Buffer) => number
 >;
 
-function CGEventPostToPSN(_psn: Buffer, _event: CGEventRef): never {
-	return denyHostInteraction("host-window");
-}
+const CGEventPostToPSN = coreGraphics.func("CGEventPostToPSN", "void", ["void *", "void *"]) as KoffiFunc<
+	(psn: Buffer, event: CGEventRef) => void
+>;
 
 const objcGetClass = objc.func("objc_getClass", "void *", ["str"]) as KoffiFunc<(name: string) => object | null>;
 const selRegisterName = objc.func("sel_registerName", "void *", ["str"]) as KoffiFunc<(name: string) => object | null>;
@@ -124,14 +129,23 @@ export function buildMouseEventRecord(window: SkyLightTargetWindow, eventType: n
 }
 
 /**
- * The former foreground transport is forbidden on the shared host.
+ * Deliver one synthesized mouse event straight to a window's own process.
+ *
+ * This routine brings the target process forward before posting the window-addressed record, so it is attended
+ * delivery only.
  */
 export function postMouseEventRecordToWindow(
-	_window: SkyLightTargetWindow,
-	_eventType: number,
-	_location: CGPoint,
+	window: SkyLightTargetWindow,
+	eventType: number,
+	location: CGPoint,
 ): boolean {
-	return denyHostInteraction("host-focus");
+	requireAttendedHostDelivery("host-focus");
+	const targetPsn = processSerialNumberForWindow(window.id);
+	if (targetPsn === null) {
+		return false;
+	}
+	SLPSSetFrontProcessWithOptions(targetPsn, window.id, K_CPS_USER_GENERATED);
+	return SLPSPostEventRecordTo(targetPsn, buildMouseEventRecord(window, eventType, location)) === 0;
 }
 
 export function postSkyLightEventToPid(pid: number, event: CGEventRef): void {
@@ -156,19 +170,67 @@ export function setSkyLightWindowLocation(event: CGEventRef, point: CGPoint): vo
 	CGEventSetWindowLocation(event, point);
 }
 
-export function activateWindowWithoutRaise(_window: SkyLightTargetWindow): boolean {
-	return denyHostInteraction("host-focus");
+/** Moves the person's focus to `window` (attended delivery only). */
+export function activateWindowWithoutRaise(window: SkyLightTargetWindow): boolean {
+	requireAttendedHostDelivery("host-focus");
+	const previousPsn = Buffer.alloc(8);
+	if (_SLPSGetFrontProcess(previousPsn) !== 0) {
+		return false;
+	}
+
+	const targetPsn = processSerialNumberForWindow(window.id);
+	if (targetPsn === null) {
+		return false;
+	}
+
+	const record = Buffer.alloc(0xf8);
+	record[0x04] = 0xf8;
+	record[0x08] = 0x0d;
+	record.writeUInt32LE(window.id, 0x3c);
+
+	record[0x8a] = 0x02;
+	const defocused = SLPSPostEventRecordTo(previousPsn, record) === 0;
+	record[0x8a] = 0x01;
+	const focused = SLPSPostEventRecordTo(targetPsn, record) === 0;
+	return defocused && focused;
 }
 
 /**
- * Synthesizing activation on the shared host is not an isolation mechanism.
+ * Tells one app it is (or is no longer) active, as cua-driver's background activation does, so it takes the next
+ * background click instead of spending it on activating its window. The front app, window order and the person's
+ * focus do not change: the record goes to that process only.
  */
-export function setProcessAppActive(_psn: Buffer, _windowId: number, _active: boolean): boolean {
-	return denyHostInteraction("host-focus");
+export function setProcessAppActive(psn: Buffer, windowId: number, active: boolean): boolean {
+	const record = Buffer.alloc(0xf8);
+	record[0x04] = 0xf8;
+	record[0x08] = 0x0d;
+	record.writeUInt32LE(windowId, 0x3c);
+	record[0x8a] = active ? 0x01 : 0x02;
+	return SLPSPostEventRecordTo(psn, record) === 0;
 }
 
-export function beginFocusWithoutRaise(_window: SkyLightTargetWindow): FocusRestoreToken | null {
-	return denyHostInteraction("host-focus");
+/** Moves the person's focus to `window` and returns what restores it (attended delivery only). */
+export function beginFocusWithoutRaise(window: SkyLightTargetWindow): FocusRestoreToken | null {
+	requireAttendedHostDelivery("host-focus");
+	const previousPsn = frontProcessSerialNumber();
+	if (previousPsn === null) {
+		return null;
+	}
+
+	const targetPsn = processSerialNumberForWindow(window.id);
+	if (targetPsn === null) {
+		return null;
+	}
+
+	const record = Buffer.alloc(0xf8);
+	record[0x04] = 0xf8;
+	record[0x08] = 0x0d;
+	record.writeUInt32LE(window.id, 0x3c);
+	record[0x8a] = 0x02;
+	const defocused = SLPSPostEventRecordTo(previousPsn, record) === 0;
+	record[0x8a] = 0x01;
+	const focused = SLPSPostEventRecordTo(targetPsn, record) === 0;
+	return defocused && focused ? { previousPsn, targetPsn } : null;
 }
 
 /** The process that is frontmost right now, or null when the query fails. */
@@ -195,8 +257,12 @@ export function processSerialNumbersMatch(left: Buffer, right: Buffer): boolean 
 	return left.equals(right);
 }
 
-export function restoreFrontProcessNoWindows(_token: FocusRestoreToken): boolean {
-	return denyHostInteraction("host-focus");
+/**
+ * Gives the front back to the person's app after a target app activated itself, without raising its windows. This
+ * only ever undoes a steal: the token names the app that was frontmost before opencua's input.
+ */
+export function restoreFrontProcessNoWindows(token: FocusRestoreToken): boolean {
+	return SLPSSetFrontProcessWithOptions(token.previousPsn, 0, K_CPS_NO_WINDOWS) === 0;
 }
 
 export function postCoreGraphicsEventToWindowOwner(window: SkyLightTargetWindow, event: CGEventRef): boolean {

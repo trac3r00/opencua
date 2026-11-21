@@ -1,11 +1,12 @@
 import type { KoffiFunc } from "koffi";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
+import { requireAttendedHostDelivery } from "../../computer/host-interaction-policy.js";
 import { cfRelease } from "./corefoundation.js";
 import {
 	type CGEventRef,
 	type CGEventSourceRef,
 	type CGPoint,
 	K_CG_EVENT_SOURCE_STATE_HID_SYSTEM_STATE,
+	K_CG_HID_EVENT_TAP,
 	K_CG_SCROLL_EVENT_UNIT_PIXEL,
 } from "./coregraphics-types.js";
 import { koffi } from "./koffi.js";
@@ -79,6 +80,14 @@ const CGEventSetLocation = coreGraphics.func("CGEventSetLocation", "void", [CG_E
 
 const CGEventGetLocation = coreGraphics.func("CGEventGetLocation", CG_POINT, [CG_EVENT_REF]) as KoffiFunc<
 	(event: CGEventRef) => CGPoint
+>;
+
+const CGEventPost = coreGraphics.func("CGEventPost", "void", ["uint32_t", CG_EVENT_REF]) as KoffiFunc<
+	(tap: number, event: CGEventRef) => void
+>;
+
+const CGWarpMouseCursorPosition = coreGraphics.func("CGWarpMouseCursorPosition", "int32_t", [CG_POINT]) as KoffiFunc<
+	(position: CGPoint) => number
 >;
 
 const clockGetTimeNanoseconds = systemLibrary.func("clock_gettime_nsec_np", "uint64_t", ["int"]) as KoffiFunc<
@@ -176,16 +185,20 @@ export function getLocation(event: CGEventRef): CGPoint {
 	return CGEventGetLocation(event);
 }
 
-export function postToHidEventTap(_event: CGEventRef): never {
-	return denyHostInteraction("global-input");
+/** Global HID input, attended delivery only: the event reaches whatever app is in front, under the real pointer. */
+export function postToHidEventTap(event: CGEventRef): void {
+	requireAttendedHostDelivery("global-input");
+	CGEventPost(K_CG_HID_EVENT_TAP, event);
 }
 
 export function stampEvent(event: CGEventRef): void {
 	CGEventSetTimestamp(event, currentUptimeNanoseconds());
 }
 
-export function warpCursorPosition(_position: CGPoint): never {
-	return denyHostInteraction("physical-pointer");
+/** Moves the real pointer, attended delivery only. */
+export function warpCursorPosition(position: CGPoint): void {
+	requireAttendedHostDelivery("physical-pointer");
+	CGWarpMouseCursorPosition(position);
 }
 
 function createEventSource(): CGEventSourceRef {

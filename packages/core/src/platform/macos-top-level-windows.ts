@@ -1,4 +1,5 @@
 import { windowTitlesForPid } from "./macos-ffi/accessibility.js";
+import { type ManagedDisplaySpaces, managedDisplaySpaces, spacesForWindows } from "./macos-ffi/sls-spaces.js";
 import { openWindowsForTargeting } from "./macos-open-windows.js";
 
 export interface TopLevelWindow {
@@ -7,6 +8,16 @@ export interface TopLevelWindow {
 	readonly ownerName: string;
 	readonly title: string;
 	readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+	/** Where the window lives among Spaces; absent when the WindowServer places it on none (unknown or on every Space). */
+	readonly space?: WindowSpace;
+}
+
+export interface WindowSpace {
+	readonly spaceIds: readonly number[];
+	/** On the Space its display shows now; false means it is parked on another Space. */
+	readonly current: boolean;
+	/** The display that owns the Space, by the WindowServer's display identifier. */
+	readonly display?: string;
 }
 
 export interface TopLevelWindowOptions {
@@ -19,6 +30,8 @@ export interface TopLevelWindowOptions {
 	 * caller that only compares window ids leaves it out.
 	 */
 	readonly titlesFor?: "all" | readonly number[];
+	/** Say which Space and display each window is on, and whether that Space is the one shown now. */
+	readonly withSpaces?: boolean;
 }
 
 /** A source of on-screen top-level windows, as the MCP session consumes it. */
@@ -46,9 +59,38 @@ export async function listTopLevelWindows(options: TopLevelWindowOptions = {}): 
 			},
 		});
 	}
-	return options.titlesFor === undefined
-		? summaries
-		: fillWindowTitles(summaries, options.titlesFor, windowTitlesForPid);
+	const titled =
+		options.titlesFor === undefined ? summaries : fillWindowTitles(summaries, options.titlesFor, windowTitlesForPid);
+	return options.withSpaces === true
+		? placeOnSpaces(titled, spacesForWindows(titled.map((window) => window.id)), managedDisplaySpaces())
+		: titled;
+}
+
+/** Give each window its Spaces, their display, and whether one of them is the Space its display shows now. */
+export function placeOnSpaces(
+	windows: readonly TopLevelWindow[],
+	spacesByWindow: ReadonlyMap<number, readonly number[]>,
+	displays: readonly ManagedDisplaySpaces[],
+): readonly TopLevelWindow[] {
+	const displayOfSpace = new Map<number, string>();
+	const shown = new Set<number>();
+	for (const display of displays) {
+		shown.add(display.currentSpaceId);
+		for (const space of display.spaces) displayOfSpace.set(space.id, display.displayIdentifier);
+	}
+	return windows.map((window) => {
+		const spaceIds = spacesByWindow.get(window.id);
+		if (spaceIds === undefined || spaceIds.length === 0) return window;
+		const display = spaceIds.map((id) => displayOfSpace.get(id)).find((name) => name !== undefined);
+		return {
+			...window,
+			space: {
+				spaceIds,
+				current: spaceIds.some((id) => shown.has(id)),
+				...(display === undefined ? {} : { display }),
+			},
+		};
+	});
 }
 
 /**

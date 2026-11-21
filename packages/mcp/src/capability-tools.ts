@@ -59,9 +59,7 @@ function adviceFor(
 	allowed: readonly string[] | undefined,
 	stop: StopStatus | undefined,
 ): string[] {
-	const advice: string[] = [
-		"Native host input and capture are disabled. Use an agent-owned isolated desktop; background delivery is not isolation.",
-	];
+	const advice: string[] = [];
 	if (stop?.stopped === true) {
 		advice.push(
 			"The user stopped computer use. Do not act or retry; tell the user. Only they resume (opencua resume).",
@@ -69,21 +67,23 @@ function adviceFor(
 	}
 	if (!host.permissions.accessibility) {
 		advice.push(
-			"Accessibility is not granted to the process that launched this server, so host observation is unavailable. Ask the user to grant it in System Settings > Privacy & Security > Accessibility, then restart the server. Permissions inside an isolated guest are separate.",
+			"Accessibility is not granted to the process that launched this server: no observation or input will work. Ask the user to grant it in System Settings > Privacy & Security > Accessibility, then restart the server.",
 		);
 	}
 	if (!host.permissions.screenRecording) {
-		advice.push("Host screenshots are unavailable. This does not determine whether guest capture is available.");
+		advice.push(
+			"Screen Recording is not granted: screenshots are unavailable, but accessibility observation and element actions still work.",
+		);
 	}
 	if (allowed?.length === 0) {
-		advice.push("No host app is approved for observation. The user sets OPENCUA_ALLOWED_BUNDLE_IDS.");
+		advice.push("No app is approved for observation or input. The user sets OPENCUA_ALLOWED_BUNDLE_IDS.");
 	}
 	if (mode === "locked") {
 		advice.push("The screen is locked: windows report no content. Use ask_user with reason screen_locked.");
 	}
 	if (mode === "remote") {
 		advice.push(
-			"This host observer is outside the console session. Do not borrow console focus; use the isolated guest.",
+			"This session is reached remotely while another user owns the console: Save/Open panels and some web content may not render. Prefer accessibility actions and report needs-user for steps that cannot be reached.",
 		);
 	}
 	return advice;
@@ -93,10 +93,9 @@ export function capabilityReport(sources: CapabilitySources): Record<string, unk
 	const host = sources.probeHost();
 	const mode = sessionMode(host);
 	const stop = sources.stop?.status();
-	const delivery = "background";
+	const delivery = sources.delivery ?? "background";
 	const toolNames = sources.toolNames ?? toolNamesFor("full", false);
 	const agentHost = sources.host?.() ?? detectHost(undefined, process.env);
-	const spawn = spawnGuidance(agentHost.name, delivery);
 	return {
 		server: {
 			name: SERVER_INFO.name,
@@ -104,27 +103,26 @@ export function capabilityReport(sources: CapabilitySources): Record<string, unk
 			toolset: sources.toolset ?? "full",
 			tools: toolNames.length,
 		},
-		host: {
-			...agentHost,
-			// Host input is disabled, so workers cannot act on this desktop at all, let alone concurrently.
-			workers: {
-				...spawn,
-				concurrent: false,
-				instructions: `${spawn.instructions} Host input is disabled, so workers act only through an agent-owned isolated desktop, where actions are serialized.`,
-			},
-		},
+		host: { ...agentHost, workers: spawnGuidance(agentHost.name, delivery) },
 		platform: process.platform,
-		backend: "macos-host-observer",
-		input: { supported: false, reason: "isolated-session-required", scope: "human-desktop" },
-		capture: { supported: false, reason: "isolated-session-required", scope: "human-desktop" },
+		backend: "macos-native",
+		input: {
+			supported: true,
+			scope: "allowed-apps",
+			route: delivery === "attended" ? "global-hid-attended" : "per-process-background",
+		},
+		capture: { supported: true, scope: "allowed-apps" },
 		permissions: host.permissions,
 		session: { ...host.session, mode },
 		mainDisplay: host.mainDisplay,
 		delivery: {
 			mode: delivery,
-			requestedMode: sources.delivery ?? "background",
-			modes: ["background"],
-			focusGuard: "Native host input is disabled; no focus borrowing or physical pointer dispatch is permitted.",
+			requestedMode: delivery,
+			modes: ["background", "attended"],
+			focusGuard:
+				delivery === "attended"
+					? "attended (opt-in, OPENCUA_DELIVERY=attended): the target app is activated and its window raised, and input goes through the global HID tap under the real, moving pointer; the person should not use the Mac meanwhile"
+					: "input goes to the target app's process in the background; the front app, window stacking and the physical pointer are never changed (global HID input, pointer warps and focus or raise primitives are refused)",
 		},
 		approval: { allowedBundleIds: sources.allowedBundleIds ?? null },
 		stop: {

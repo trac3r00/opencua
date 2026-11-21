@@ -54,6 +54,12 @@ const cases: readonly MutationCase[] = [
 		arguments: { app: "Finder", keys: ["super+k"] },
 		expected: { kind: "key", key: "k" },
 	},
+	// One combo as a plain string, the way agents most often write it.
+	{
+		name: "press_keys",
+		arguments: { app: "Finder", keys: "super+k" },
+		expected: { kind: "key", key: "k" },
+	},
 ];
 
 let closeHarness: (() => Promise<void>) | undefined;

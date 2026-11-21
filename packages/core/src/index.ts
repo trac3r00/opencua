@@ -1,6 +1,7 @@
 import "./env-compat.js";
 export type * from "./accessibility/types.js";
 export { classifyContentKind, type ContentKind } from "./accessibility/content-kind.js";
+export { axUnavailableNote } from "./accessibility/ax-unavailable.js";
 export { diffAxTreeChanges, type AxTreeChanges } from "./accessibility/diff.js";
 export {
 	type ElementMatch,
@@ -44,6 +45,7 @@ export {
 } from "./computer/input-region.js";
 export {
 	HandsCoordinator,
+	measureOverlapMs,
 	type HandName,
 	type HandResource,
 	type HandTask,
@@ -77,10 +79,16 @@ export {
 	type TopLevelWindow,
 	type TopLevelWindowOptions,
 	type WindowProbe,
+	type WindowSpace,
 	fillWindowTitles,
 	listTopLevelWindows,
+	placeOnSpaces,
 } from "./platform/macos-top-level-windows.js";
 export { type ListedWindow, listWindows } from "./platform/macos-ffi/window-list.js";
+export { type TypingRhythm, typingRhythm } from "./platform/typing-rhythm.js";
+export { unhideApplication } from "./platform/macos-ffi/workspace.js";
+export { ForegroundKeeper, type ForegroundKeeperDeps, type ForegroundRestore } from "./platform/foreground-keeper.js";
+export { startNativeForegroundKeeper } from "./platform/macos-foreground-keeper.js";
 export { captureWindowViaSck } from "./platform/macos-ffi/sckit.js";
 export {
 	type AxEventWaiter,
@@ -305,6 +313,8 @@ export {
 	type StopChordTimer,
 	STOP_CHORD_LABEL,
 	STOP_CHORD_MASK,
+	TALK_CHORD_FORBIDDEN_MASK,
+	TALK_CHORD_MASK,
 	StopChordDetector,
 	startStopChordDetector,
 } from "./platform/stop-chord.js";

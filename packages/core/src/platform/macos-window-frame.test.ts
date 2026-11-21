@@ -1,6 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { defined } from "@opencua/test-support";
 import type { AXUIElementRef } from "./macos-ffi/accessibility.js";
+import { setOpenWindowsSourceForTesting } from "./macos-open-windows.js";
 import { type WindowFrameDependencies, framesApproximatelyEqual, setWindowFrame } from "./macos-window-frame.js";
 
 const requested = { x: 10, y: 20, width: 800, height: 600 };
@@ -32,6 +33,24 @@ describe("setWindowFrame #given a window that ignores accessibility writes #when
 		expect(result.applied).toEqual(observed);
 		expect(result.applied).not.toEqual(requested);
 		expect(fake.writes.length).toBeGreaterThan(2);
+	});
+});
+
+describe("setWindowFrame #given an observed window that is not on screen #when the native lookup runs #then WindowServer still knows it", () => {
+	afterEach(() => {
+		setOpenWindowsSourceForTesting(undefined);
+	});
+
+	it("finds the id in the all-Spaces listing instead of calling it closed or stale", async () => {
+		const offscreen = { id: 7505, owner: { processId: 999_999 }, bounds: { x: 0, y: 0, width: 600, height: 400 } };
+		setOpenWindowsSourceForTesting(
+			() => [],
+			() => [offscreen],
+		);
+
+		await expect(setWindowFrame(999_999, 7505, requested)).rejects.toThrow(
+			"window_id 7505 belongs to pid 999999 but has no matching AXWindow",
+		);
 	});
 });
 

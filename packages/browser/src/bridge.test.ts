@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import type { StopStatusSource } from "@opencua/core";
 import { vi, whenSettled } from "@opencua/test-support";
 import { WebSocket } from "ws";
 import { z } from "zod";
 import { BrowserBridge } from "./bridge.js";
-import type { BrowserCommand } from "./protocol.js";
+import { type BrowserCommand, BrowserError } from "./protocol.js";
 
 const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 const packetSchema = z.object({
@@ -54,14 +55,16 @@ describe("BrowserBridge", () => {
 		expect(bridge.connected).toBe(false);
 	});
 
-	it("#given a valid origin #when pairing with wrong auth #then refuses pairing", async () => {
+	it("#given a valid origin #when pairing with wrong auth #then refuses pairing with the code the extension recovers from", async () => {
 		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
 		bridges.push(bridge);
 		const socket = await connect(await bridge.listen(0));
 		clients.push(socket);
 		const closed = once(socket, "close");
 		socket.send(JSON.stringify({ token: "wrong" }));
-		expect(await closed).toBeDefined();
+		const [code, reason] = await closed;
+		expect(code).toBe(1008);
+		expect(String(reason)).toBe("Invalid pairing");
 		expect(bridge.connected).toBe(false);
 	});
 
@@ -276,6 +279,22 @@ describe("BrowserBridge", () => {
 		await whenSettled(waiting, (settled) => expect(settled).resolves.toBe(false));
 	});
 
+	it("#given no paired extension #when a request arrives #then rejects with the pairing steps and extension path", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		bridges.push(bridge);
+		await bridge.listen(0);
+		const extensionDirectory = fileURLToPath(new URL("../extension", import.meta.url));
+		const failure = await bridge.request({ method: "handoff", reason: "login" }).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toBeInstanceOf(BrowserError);
+		if (!(failure instanceof BrowserError)) throw new Error("Expected a BrowserError");
+		expect(failure.code).toBe("disconnected");
+		expect(failure.message).toContain("opencua browser setup");
+		expect(failure.message).toContain(extensionDirectory);
+	});
+
 	it("#given a pending request #when the extension disconnects #then rejects without replay", async () => {
 		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
 		bridges.push(bridge);
@@ -407,5 +426,66 @@ describe("BrowserBridge", () => {
 		socket.send(JSON.stringify({ event: "checkpoint", id: packet.id, step: 1 }));
 		expect(await denied).toEqual({ checkpoint: packet.id, allowed: false });
 		expect(bridge.paused).toBe(false);
+	});
+
+	function rpc(port: number, body: unknown): Promise<Response> {
+		return fetch(`http://127.0.0.1:${port}/rpc`, {
+			method: "POST",
+			headers: { authorization: "Bearer secret", "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	}
+
+	it("#given an rpc in flight #when draining for a reload #then it finishes that rpc, refuses new ones, then closes", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		let entered: () => void = () => undefined;
+		const handling = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		let release: (value: unknown) => void = () => undefined;
+		bridge.setRpcHandler(
+			() =>
+				new Promise((resolve) => {
+					release = resolve;
+					entered();
+				}),
+		);
+		const port = await bridge.listen(0);
+		const first = rpc(port, { action: "status" });
+		await handling;
+		let drained = false;
+		const draining = bridge.drain(10_000).then(() => {
+			drained = true;
+		});
+		const refused = await rpc(port, { action: "status" });
+		expect(refused.status).toBe(503);
+		expect(await refused.json()).toMatchObject({ error: "disconnected" });
+		expect(drained).toBe(false);
+		release({ finished: true });
+		const reply = await first;
+		expect(reply.status).toBe(200);
+		expect(await reply.json()).toEqual({ finished: true });
+		await draining;
+		await expect(rpc(port, { action: "status" })).rejects.toBeInstanceOf(Error);
+	});
+
+	it("#given an rpc that never settles #when draining #then closes once the bound passes", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		let entered: () => void = () => undefined;
+		const handling = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		bridge.setRpcHandler(() => {
+			entered();
+			return new Promise(() => undefined);
+		});
+		const port = await bridge.listen(0);
+		const stuck = rpc(port, { action: "status" }).then(
+			() => "answered",
+			() => "cut",
+		);
+		await handling;
+		await bridge.drain(50);
+		expect(await stuck).toBe("cut");
 	});
 });

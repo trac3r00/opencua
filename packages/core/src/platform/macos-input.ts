@@ -25,13 +25,14 @@ import type {
 } from "../types/index.js";
 import { readRealCursorPosition } from "./macos-cursor.js";
 import {
+	focusedCaretFrame,
 	focusedElementFrame,
 	focusedElementInWebArea,
 	focusedWindowIdForPid,
 	focusedWindowIsModal,
 	focusedWindowShowsFilePanel,
+	raiseWindowInApp,
 	windowIdsAtScreenPoint,
-	windowMinimizedForPid,
 	windowTitlesForPid,
 } from "./macos-ffi/accessibility.js";
 import {
@@ -54,6 +55,7 @@ import {
 	setProcessAppActive,
 } from "./macos-ffi/skylight.js";
 import { listOnscreenWindows, listWindows } from "./macos-ffi/window-list.js";
+import { activateApplication } from "./macos-ffi/workspace.js";
 import { startFocusStealWatch } from "./macos-focus-watch.js";
 import { dragSteps, interpolatePointEased, pointerTravelDuration, scrollEventPlan } from "./macos-input-drag.js";
 import { pointerModifierFlags, withHeldModifiers } from "./macos-input-modifiers.js";
@@ -65,17 +67,16 @@ import {
 	postDoubleClick,
 	postDragSequence,
 	primerPosition,
-	runFocusLeasedClick,
-	runFocusLeasedDoubleClick,
-	runFocusLeasedDrag,
 } from "./macos-input-pointer.js";
 import { modifierFlags, virtualKeyCodeFor } from "./macos-keycodes.js";
 import { openWindowsForTargeting } from "./macos-open-windows.js";
+import { gestureFocusSettleMilliseconds } from "./macos-targeted-gesture.js";
 import { selectSystemEventsTargetWindow } from "./macos-window-target-fallback.js";
 import type { MacOSWindowInfo } from "./macos-window-target.js";
 import { resolveTargetWindow, toTargetWindow, visibleWindowsForPid } from "./macos-window-target.js";
 import { isOwnedSurfacePid } from "./owned-surfaces.js";
-import { humanBaseMilliseconds, humanCharacterDelay, typingRhythm } from "./typing-rhythm.js";
+import { humanBaseForText, humanCharacterDelay, typingRhythm } from "./typing-rhythm.js";
+import { windowMinimizedState } from "./window-minimized.js";
 
 /**
  * On-screen window ids in the WindowServer's front-to-back order. A window that is minimized or
@@ -90,6 +91,12 @@ export function currentOnscreenWindowIds(): readonly number[] | undefined {
 }
 
 let focusedFrameSource: (pid: number) => Rect | undefined = focusedElementFrame;
+let caretFrameSource: (pid: number) => Rect | undefined = focusedCaretFrame;
+
+/** Test seam for where the text caret is; production asks the app over accessibility. */
+export function setCaretFrameSourceForTesting(source: ((pid: number) => Rect | undefined) | undefined): void {
+	caretFrameSource = source ?? focusedCaretFrame;
+}
 
 /** Replaces the focused-element frame reader the region check uses; pass undefined to restore the native one. */
 export function setFocusedFrameSourceForTesting(source: ((pid: number) => Rect | undefined) | undefined): void {
@@ -125,9 +132,8 @@ let keyboardWindowFocuser: (pid: number, windowId: number) => Promise<void> = as
 };
 
 /**
- * Some apps activate themselves in response to background keys (Finder's Go to Folder panel), which
- * would pull the person out of the app they are using. Background delivery snapshots who was
- * frontmost before the input and, if the target app takes the front shortly after, sends it back
+ * Some apps activate themselves in response to background input (Finder's Go to Folder panel), which
+ * would pull the person out of the app they are using. A watcher sends the person's app back
  * (polling every few milliseconds, off this thread; see macos-focus-watch.ts). A third app coming
  * forward is left alone.
  */
@@ -209,6 +215,9 @@ export function setScreenLayoutSourceForTesting(source: () => ScreenLayout | und
 	screenLayoutSource = source;
 }
 
+/** How many focus-settle intervals attended delivery waits for a raised window to become key: 40 x 25 ms by default. */
+const ATTENDED_FOREGROUND_POLLS = 40;
+
 /** Logged when an app was told it is active but no point is provably clear for its primer click. */
 const PRIMER_SKIPPED_MESSAGE =
 	"opencua: activation primer skipped: the display and window layout could not be read, so no point outside all of them is known; a first-mouse app (Finder) may spend the next background click on activating its window\n";
@@ -244,6 +253,8 @@ export function typeCharacterDelayMilliseconds(environment: NodeJS.ProcessEnv = 
 }
 
 const TYPE_CHARACTER_DELAY_MS_DEFAULT = 4;
+/** While typing, the drawn cursor re-reads the caret after a newline and every this many characters. */
+const CARET_FOLLOW_INTERVAL = 24;
 
 /** How often a held key checks whether its call was stopped, so a long hold is released soon after a stop. */
 const HOLD_CHECK_MILLISECONDS = 50;
@@ -270,8 +281,20 @@ export class MacOSInputController {
 	/** The window each app's input last went to (or its observation named), by pid. */
 	private readonly targetWindowsByPid = new Map<number, SkyLightTargetWindow>();
 	private readonly keyboardInputAt = new Map<number, number>();
-	/** Apps behind the person's that this controller told they are active, by pid, to be told otherwise once idle. */
+	/**
+	 * Apps behind the person's that this controller told they are active, by pid, to be told otherwise once idle.
+	 *
+	 * Known limitation: the hold is per process. Another OpenCUA process driving the same app keeps its own map, so its
+	 * idle release can tell the app it is inactive while this one still counts it held; this controller then does not
+	 * tell it again, and its next click may be spent on activating the window. No per-event re-assertion fixes that: the
+	 * first click after an activation is spent on it whatever told the app, so it needs a cross-process hold.
+	 */
 	private readonly activations = new Map<number, { readonly window: SkyLightTargetWindow; readonly psn: Buffer }>();
+	/**
+	 * Input calls in flight on each pid. While any runs, the app's idle release waits: it is scheduled only when the last
+	 * one ends, so neither a long call nor an overlapping call on the same app has the app told inactive under it.
+	 */
+	private readonly activationHolders = new Map<number, number>();
 	private readonly activationReleaseTimers = new Map<number, NodeJS.Timeout>();
 	/**
 	 * Registered on process exit while any app is held: a process that ends (a server turns termination
@@ -291,6 +314,8 @@ export class MacOSInputController {
 	private readonly displaySleep: DisplaySleepAssertion;
 	private globalGestureChain: Promise<void> = Promise.resolve();
 	private readonly appGestureChains = new Map<number | string, Promise<void>>();
+	/** Glides started ahead of their click, by pid: where each is heading and when it gets there. */
+	private readonly aims = new Map<number, { readonly point: Point; readonly arrival: Promise<void> }>();
 	private readonly delivery: InputDelivery;
 	/** Whether background delivery may tell an app behind the person's that it is active (see activateBehind). */
 	private readonly backgroundActivation: boolean;
@@ -382,6 +407,40 @@ export class MacOSInputController {
 		}
 	}
 
+	/** Attended delivery posts through the global HID tap, under the real pointer; an owned surface keeps its own route. */
+	private postsGlobally(pid: number | undefined): boolean {
+		return !this.isBackground && (pid === undefined || !isOwnedSurfacePid(pid));
+	}
+
+	/** The pid an event is posted to: none (the HID tap) under attended delivery. */
+	private routedPid(pid: number | undefined): number | undefined {
+		return this.postsGlobally(pid) ? undefined : pid;
+	}
+
+	/**
+	 * The HID tap reaches the app in front, so attended delivery activates the target app and raises the target window
+	 * before its input, and refuses the input when the app did not come forward: it would reach another app.
+	 */
+	private async bringForward(pid: number, window: SkyLightTargetWindow): Promise<void> {
+		if (!this.postsGlobally(pid)) return;
+		if (focusGuardFor(window) === null && focusedWindowIdForPid(pid) === window.id) return;
+		activateApplication(pid);
+		raiseWindowInApp(pid, window.id);
+		// A click on a window that is not yet key is spent making it key (an app without first-mouse ignores it), so input
+		// waits, bounded, until the app is in front and the window is its focused one. An app in front whose focus never
+		// reports that window (a sheet, a helper window) still gets the input: that click is then what makes it key.
+		const poll = Math.max(1, gestureFocusSettleMilliseconds());
+		for (let attempt = 0; attempt < ATTENDED_FOREGROUND_POLLS; attempt += 1) {
+			await delayMilliseconds(poll);
+			if (focusGuardFor(window) === null && focusedWindowIdForPid(pid) === window.id) {
+				return;
+			}
+		}
+		if (focusGuardFor(window) !== null) {
+			throw new Error(`attended delivery could not bring app ${pid} to the front; input refused`);
+		}
+	}
+
 	/**
 	 * Hold modifier keys across one pointer gesture, to the same process and window the pointer events
 	 * go to: flagsChanged key events before it, the flags handed to the gesture to stamp on every
@@ -412,23 +471,20 @@ export class MacOSInputController {
 		) {
 			throw new Error("modified pointer input refused for an off-Space window; activation priming is unavailable");
 		}
-		let held = false;
-		if (pid !== undefined && targetWindow !== undefined) {
-			if (this.isBackground && !currentOnscreenWindowIds()?.includes(targetWindow.id)) {
-				held = false;
-			} else {
-				held =
-					activation === "pointer" || modified
-						? await this.activateBehind(pid, targetWindow)
-						: this.postponeActivationRelease(pid);
-			}
-		}
+		const holder = pid !== undefined && targetWindow !== undefined ? pid : undefined;
+		if (holder !== undefined) this.holdActivation(holder);
 		try {
+			if (
+				holder !== undefined &&
+				targetWindow !== undefined &&
+				(activation === "pointer" || modified) &&
+				(!this.isBackground || currentOnscreenWindowIds()?.includes(targetWindow.id) === true)
+			) {
+				await this.activateBehind(holder, targetWindow);
+			}
 			return await this.postWithHeldModifiers(call, modifiers, targetWindow, gesture);
 		} finally {
-			if (held && pid !== undefined) {
-				this.scheduleActivationRelease(pid);
-			}
+			if (holder !== undefined) this.dropActivationHold(holder);
 		}
 	}
 
@@ -445,11 +501,11 @@ export class MacOSInputController {
 	 * {@link BACKGROUND_ACTIVATION_IDLE_MILLISECONDS} (or the controller closes): telling it otherwise
 	 * right after each action leaves some apps (Finder) deaf to the very next activation, while a chain of
 	 * actions shares one. An app held for another of its windows is told again, naming this one. True when
-	 * this controller holds the app active afterwards; the caller then schedules the release. Never done with
+	 * this controller holds the app active afterwards; the release is scheduled once no call holds it. Never done with
 	 * background activation turned off (OPENCUA_BACKGROUND_ACTIVATION=off), which avoids the release's autosave (see
 	 * releaseActivation) at the cost of the clicks and window commands above.
 	 */
-	private async activateBehind(pid: number, window: SkyLightTargetWindow): Promise<boolean> {
+	private async activateBehind(pid: number, window: SkyLightTargetWindow, primer = true): Promise<boolean> {
 		// Notification hosts are nonactivating accessory apps, not document windows.
 		// Priming and later deactivating them can dismiss the hosted banner.
 		// An owned surface takes the first click without activation, and activating it would touch the person's focus.
@@ -469,22 +525,35 @@ export class MacOSInputController {
 		this.activations.set(pid, { window, psn: guard.targetPsn });
 		this.syncExitHook();
 		focusStealWatcher(window);
-		const primer = primerPosition(screenLayoutSource());
-		if (primer === undefined) {
+		if (!primer) {
+			return true;
+		}
+		const primerPoint = primerPosition(screenLayoutSource());
+		if (primerPoint === undefined) {
 			process.stderr.write(PRIMER_SKIPPED_MESSAGE);
 		} else {
-			await postActivationPrimer(this.mousePostFor(pid), window, primer);
+			await postActivationPrimer(this.mousePostFor(pid), window, primerPoint);
 		}
 		return true;
 	}
 
-	/** Keep a held activation from running out while another action reaches the app; false when none is held. */
-	private postponeActivationRelease(pid: number): boolean {
-		if (!this.activations.has(pid)) {
-			return false;
-		}
+	/** An input call on `pid` starts: the app's idle release waits until every call on it has ended. */
+	private holdActivation(pid: number): void {
+		this.activationHolders.set(pid, (this.activationHolders.get(pid) ?? 0) + 1);
 		this.cancelActivationRelease(pid);
-		return true;
+	}
+
+	/** An input call on `pid` ended, thrown or not: the last one to end starts the app's idle period, if it is held. */
+	private dropActivationHold(pid: number): void {
+		const remaining = (this.activationHolders.get(pid) ?? 1) - 1;
+		if (remaining > 0) {
+			this.activationHolders.set(pid, remaining);
+			return;
+		}
+		this.activationHolders.delete(pid);
+		if (this.activations.has(pid)) {
+			this.scheduleActivationRelease(pid);
+		}
 	}
 
 	private cancelActivationRelease(pid: number): void {
@@ -497,6 +566,9 @@ export class MacOSInputController {
 
 	private scheduleActivationRelease(pid: number): void {
 		this.cancelActivationRelease(pid);
+		if (this.activationHolders.has(pid)) {
+			return;
+		}
 		const timer = setTimeout(() => {
 			this.activationReleaseTimers.delete(pid);
 			this.releaseActivation(pid);
@@ -571,20 +643,28 @@ export class MacOSInputController {
 				throw new Error("off-Space command target is unavailable or is not the app's verified focused window");
 			}
 			focusStealWatcher(target);
-			return await command(false);
+			// Window commands of an app behind the person's read disabled until it is told it is active. The window is
+			// not on screen, so no click follows that a primer would absorb: the app is only told, never raised.
+			this.holdActivation(pid);
+			try {
+				const offscreenHeld =
+					(this.activations.has(pid) || wantsActivation()) && (await this.activateBehind(pid, target, false));
+				return await command(offscreenHeld);
+			} finally {
+				this.dropActivationHold(pid);
+			}
 		}
 		await keyboardWindowFocuser(pid, window.id);
 		if (currentInputScope()?.target?.windowId !== undefined && focusedWindowIdForPid(pid) !== window.id) {
 			throw new Error("observed command target is not the verified focused window; input refused");
 		}
 		const activate = this.activations.has(pid) || (this.isBackground && wantsActivation());
-		const held = activate ? await this.activateBehind(pid, window) : false;
+		this.holdActivation(pid);
 		try {
+			const held = activate ? await this.activateBehind(pid, window) : false;
 			return await command(held);
 		} finally {
-			if (held) {
-				this.scheduleActivationRelease(pid);
-			}
+			this.dropActivationHold(pid);
 		}
 	}
 
@@ -593,16 +673,14 @@ export class MacOSInputController {
 		return this.activations.has(pid);
 	}
 
-	/** Keys reaching an app this controller holds active keep it so: its idle period restarts after them. */
+	/** Keys hold the app's activation for the whole call, every key of it: its idle period starts after the last call. */
 	private async keepingActivation<T>(call: InputCall, work: () => Promise<T>): Promise<T> {
 		const pid = call.pid;
-		const held = pid !== undefined && this.postponeActivationRelease(pid);
+		if (pid !== undefined) this.holdActivation(pid);
 		try {
 			return await work();
 		} finally {
-			if (held && pid !== undefined) {
-				this.scheduleActivationRelease(pid);
-			}
+			if (pid !== undefined) this.dropActivationHold(pid);
 		}
 	}
 
@@ -621,7 +699,7 @@ export class MacOSInputController {
 					keyDown,
 					flags,
 					text: undefined,
-					targetPid: call.pid,
+					targetPid: this.routedPid(call.pid),
 					targetWindow,
 					flagsChanged: true,
 				});
@@ -759,9 +837,11 @@ export class MacOSInputController {
 			this.beforeInput();
 			const targetWindow = await this.pointerWindow(call, position);
 			this.requirePointerWindow(call, targetWindow);
+			this.frameWindow(call.pid, targetWindow);
 			// Read after waiting for the gesture before this one and for the window lookup: nothing goes down once stopped.
 			this.checkpoint(call);
 			const post = this.clickPost(call);
+			if (call.pid !== undefined && targetWindow !== undefined) await this.bringForward(call.pid, targetWindow);
 			await this.holdModifiers(call, modifiers, targetWindow, "pointer", async (flags) => {
 				if (call.pid === undefined) {
 					await post("move", position, "left", undefined, targetWindow);
@@ -769,12 +849,14 @@ export class MacOSInputController {
 					this.markPointer(position);
 				} else if (targetWindow !== undefined) {
 					if (this.isBackground || isOwnedSurfacePid(call.pid)) {
+						await this.glidePointer(position, call.pid);
 						await postClick(post, position, button, 1, targetWindow, flags);
 						this.showPointer(position, true, call.pid);
 						return;
 					}
-					await runFocusLeasedClick(targetWindow, position, button, post, flags, { targetPid: call.pid });
-					this.showPointer(position, true, call.pid);
+					await post("move", position, "left", undefined, targetWindow);
+					await postClick(post, position, button, 1, targetWindow, flags);
+					this.markPointer(position, call.pid);
 				}
 			});
 		});
@@ -788,6 +870,7 @@ export class MacOSInputController {
 			this.requirePointerWindow(call, targetWindow);
 			this.checkpoint(call);
 			const post = this.clickPost(call);
+			if (call.pid !== undefined && targetWindow !== undefined) await this.bringForward(call.pid, targetWindow);
 			await this.holdModifiers(call, modifiers, targetWindow, "pointer", async (flags) => {
 				if (call.pid === undefined) {
 					await post("move", position, "left", undefined, targetWindow);
@@ -795,12 +878,14 @@ export class MacOSInputController {
 					this.markPointer(position);
 				} else if (targetWindow !== undefined) {
 					if (this.isBackground || isOwnedSurfacePid(call.pid)) {
+						await this.glidePointer(position, call.pid);
 						await postDoubleClick(post, position, targetWindow, flags);
 						this.showPointer(position, true, call.pid);
 						return;
 					}
-					await runFocusLeasedDoubleClick(targetWindow, position, post, flags, { targetPid: call.pid });
-					this.showPointer(position, true, call.pid);
+					await post("move", position, "left", undefined, targetWindow);
+					await postDoubleClick(post, position, targetWindow, flags);
+					this.markPointer(position, call.pid);
 				}
 			});
 		});
@@ -816,6 +901,9 @@ export class MacOSInputController {
 		const targetWindow = await this.requireSessionWindow(call, "keyboard");
 		const keyboardPid = this.keyboardPid(call);
 		assertFocusInInputRegion(() => (keyboardPid === undefined ? undefined : focusedFrameSource(keyboardPid)));
+		this.frameWindow(call.pid, targetWindow);
+		// The drawn cursor goes to the line being typed on first, the way a person looks at where they type.
+		await this.followCaret(keyboardPid, call.pid, true);
 		this.showKeyboard();
 		// Pace keystrokes: posting characters back-to-back outruns the target app's
 		// event processing and drops characters ("https://example.com" -> "https://e").
@@ -824,6 +912,7 @@ export class MacOSInputController {
 		const pacing = typeCharacterDelayMilliseconds();
 		const rhythm = typingRhythm();
 		const segments = Array.from(text);
+		const humanBase = humanBaseForText(segments.length, pacing);
 		for (let i = 0; i < segments.length; i++) {
 			const segment = segments[i];
 			if (segment === undefined) {
@@ -834,15 +923,18 @@ export class MacOSInputController {
 			this.assertDeliverable(keyboardPid);
 			// Focus can move between characters (another worker clicks elsewhere): recheck it before each one.
 			assertFocusInInputRegion(() => (keyboardPid === undefined ? undefined : focusedFrameSource(keyboardPid)));
-			postUnicodeText(segment, keyboardPid, targetWindow);
+			postUnicodeText(segment, this.routedPid(keyboardPid), targetWindow);
 			if (!this.isBackground || this.backgroundCues) this.overlay.keyPress?.(call.pid);
 			this.noteKeyboardInput(call.pid);
 			const next = segments[i + 1];
 			// The wait after this character is the transition into the next one.
 			const delay =
 				rhythm === "human" && next !== undefined
-					? humanCharacterDelay(segment, next, humanBaseMilliseconds(pacing), Math.random, pacing)
+					? humanCharacterDelay(segment, next, humanBase, Math.random, pacing)
 					: pacing;
+			if (segment === "\n" || (i + 1) % CARET_FOLLOW_INTERVAL === 0) {
+				await this.followCaret(keyboardPid, call.pid, false);
+			}
 			if (delay > 0 && i < segments.length - 1) {
 				await delayMilliseconds(delay);
 			}
@@ -875,7 +967,7 @@ export class MacOSInputController {
 			keyDown: true,
 			flags,
 			text: undefined,
-			targetPid: keyboardPid,
+			targetPid: this.routedPid(keyboardPid),
 			targetWindow,
 		});
 		if (!this.isBackground || this.backgroundCues) this.overlay.keyPress?.(call.pid);
@@ -890,7 +982,7 @@ export class MacOSInputController {
 				keyDown: false,
 				flags,
 				text: undefined,
-				targetPid: keyboardPid,
+				targetPid: this.routedPid(keyboardPid),
 				targetWindow,
 			});
 			this.noteKeyboardInput(call.pid);
@@ -972,6 +1064,10 @@ export class MacOSInputController {
 		};
 		const [ux, uy] = unit[options.direction];
 		const plan = scrollEventPlan(amount);
+		if (this.postsGlobally(call.pid)) {
+			// A HID wheel event scrolls the window under the real pointer, so the pointer goes there first.
+			await this.mousePost(call)("move", position, "left", undefined, targetWindow);
+		}
 		await this.holdModifiers(call, options.modifiers, targetWindow, "wheel", async (flags) => {
 			const started = performance.now();
 			for (const [index, d] of plan.entries()) {
@@ -984,7 +1080,7 @@ export class MacOSInputController {
 				postScrollEvent({
 					deltaX: d * ux,
 					deltaY: d * uy,
-					targetPid: call.pid,
+					targetPid: this.routedPid(call.pid),
 					targetWindow,
 					flags,
 					position: options.position ?? (targetWindow === undefined ? undefined : position),
@@ -1024,6 +1120,7 @@ export class MacOSInputController {
 			};
 			// Read between drag steps; a stopped drag lets go of the button where it is and sends nothing more.
 			const checkpoint = (): void => this.checkpoint(call);
+			if (call.pid !== undefined && targetWindow !== undefined) await this.bringForward(call.pid, targetWindow);
 			await this.holdModifiers(call, options.modifiers, targetWindow, "pointer", async (flags) => {
 				if (call.pid === undefined) {
 					await this.postMove(call, options.from);
@@ -1034,7 +1131,8 @@ export class MacOSInputController {
 						await postDragSequence(post, options, targetWindow, flags, checkpoint);
 						return;
 					}
-					await runFocusLeasedDrag(targetWindow, options, post, flags, checkpoint);
+					await this.postMove(call, options.from);
+					await postDragSequence(post, options, targetWindow, flags, checkpoint);
 				}
 			});
 		});
@@ -1081,6 +1179,63 @@ export class MacOSInputController {
 		} else {
 			this.overlay.track(position, pid);
 		}
+	}
+
+	/**
+	 * Move the drawn cursor to `position` and wait until it is there, so the input that follows lands under it the
+	 * way a person's click follows their hand. Without a drawn cursor only the logical pointer moves.
+	 */
+	/** Keep the window being driven marked, at its current bounds, while input goes to it. */
+	private frameWindow(pid: number | undefined, window: SkyLightTargetWindow | undefined): void {
+		if (pid === undefined || window === undefined || (this.isBackground && !this.backgroundCues)) return;
+		this.overlay.frame?.(window.bounds, pid);
+	}
+
+	/**
+	 * Start the drawn cursor toward `position` now, like a hand that moves while the eyes still check: the target
+	 * read and the safety checks then run during the flight, and the click that follows waits only for what is left
+	 * of it. Nothing is sent to the app; only the drawn cursor moves.
+	 */
+	aimPointer(position: Point, pid: number): void {
+		if (!this.isBackground) return;
+		const current = this.aims.get(pid);
+		if (current !== undefined && Math.hypot(current.point.x - position.x, current.point.y - position.y) < 2) return;
+		this.aims.set(pid, { point: position, arrival: this.glidePointer(position, pid).catch(() => undefined) });
+	}
+
+	async glidePointer(position: Point, pid: number | undefined): Promise<void> {
+		const aim = pid === undefined ? undefined : this.aims.get(pid);
+		if (pid !== undefined && aim !== undefined) {
+			this.aims.delete(pid);
+			if (Math.hypot(aim.point.x - position.x, aim.point.y - position.y) < 2) {
+				await aim.arrival;
+				return;
+			}
+		}
+		const pointer = this.pointerFor(pid);
+		const from = pointer.position();
+		pointer.moveTo(position);
+		if (this.isBackground && !this.backgroundCues) return;
+		this.overlay.setMode("pointer", pid);
+		if (this.overlay.glide === undefined) {
+			this.overlay.set(position, pid);
+			return;
+		}
+		await this.overlay.glide(position, from, pid);
+	}
+
+	/** Put the drawn cursor on the text caret: glide there before typing, then keep up with it while typing. */
+	private async followCaret(keyboardPid: number | undefined, pid: number | undefined, wait: boolean): Promise<void> {
+		if (keyboardPid === undefined || (this.isBackground && !this.backgroundCues)) return;
+		const caret = caretFrameSource(keyboardPid);
+		if (caret === undefined) return;
+		const position = { x: caret.x, y: caret.y + caret.height / 2 };
+		if (wait) {
+			await this.glidePointer(position, pid);
+			return;
+		}
+		this.pointerFor(pid).moveTo(position);
+		this.overlay.set(position, pid);
 	}
 
 	showScrollPointer(position: Point, pid = this.currentTargetPid, direction?: ScrollDirection): void {
@@ -1138,6 +1293,19 @@ export class MacOSInputController {
 			this.assertDeliverable(call.pid);
 			// Every posted point, interpolated moves included, stays inside a confined worker's region.
 			assertPointInInputRegion(position, `pointer ${kind}`);
+			if (this.postsGlobally(call.pid)) {
+				// A plain HID event at screen coordinates: it moves the real pointer and reaches the window under it.
+				postMouseEvent({
+					kind,
+					position,
+					button,
+					clickState,
+					targetPid: undefined,
+					targetWindow: undefined,
+					flags,
+				});
+				return;
+			}
 			postMouseEvent({ kind, position, button, clickState, targetPid: call.pid, targetWindow, flags });
 		};
 	}
@@ -1190,7 +1358,9 @@ export class MacOSInputController {
 		action: "pointer" | "keyboard" | "scroll",
 		windows?: readonly MacOSWindowInfo[],
 	): Promise<SkyLightTargetWindow> {
-		const targetWindow = await this.windowByIdForPid(pid, windowId, windows, this.isBackground);
+		// An observed window on another Space stays the target in both modes: background input reaches it per process, and
+		// attended input raises it (bringForward) first. A minimized window, or one whose state is unknown, is still refused.
+		const targetWindow = await this.windowByIdForPid(pid, windowId, windows, true);
 		if (targetWindow === undefined) {
 			throw new Error(
 				`${action} input refused: the observed window ${windowId} is unavailable on this Space for this app, is minimized, or its minimized state is unknown; observe the app again`,
@@ -1231,7 +1401,7 @@ export class MacOSInputController {
 		const resolution = resolveTargetWindow(allSpaces, pid, onscreenIds, undefined, windowId, {
 			allowOffscreen: true,
 		});
-		if (resolution.kind !== "resolved" || windowMinimizedForPid(pid, windowId) !== false) {
+		if (resolution.kind !== "resolved" || windowMinimizedState(pid, windowId) !== false) {
 			return undefined;
 		}
 		return resolution.window;
@@ -1324,7 +1494,13 @@ export class MacOSInputController {
 			if (call.windowId !== undefined && focusedWindowIdForPid(pid) !== targetWindow.id) {
 				throw new Error("observed keyboard target is not the verified focused window; input refused");
 			}
+			// Web and WebView content drops keys unless its app believes it is active with this window key, so the app
+			// is told so (without a raise or a primer click) for as long as input keeps reaching it, as for clicks.
+			if (await this.activateBehind(pid, targetWindow, false)) {
+				this.scheduleActivationRelease(pid);
+			}
 		}
+		await this.bringForward(pid, targetWindow);
 		return targetWindow;
 	}
 }

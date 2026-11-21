@@ -30,7 +30,7 @@ describe("agent-facing errors and refs", () => {
 		expect(jsonPayload(result)).toMatchObject({ ok: false, code: "INVALID_ARGUMENT", retry: "never" });
 	});
 
-	it("#given a native failure #when observing #then delivery is not assumed safe", async () => {
+	it("#given a native failure #when observing #then the agent is told nothing was sent and may observe again", async () => {
 		const harness = await createHarness();
 		closeHarness = harness.close;
 		harness.computer.stateError = new Error("capture failed");
@@ -39,8 +39,17 @@ describe("agent-facing errors and refs", () => {
 			ok: false,
 			error: "capture failed",
 			code: "TOOL_ERROR",
-			retry: "unsafe",
+			retry: "safe",
 		});
+		// A mutation's unexplained failure still leaves delivery unknown.
+		const token = await observe(harness);
+		harness.computer.stateError = undefined;
+		harness.computer.inputError = new Error("post failed");
+		const click = await harness.client.callTool({
+			name: "click",
+			arguments: { app: "Finder", observation_token: token, x: 10, y: 10 },
+		});
+		expect(jsonPayload(click)).toMatchObject({ ok: false, retry: "unsafe" });
 	});
 
 	it("#given a human stop refusal #when dispatch is attempted #then automatic retry is forbidden", async () => {
@@ -81,7 +90,7 @@ describe("agent-facing errors and refs", () => {
 					value: "updated",
 				},
 			});
-			expect(state["element_refs"]).toMatchObject({ 20: `@${state["observation_token"]}:e20` });
+			expect(state["element_ref_format"]).toBe(`@${state["observation_token"]}:e{id}`);
 			expect(result.isError).not.toBe(true);
 			expect(harness.computer.effects).toContainEqual({ kind: "setValue", pid: 1234, id: 20, value: "updated" });
 		},
@@ -178,7 +187,7 @@ describe("agent-facing errors and refs", () => {
 				arguments: { app: "Finder", query: { label: "Open" } },
 			}),
 		);
-		expect(state["element_refs"]).toMatchObject({ 9: `@${state["observation_token"]}:e9` });
+		expect(state["element_ref_format"]).toBe(`@${state["observation_token"]}:e{id}`);
 	});
 });
 

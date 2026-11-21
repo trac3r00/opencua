@@ -54,6 +54,8 @@ export class HotFrameSource {
 	private readonly options: HotFrameSourceOptions;
 	private worker: HotFrameWorker | undefined;
 	private latest: HotFrame | undefined;
+	/** Whether the refresher delivered any frame for its current target; until then it is still starting up. */
+	private delivered = false;
 	private targetKey = "";
 	private idleTimer: ReturnType<typeof setTimeout> | undefined;
 	private disposed = false;
@@ -74,6 +76,7 @@ export class HotFrameSource {
 			if (key !== this.targetKey) {
 				this.targetKey = key;
 				this.latest = undefined;
+				this.delivered = false;
 				this.worker.postMessage({
 					type: "target",
 					windowId,
@@ -85,6 +88,7 @@ export class HotFrameSource {
 			return;
 		}
 		this.targetKey = key;
+		this.delivered = false;
 		this.spawnWorker(windowId, size);
 	}
 
@@ -109,6 +113,14 @@ export class HotFrameSource {
 	/** True while a refresher is live for this window, so callers prefer waiting over competing with it. */
 	engaged(pid: number, windowId: number): boolean {
 		return this.worker !== undefined && this.targetKey.startsWith(`${pid}:${windowId}:`);
+	}
+
+	/**
+	 * True while the refresher for this window has not delivered its first frame. Its first capture holds the window's
+	 * one native capture slot, so a live capture started now fails; waiting for that frame is the faster answer.
+	 */
+	warming(pid: number, windowId: number): boolean {
+		return this.engaged(pid, windowId) && !this.delivered;
 	}
 
 	/** Bounded wait for the refresher's next frame; undefined when none lands inside the budget. */
@@ -194,6 +206,7 @@ export class HotFrameSource {
 			if (frame.type !== "frame" || !(frame.bytes instanceof Uint8Array) || typeof frame.hash !== "string") {
 				return;
 			}
+			this.delivered = true;
 			this.latest = {
 				data: Buffer.from(frame.bytes),
 				mimeType: "image/jpeg",

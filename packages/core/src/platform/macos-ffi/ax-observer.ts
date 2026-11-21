@@ -41,7 +41,10 @@ const SETTLE_NOTIFICATIONS = [
 ] as const;
 
 export interface AxEventWaiter {
-	/** Drives the run loop for at most `milliseconds`, returning the AX events that arrived. */
+	/**
+	 * Drives the run loop for at most `milliseconds` (zero only delivers what is already pending), returning the AX
+	 * events that arrived since the previous drain, including any that another run-loop turn delivered in between.
+	 */
 	drain(milliseconds: number): number;
 	release(): void;
 }
@@ -234,14 +237,16 @@ export function createAxEventWaiter(pid: number): AxEventWaiter | null {
 	bindings.addSource(runLoop, source, mode);
 
 	let released = false;
+	let reported = 0;
 	return {
 		drain(milliseconds: number): number {
-			if (released || milliseconds <= 0) {
+			if (released || milliseconds < 0) {
 				return 0;
 			}
-			const before = events;
 			bindings.runLoopInMode(mode, milliseconds / 1000, false);
-			return events - before;
+			const seen = events - reported;
+			reported = events;
+			return seen;
 		},
 		release(): void {
 			if (released) {

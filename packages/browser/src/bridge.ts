@@ -3,10 +3,14 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
 import type { StopStatusSource } from "@opencua/core";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { type BrowserCommand, BrowserError, type HandoffRequest, replySchema } from "./protocol.js";
+
+export const extensionDirectory = fileURLToPath(new URL("../extension", import.meta.url));
+export const NOT_CONNECTED = `The opencua browser extension is not connected. Ask the user to run \`opencua browser setup\` and load the unpacked extension from ${extensionDirectory} in Brave (chrome://extensions, Developer mode, Load unpacked), then call browser_status.`;
 
 const helloSchema = z.object({ token: z.string().max(128) });
 const eventSchema = z.discriminatedUnion("event", [
@@ -40,6 +44,8 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 	private reason: "taken_over" | "window_revealed" | "stopped" | undefined;
 	private handoff: HandoffRequest | undefined;
 	private epoch = 0;
+	private inFlight = 0;
+	private draining = false;
 	private readonly pending = new Map<
 		string,
 		{
@@ -126,6 +132,26 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 			);
 			return;
 		}
+		if (this.draining) {
+			response.writeHead(503, { "content-type": "application/json" }).end(
+				JSON.stringify({
+					error: "disconnected",
+					message: "The browser daemon is restarting to load an update. Retry in a few seconds.",
+				}),
+			);
+			return;
+		}
+		this.inFlight++;
+		try {
+			await this.answerRpc(request, response);
+		} finally {
+			this.inFlight--;
+			if (this.inFlight === 0) this.emit("idle");
+		}
+	}
+
+	private async answerRpc(request: IncomingMessage, response: ServerResponse): Promise<void> {
+		if (this.rpcHandler === undefined) return;
 		try {
 			const cancellation = new AbortController();
 			response.once("close", () => {
@@ -266,7 +292,7 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 			return Promise.reject(new BrowserError("stopped", "Browser request was cancelled. Do not replay input."));
 		const socket = this.socket;
 		if (socket === undefined || socket.readyState !== WebSocket.OPEN) {
-			return Promise.reject(new BrowserError("disconnected", "Pair the opencua browser extension first."));
+			return Promise.reject(new BrowserError("disconnected", NOT_CONNECTED));
 		}
 		if ((command.method === "open" || command.method === "run") && this.controlOwner === "human") {
 			return Promise.reject(this.humanControlError());
@@ -381,9 +407,27 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 		this.pending.clear();
 	}
 
+	/** Refuses new RPCs, lets in-flight ones finish for up to `timeoutMs`, then closes. */
+	async drain(timeoutMs: number): Promise<void> {
+		this.draining = true;
+		if (this.inFlight > 0) {
+			await new Promise<void>((resolve) => {
+				const finish = () => {
+					clearTimeout(timer);
+					this.removeListener("idle", finish);
+					resolve();
+				};
+				const timer = setTimeout(finish, timeoutMs);
+				this.once("idle", finish);
+			});
+		}
+		await this.close();
+	}
+
 	async close(): Promise<void> {
 		this.failPending(new BrowserError("disconnected", "Browser bridge closed"));
 		for (const client of this.wss.clients) client.terminate();
+		this.http.closeAllConnections();
 		await new Promise<void>((resolve) => this.wss.close(() => resolve()));
 		await new Promise<void>((resolve, reject) => this.http.close((error) => (error ? reject(error) : resolve())));
 	}

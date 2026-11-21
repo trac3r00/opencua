@@ -1,7 +1,6 @@
 import { statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { KoffiFunc } from "koffi";
-import { denyHostInteraction } from "../../computer/host-interaction-policy.js";
 import { cfRelease, toCFString } from "./corefoundation.js";
 import { koffi } from "./koffi.js";
 
@@ -73,7 +72,6 @@ export interface PasteboardAccess {
 }
 
 export function readClipboard(access: PasteboardAccess = nativePasteboard): ClipboardReadResult {
-	if (access === nativePasteboard) denyHostInteraction("host-clipboard");
 	const types = access.types();
 	const textType = types.includes(TEXT_TYPE)
 		? TEXT_TYPE
@@ -104,7 +102,6 @@ export function writeClipboard(
 	input: ClipboardWriteInput,
 	access: PasteboardAccess = nativePasteboard,
 ): ClipboardWriteResult {
-	if (access === nativePasteboard) denyHostInteraction("host-clipboard");
 	const prepared = prepareClipboardInput(input);
 	access.clear();
 	let succeeded: boolean;

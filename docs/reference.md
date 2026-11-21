@@ -103,6 +103,7 @@ From then on one command covers the whole lifecycle:
 | `opencua permissions grant` | Walk through Accessibility, Screen Recording and Automation for **opencua-mcp**: shows macOS's dialog, opens System Settings with a panel attached to drag **opencua-mcp** into the list when it is missing there, and waits until each switch is on |
 | `opencua doctor [--fix]` | Check everything without raising a permission prompt; `--fix` repairs what is safe and asks before the rest |
 | `opencua update` | Fast-forward the checkout, rerun setup, re-apply the registrations, run the doctor |
+| `opencua daemon start\|run\|stop\|status` | A warm read-only daemon on a same-user Unix socket (`~/.opencua/cli-daemon.sock`, 0600, per-start token). `screenshot`, `cursor`, `screen`, `windows list`, `apps list` and `apps state` go through it when it answers and run in-process otherwise; input commands never do. `OPENCUA_CLI_DAEMON=off` bypasses it |
 | `opencua uninstall` | Remove the registrations (backed up), the helper and its permissions, the command and its PATH line, `~/.opencua`, and the checkout the installer made |
 
 ### Configure
@@ -630,8 +631,11 @@ floating overlay that glides to every action — pointer clicks, accessibility p
 writes, text selection, typing and scrolls — ripples on each press, and pulses while the agent
 reads an observation. Keyboard input shows a keyboard glyph beside the pointer, including
 keyboard-only actions; the menu bar indicator also names the keyboard mode.
-It is drawn, not your real cursor. Background delivery stays visually silent,
-without cursor artwork or highlights. Set `OPENCUA_CURSOR=off` to hide the attended cursor. Verified on a live session against Cua Driver 0.28.2: a background
+It is drawn, not your real cursor. Background delivery draws it too, on its own layer: it glides to a
+target and arrives before the press, sits on the text caret while it types (one key at a time at a
+typist's pace, faster for long text; `OPENCUA_TYPE_RHYTHM=constant` types back to back), and the window
+being driven keeps a blue frame with an OpenCUA badge until the agent's cursor goes away.
+`OPENCUA_CURSOR_BACKGROUND_CUES=off` keeps background work undrawn; `OPENCUA_CURSOR=off` hides the cursor everywhere. Verified on a live session against Cua Driver 0.28.2: a background
 click landed with the frontmost app and the real cursor untouched, and the action answer cost
 1.4 KB instead of 121 KB because the post-action image is now opt-in (`include_screenshot: true`).
 
@@ -650,7 +654,8 @@ export OPENCUA_CURSOR_MOTION=comet_swoop              # override for subsequentl
 ```
 
 - **Styles:** `signature_arc`, `spring_settle`, `magnetic`, `comet_swoop`, `adaptive`, `classic`.
-- **Timing:** `native` (the chosen Cua style's timing), `fitts` or `fixed`.
+- **Timing:** `native` (the chosen Cua style's timing), `fitts` or `fixed`. A motion that names no `glideDurationMs`
+  and no `fixed` timing glides at agent pace (160 ms), since every click waits for the cursor to arrive.
 - **Fields** (JSON object; only `style` is required, unknown fields and non-finite numbers are rejected): `glideDurationMs`
   0 to 5000, `startHandle` and `endHandle` 0 to 1, `arcSize` 0 to 1, `arcFlow` -1 to 1, `spring` 0.3 to 1,
   `turnRadius` 1 to 1000.
@@ -663,6 +668,28 @@ export OPENCUA_CURSOR_MOTION=comet_swoop              # override for subsequentl
 The upstream planner (MIT, version 0.1.0, pinned to commit `a7524cf`) is vendored in `packages/core/vendor`. OpenCUA
 uses it for paths and timing only: it keeps its own native pointer artwork and click, scroll and thinking cues
 and does not import the upstream canvas themes or effect rendering.
+
+#### Rules profile
+
+Per-app rules for speed and verification live in `~/.opencua/rules.json` (or the file `OPENCUA_RULES` names). The MCP
+server re-reads the file when it changes, so an edit applies to the next call.
+
+```json
+{
+  "default": { "pace": "verified" },
+  "apps": {
+    "Google Chrome": { "pace": "fast" },
+    "com.apple.MobileSMS": { "pace": "fast" }
+  }
+}
+```
+
+- **`pace`** (`verified` or `fast`): the default pace of a `run_steps` batch (and `app.batch` in `run_script`) on the
+  app. A pace named in the call wins; `app.chain` is always fast.
+- **Matching:** app keys are app names or bundle ids, compared without case; an app's entry overrides `default`.
+- **Locked rules:** rules that protect the person (background delivery, the foreground, the real cursor, approvals, the
+  allowed apps) cannot be set here. A file that names one, or any unknown rule, is ignored as a whole and the reason
+  is written to the server's stderr.
 
 #### Menu bar indicator
 
@@ -694,8 +721,9 @@ When a tree is capped the answer says so in `elementsTruncated`, and a walk at a
 is treated as a fresh baseline rather than diffed against a differently truncated one, so a diff
 never reports elements that were merely outside the budget as removed. `list_windows` names
 targetable top-level windows (including other Spaces in background delivery) with their id, pid,
-app, title and bounds so an agent can pick its target
-before observing instead of guessing. Drilling in with `subtree_of` costs what the branch costs:
+app, title and bounds, plus `space` (`current` or `other`), `space_ids` and `display` when the WindowServer
+places the window on a Space, so an agent can pick its target and its route before observing instead of guessing.
+When any window is on another Space the answer adds `space_note`, which says what reaches such a window. Drilling in with `subtree_of` costs what the branch costs:
 on a Finder window whose full tree is 718 elements, re-observing a row returned 10 elements in
 165 ms instead of roughly 810 ms for the window.
 
@@ -703,8 +731,13 @@ on a Finder window whose full tree is 718 elements, re-observing a row returned 
 
 In background delivery, `list_windows` can enumerate windows outside the current Mission Control
 Space. Observe the intended `window_id` explicitly; observations and subsequent input stay bound
-to that window rather than selecting another document at the same screen position. Capture uses
-the window's own pixels, so another Space does not need to become visible.
+to that window rather than selecting another document at the same screen position.
+
+An inactive app whose window sits on a Space no display shows is observed where it is: macOS hides
+that window from accessibility, so `get_app_state` answers with `windowSpace: "other"` and a note
+instead of waiting for a window to appear, and nothing switches the person's Space. Its pixels may be
+refused too: on macOS 26 ScreenCaptureKit does not offer such a window to OpenCUA's helper, so the
+answer then carries no image and no `ocrText`.
 
 Off-Space input uses direct process/window routes. It does not raise a window or select a Window
 menu entry to make it key. Keyboard input requires the observed window to already be the app's
@@ -769,6 +802,10 @@ macOS keys screen capture and input synthesis to the identity of the process tha
 Restart the client or terminal after a grant (some apps cache the permission state at launch).
 `opencua doctor` reports what is missing without raising a prompt, and `opencua permissions grant` walks through
 granting it.
+
+An observation taken without Accessibility carries `axUnavailable: "accessibility-permission"` and an `axNote` naming
+the process to grant, so its empty `elements` never reads as an app without UI; an app that answers with no tree says
+`"app-not-accessible"` instead. `opencua apps state` then also prints the note on stderr and exits 3.
 
 Full walkthrough: [`skills/opencua/references/installation.md`](../skills/opencua/references/installation.md).
 
@@ -904,7 +941,7 @@ the helper is built for the runner's CPU, and that the doctor passes everything 
 | Sandbox | Cua Driver on the host with `standard`, `bounded` or `unrestricted` permission modes [2]; Lume VMs and Spaces optional [1] | Host, Screen Recording + Accessibility grants, per-app approval [6] | Host macOS; background tools need a fresh exact snapshot, `capture_focus` background by default [5] | Host macOS (permission-scoped) |
 | Screenshot latency | Measured 2026-09-17, superseded by the latency-shapes table: host-native Cua Driver 0.28.2 494-499 ms p50 full window observation, 174-185 ms capture-only [8] | Not measured by this project as of 2026-10-28 [9] | Not measured by this project as of 2026-10-28 [9] | Measured 2026-09-17, superseded by the latency-shapes table: 417 ms p50 full Finder observation over MCP (413 ms TextEdit), 386 ms AX-only, 297 ms capture-only (n=15, measured 2026-09-17) |
 | Input latency | Measured 2026-09-17, superseded by the latency-shapes table: host-native Cua Driver 1.4 s p50 per MCP action [8] | Not measured by this project as of 2026-10-28 [9] | Not measured by this project as of 2026-10-28 [9] | Measured 2026-09-17, superseded by the latency-shapes table: event posting stays native CoreGraphics via koffi; the full MCP action measures 1.8 s p50 for a click, 1.5 s to type 45 characters and 1.5 s for one key press, including preflight, delivery and the fresh observation it returns (n=10, measured 2026-09-17), and a verified step answers in 1.4 KB instead of 121 KB. A described-element `click_target` answers in 283 ms and 1.8 KB end to end. |
-| Portability | macOS, Windows, Linux (X11, Wayland with compositor limits) [3] | macOS and Windows [6] | macOS 15 or later [4] | macOS, Windows and Linux backends; on macOS only agent-owned surfaces and isolated guests, never host apps |
+| Portability | macOS, Windows, Linux (X11, Wayland with compositor limits) [3] | macOS and Windows [6] | macOS 15 or later [4] | macOS, Windows and Linux backends; on macOS, the person's own apps in the background (per-PID, no focus steal), agent-owned surfaces and isolated guests |
 | Open source | Cua Driver MIT; Spaces and Driver Bench FSL-1.1-MIT [1] | Codex CLI Apache-2.0 [7]; plugin source not published there [6][7] | MIT [4] | Fully open source (MIT) |
 | Agent integration | MCP over stdio, CLI `cua-driver call`, Python/TypeScript/Rust SDKs via UniFFI over a C ABI [2] | ChatGPT Work and Codex desktop [6] | Swift CLI, MCP over stdio; install via brew, npx or DMG [4][5] | CLI, MCP, pi-extension, or any TS agent |
 

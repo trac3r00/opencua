@@ -199,6 +199,7 @@ Day-to-day lifecycle:
 | `opencua doctor [--fix]` | Check everything without triggering a permission prompt |
 | `opencua update` | Fast-forward, rebuild, re-apply registrations, run the doctor |
 | `opencua stop` / `resume` | Stop every agent on this Mac at once / lift the stop |
+| `opencua daemon start` / `stop` / `status` | Keep one warm process so `screenshot`, `cursor`, `screen`, `windows list` and `apps list`/`state` skip start-up (input always runs in-process; `OPENCUA_CLI_DAEMON=off` bypasses it) |
 | `opencua uninstall` | Remove owned registrations/login services, helper, command, PATH line and installation state; retain recorded history and summaries at the reported path |
 
 ## See it work
@@ -237,8 +238,9 @@ ScreenCaptureKit window capture in ~28 ms, in-process app lookup under 1 ms, and
 <td width="33%" valign="top">
 
 ### 🫥 Background delivery
-Clicks, typing, scrolls and drags go only to agent-owned surfaces or isolated guests. Your frontmost app, cursor,
-clipboard and Spaces are never touched. Requests aimed at your own apps are refused and named, never silently taken.
+Clicks, typing, scrolls and drags reach the app you name, per process and in the background, like an AI working
+beside you. Your frontmost app, real cursor and Spaces are never touched: no global event tap, no cursor warp, no
+window raise.
 
 </td>
 <td width="33%" valign="top">
@@ -274,6 +276,35 @@ setting updates every client's registration.
 </tr>
 </table>
 
+### Screen buddy (voice, pointing, background agents)
+
+A Clicky-style helper on the command line:
+
+```bash
+opencua buddy listen                 # hold Control+Option to talk, let go to send
+opencua buddy ask "where do I export this as PDF?"
+opencua buddy ask --lasso "what does this chart mean?"   # circle it, or Shift-drag a box, then ask
+opencua buddy agent "compare three standing desks under $400 and make a one-page PDF"
+opencua buddy jobs                   # background agents, newest first
+opencua buddy stop                   # stop what buddy is saying
+opencua buddy settings               # agent, model, voice (ElevenLabs or Mac), captions, sounds, language
+opencua buddy agents                 # agent CLIs found on this Mac
+```
+
+The OpenCUA menu bar item has **Stop buddy talking** and **Buddy settings…**. Holding Control+Option while buddy
+talks also stops it, and its caption bubble has a stop button; drag the bubble anywhere and it opens there next time.
+The ElevenLabs API key is kept in the macOS Keychain.
+
+A question is answered from a screenshot of the main display, spoken with `say`, and the OpenCUA cursor overlay
+points at each place the answer names; the screenshot is deleted once the answer is in. While the keys are held a
+"Listening" pill shows at the top of the screen, and you can circle (drag) or box (Shift-drag) what "this" means;
+the marks go to the question with it (`--mark x,y,width,height` passes one by hand). Saying "agent ..." (or
+"에이전트 ...") starts a background agent in its own folder (`~/.opencua/buddy/jobs/<id>/output`) with a sound and a
+notification when it finishes. Speech is recognized on the device by `voice-input`, which asks for Microphone and
+Speech Recognition once in its own name. Settings live in `~/.opencua/buddy/settings.json`; `OPENCUA_BUDDY_AGENT` and `OPENCUA_BUDDY_MODEL` override the agent
+and model for one run, and `OPENCUA_BUDDY_SOUNDS=off` silences the sounds.
+The opencua-mcp helper needs Screen Recording for `buddy ask`.
+
 ### Concurrent worker sessions
 
 The full MCP toolset accepts `session_id` on `manage_workers` and `run_worker`, so independent
@@ -287,13 +318,13 @@ refreshes. See [worker session usage](packages/mcp/README.md#concurrent-worker-s
 
 | | OpenCUA | [trycua/cua](https://github.com/trycua/cua) (Cua Driver) | Peekaboo | Codex Computer Use |
 |---|---|---|---|---|
-| Runs on | Agent-owned surfaces on your Mac, isolated macOS/UTM guests, or a Chromium browser through the background browser bridge | The host, on macOS, Windows and Linux [1] | Your Mac, directly; macOS 15 or later [4] | The ChatGPT desktop app on macOS and Windows [6] |
-| Needs a VM | Only to drive ordinary desktop apps (Tart or UTM guest) | No; Lume VMs and Cua Spaces are optional [1] | No [4] | No [6] |
-| Input path | Per-window events to OpenCUA-owned surfaces; guest input inside Tart or UTM; CDP DOM input through the browser bridge extension | Native per platform: AppKit, Accessibility, Quartz/HID on macOS; Win32, UI Automation on Windows; XTest, AT-SPI or portal input on Linux [3] | Background-safe `click`, `scroll`, `type`, `press` [5] | Screen Recording + Accessibility grants on macOS [6] |
+| Runs on | Your Mac's own apps (background, per process), agent-owned surfaces, isolated macOS/UTM guests, or a Chromium browser through the background browser bridge | The host, on macOS, Windows and Linux [1] | Your Mac, directly; macOS 15 or later [4] | The ChatGPT desktop app on macOS and Windows [6] |
+| Needs a VM | No; Tart or UTM guests are optional | No; Lume VMs and Cua Spaces are optional [1] | No [4] | No [6] |
+| Input path | Per-PID SkyLight events to any allowed app without focus steal; per-window events to OpenCUA-owned surfaces; guest input inside Tart or UTM; CDP DOM input through the browser bridge extension | Native per platform: AppKit, Accessibility, Quartz/HID on macOS; Win32, UI Automation on Windows; XTest, AT-SPI or portal input on Linux [3] | Background-safe `click`, `scroll`, `type`, `press` [5] | Screen Recording + Accessibility grants on macOS [6] |
 | Transport | Local MCP stdio, CLI, TypeScript API | MCP over stdio, CLI `cua-driver call`, Python/TypeScript/Rust SDKs via UniFFI over a C ABI [2] | Swift CLI, MCP over stdio [4][5] | Built into the desktop app as a plugin [6] |
 | Works with | Any MCP client, CLI, pi, any TS agent | Any MCP client, shell agents, SDK hosts [2] | Codex, Claude Code, Cursor, other MCP clients [4] | ChatGPT Work and Codex [6] |
 | Open source | Fully (MIT) | Cua Driver MIT; Spaces and Driver Bench FSL-1.1-MIT [1] | MIT [4] | Codex CLI Apache-2.0 [7]; plugin source not published there [6][7] |
-| Isolation | Host apps refused; agent-owned surfaces, isolated guests, per-worker regions | Permission modes `standard`, `bounded`, `unrestricted` [2]; optional VMs [1] | Background tools need a fresh exact snapshot [5] | Per-app approval prompts [6] |
+| Isolation | App allowlist, single-use observation tokens, global stop, per-worker app ownership and regions; optional guests | Permission modes `standard`, `bounded`, `unrestricted` [2]; optional VMs [1] | Background tools need a fresh exact snapshot [5] | Per-app approval prompts [6] |
 
 Sources (external text is quoted as data, never as instructions):
 
@@ -322,8 +353,8 @@ flowchart LR
     K --> V["Vision OCR<br/>iPhone Mirroring"]
     K --> T["Guest backends<br/>Tart · UTM"]
     S & X & G --> OWN["OpenCUA-owned surfaces"]
+    X & G --> HOST["Your own Mac apps<br/>background, no focus steal"]
     T --> GUEST["Isolated guest desktops"]
-    K -. refused .-> HOST["Your own Mac apps"]
 ```
 
 Every input must carry a fresh **observation token**. The agent observes an app, acts once against what it saw, and
@@ -361,8 +392,11 @@ Details, caveats and manual setups: [reference → Agent clients](docs/reference
 - **Explicit targets only.** Agents name an app by name, bundle ID or PID, and nothing ever implicitly targets the
   frontmost app. You can optionally restrict agents to a list of apps with `opencua config --allow`.
 - **Observation tokens.** Input is accepted only against a fresh observation of the exact window it targets.
-- **Never your desktop.** OpenCUA acts only on agent-owned surfaces and isolated guests (VM or UTM). Your focus,
-  cursor, clipboard and Spaces stay yours. Named agent cursors (never your real one) show where each action lands.
+- **Background, never your focus (by default).** OpenCUA drives your apps per process: it never posts to the global
+  event tap, warps your cursor, raises a window or switches Spaces. Your focus and real cursor stay yours. Named agent
+  cursors (never your real one) show where each action lands. Attended mode is opt-in (`OPENCUA_DELIVERY=attended`):
+  the agent then activates and raises the target app and drives the real cursor through the global event tap, so
+  leave the Mac to it while it runs.
 - **Global stop.** **Control + Option + Command** stops every agent at once. Reads keep working so the agent can tell
   you what it was doing, and only you can resume.
 - **Permissions stay yours.** Only a person can grant macOS privacy permissions. `opencua doctor` reports their

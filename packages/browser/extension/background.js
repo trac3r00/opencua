@@ -58,6 +58,17 @@ async function localConnection() {
 	return { port: connection.port, token: connection.token };
 }
 
+// The daemon refused the stored token (its connection file was reset). Store the native host's current token once;
+// the storage change reconnects. An unchanged token is left for the next alarm, so a refusal never loops.
+async function refreshPairing(rejectedToken) {
+	try {
+		const connection = await localConnection();
+		if (connection.token !== rejectedToken) await chrome.storage.local.set(connection);
+	} catch {
+		// Without a native host, manual pairing from the options page stays the way to recover.
+	}
+}
+
 async function connect() {
 	if (connecting || (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)))
 		return;
@@ -130,14 +141,16 @@ async function connect() {
 			else send({ id: message.id, ok: false, error: "Invalid command" });
 		}
 	});
-	ws.addEventListener("close", () => {
+	ws.addEventListener("close", (event) => {
 		if (socket === ws) {
 			socket = undefined;
 			ready = false;
 			clearInterval(heartbeat);
 			stopLocally();
 			void chrome.storage.session.set({ bridgeConnected: false });
-			if (reconnectRequested) {
+			if (event.code === 1008 && event.reason === "Invalid pairing") {
+				void refreshPairing(token);
+			} else if (reconnectRequested) {
 				reconnectRequested = false;
 				void connect();
 			}

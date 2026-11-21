@@ -144,7 +144,7 @@ Canvas text editing is app-specific. Entering a Keynote placeholder clears its
 placeholder text; an extra Select All can be both unnecessary and refused in the
 background. Text insertion can also trigger native smart punctuation or lists.
 Read the rendered text rather than assuming the submitted string is unchanged.
-For a chord, use one key string, such as `keys: ["command+shift+g"]` or
+For a chord, use one key string, such as `keys: "command+shift+g"` (or `["command+shift+g"]`) or
 `app.press("command+shift+g")`; separate array entries are separate presses.
 
 An empty AX diff cannot prove that a native canvas object was unchanged. Inspect

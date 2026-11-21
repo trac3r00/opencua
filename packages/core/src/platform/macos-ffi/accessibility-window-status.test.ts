@@ -61,7 +61,8 @@ const koffiMock = vi.hoisted(() => {
 		AXUIElementCopyElementAtPosition: vi.fn(),
 		AXUIElementGetPid: vi.fn(),
 		AXUIElementPerformAction: vi.fn(),
-		AXUIElementSetAttributeValue: vi.fn(),
+		AXUIElementSetAttributeValue: vi.fn(() => 0),
+		AXValueCreate: vi.fn(() => ({ type: "axvalue" })),
 		AXUIElementCopyActionNames: vi.fn(),
 		AXUIElementCopyMultipleAttributeValues: vi.fn(),
 		AXUIElementCopyAttributeValue: vi.fn(copyAttributeValue),
@@ -99,6 +100,8 @@ const koffiMock = vi.hoisted(() => {
 });
 
 vi.mock("koffi", () => koffiMock.module);
+const openWindows = vi.hoisted(() => ({ listing: [] as readonly unknown[] }));
+vi.mock("../macos-open-windows.js", () => ({ openWindowsForTargeting: async () => openWindows.listing }));
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -128,6 +131,34 @@ describe("#given mocked accessibility windows", () => {
 		expect(windowMinimizedForPid(process.pid, 99)).toBeUndefined();
 		expect(koffiMock.coreFoundationFunctions.CFRelease).toHaveBeenCalledWith(koffiMock.windowElement);
 	});
+	it("#when an inactive app's off-Space window is exposed only as AXFocusedWindow #then set_window_frame resizes it", async () => {
+		const { setWindowFrame } = await import("../macos-window-frame.js");
+		const requested = { x: 10, y: 20, width: 800, height: 600 };
+		openWindows.listing = [{ id: 42, owner: { processId: process.pid }, bounds: requested }];
+		koffiMock.accessibilityFunctions.AXUIElementCopyAttributeValue.mockImplementation(
+			(element, attribute, outValue) => {
+				if (attribute.value === "AXWindows") {
+					outValue[0] = { type: "array", children: [] };
+					return 0;
+				}
+				if (element === koffiMock.applicationElement && attribute.value === "AXFocusedWindow") {
+					outValue[0] = koffiMock.windowElement;
+					return 0;
+				}
+				return koffiMock.copyAttributeValue(element, attribute, outValue);
+			},
+		);
+
+		const result = await setWindowFrame(process.pid, 42, requested);
+
+		expect(result.verified).toBe(true);
+		expect(koffiMock.accessibilityFunctions.AXUIElementSetAttributeValue).toHaveBeenCalledWith(
+			koffiMock.windowElement,
+			expect.anything(),
+			expect.anything(),
+		);
+	});
+
 	it("#when the window is minimized #then returns true and releases copied references", async () => {
 		const { windowMinimizedForPid } = await import("./accessibility.js");
 		koffiMock.coreFoundationFunctions.CFRelease.mockClear();

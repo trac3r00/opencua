@@ -127,7 +127,7 @@ export function registerPowerTools(
 		"set_window_frame",
 		{
 			description:
-				"Set an observed top-level window's desktop geometry and verify through WindowServer within 2 points. Requires a one-use observation_token. On the shared host this is refused (isolated-session-required), because moving a window acts on the human desktop.",
+				"Set an observed top-level window's desktop geometry and verify through WindowServer within 2 points. Requires a one-use observation_token. The window moves without being raised or activated.",
 			inputSchema: setWindowFrameSchema,
 			annotations: MUTATION_ANNOTATIONS,
 		},

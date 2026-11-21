@@ -11,6 +11,7 @@ const koffiMock = vi.hoisted(() => {
 	};
 	const skyLightFunctions = {
 		SLEventSetAuthenticationMessage: vi.fn(),
+		SLEventPostToPid: vi.fn(),
 		SLSGetWindowOwner: vi.fn(() => 0),
 		SLSGetConnectionPSN: vi.fn(() => 0),
 		SLPSPostEventRecordTo: vi.fn(() => 0),
@@ -60,13 +61,74 @@ beforeEach(() => {
 	vi.clearAllMocks();
 });
 
-describe("#given SkyLight's authentication message class #when an authenticated event is posted #then delivery to the human desktop is refused", () => {
-	it("never reaches the native per-pid post", async () => {
+describe("#given SkyLight's authentication message class #when an authenticated event is posted #then it reaches only the target pid", () => {
+	it("attaches the message and posts once per process, without activation", async () => {
 		const skyLight = await loadSkyLight(true);
 
-		expect(() => skyLight.postAuthenticatedSkyLightEventToPid(321, keyEvent)).toThrow(
-			/host-window cannot operate on the human desktop/,
+		expect(skyLight.postAuthenticatedSkyLightEventToPid(321, keyEvent)).toBe(true);
+
+		expect(koffiMock.skyLightFunctions.SLEventSetAuthenticationMessage).toHaveBeenCalledWith(keyEvent, {
+			type: "authentication-message",
+		});
+		expect(koffiMock.skyLightFunctions.SLEventPostToPid).toHaveBeenCalledTimes(1);
+		expect(koffiMock.skyLightFunctions.SLEventPostToPid).toHaveBeenCalledWith(321, keyEvent);
+		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
+	});
+});
+
+describe("#given SkyLight focus primitives #when a host window is targeted #then they stay refused", () => {
+	const window = { id: 11, bounds: { x: 0, y: 0, width: 800, height: 600 } };
+
+	it.each([
+		[
+			"postMouseEventRecordToWindow",
+			(skyLight: typeof import("./skylight.js")) => skyLight.postMouseEventRecordToWindow(window, 1, { x: 1, y: 1 }),
+		],
+		[
+			"activateWindowWithoutRaise",
+			(skyLight: typeof import("./skylight.js")) => skyLight.activateWindowWithoutRaise(window),
+		],
+		["beginFocusWithoutRaise", (skyLight: typeof import("./skylight.js")) => skyLight.beginFocusWithoutRaise(window)],
+	])("refuses %s before any record is posted", async (_name, dispatch) => {
+		const skyLight = await loadSkyLight(true);
+		expect(() => dispatch(skyLight)).toThrow(/host-focus cannot operate on the human desktop/);
+		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).not.toHaveBeenCalled();
+		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
+	});
+});
+
+describe("#given background activation #when an app is told it is active #then only that process gets one record and the front app is not changed", () => {
+	it("posts one activation record naming the window to the target psn, and never sets the front process", async () => {
+		const skyLight = await loadSkyLight(true);
+		const targetPsn = Buffer.from([1, 0, 0, 0, 2, 0, 0, 0]);
+
+		expect(skyLight.setProcessAppActive(targetPsn, 11, true)).toBe(true);
+
+		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).toHaveBeenCalledTimes(1);
+		const [psn, record] = koffiMock.skyLightFunctions.SLPSPostEventRecordTo.mock.calls[0] as unknown as [
+			Buffer,
+			Buffer,
+		];
+		expect(psn).toBe(targetPsn);
+		expect(record.readUInt32LE(0x3c)).toBe(11);
+		expect(record[0x8a]).toBe(0x01);
+		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
+	});
+});
+
+describe("#given a focus steal #when the front is restored #then the person's app comes back without raising windows", () => {
+	it("sets the previous front process with kCPSNoWindows and no window", async () => {
+		const skyLight = await loadSkyLight(true);
+		const token = { previousPsn: Buffer.from([7, 0, 0, 0, 0, 0, 0, 0]), targetPsn: Buffer.alloc(8) };
+
+		skyLight.restoreFrontProcessNoWindows(token);
+
+		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).toHaveBeenCalledWith(
+			token.previousPsn,
+			0,
+			0x400,
 		);
+		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).not.toHaveBeenCalled();
 	});
 });
 
@@ -84,12 +146,13 @@ describe("#given a SkyLight without the authentication message class #when an au
 describe("#given a window-stamped event #when its record is posted in background #then no foreground activation occurs", () => {
 	const window = { id: 11, bounds: { x: 0, y: 0, width: 1920, height: 1080 }, layer: 21 };
 
-	it("refuses to queue a valid record to the window owner", async () => {
+	it("queues a valid record to the window owner", async () => {
 		const skyLight = await loadSkyLight(true);
-		expect(() => skyLight.postBackgroundEventRecordToWindowOwner(window, keyEvent)).toThrow(
-			/host-window cannot operate on the human desktop/,
-		);
-		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).not.toHaveBeenCalled();
+		expect(skyLight.postBackgroundEventRecordToWindowOwner(window, keyEvent)).toBe(true);
+		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).toHaveBeenCalledTimes(1);
+		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).toHaveBeenCalledWith(expect.any(Buffer), {
+			type: "event-record",
+		});
 		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
 	});
 
@@ -127,9 +190,8 @@ describe("#given a window-stamped event #when its record is posted in background
 
 	it("falls back to no other transport when the record post is refused", async () => {
 		const skyLight = await loadSkyLight(true);
-		expect(() => skyLight.postBackgroundEventRecordToWindowOwner(window, keyEvent)).toThrow(
-			/host-window cannot operate on the human desktop/,
-		);
+		koffiMock.skyLightFunctions.SLPSPostEventRecordTo.mockReturnValueOnce(-1);
+		expect(skyLight.postBackgroundEventRecordToWindowOwner(window, keyEvent)).toBe(false);
 		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
 		expect(koffiMock.objcFunctions.objc_msgSend).not.toHaveBeenCalled();
 	});

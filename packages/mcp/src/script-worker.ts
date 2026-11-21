@@ -337,6 +337,7 @@ function makeAppHandle(target: WorkerTarget): Readonly<Record<string, unknown>> 
 		},
 		batch: (raws: unknown, options?: unknown) => call("batch", target, [raws, options]),
 		chain: (raws: unknown, options?: unknown) => call("chain", target, [raws, options]),
+		hands: (spec: unknown, options?: unknown) => call("hands", target, [spec, options]),
 		verify: (checks?: unknown, options?: unknown) => call("verify", target, [checks, options]),
 	});
 }
@@ -369,6 +370,7 @@ const apple = Object.freeze({
 			run: (command: unknown) => call("terminalRun", undefined, [command]),
 			read: (windowId?: unknown) => call("terminalRead", undefined, [windowId]),
 		}),
+	osascript: (source: unknown, options?: unknown) => call("osascript", undefined, [source, options]),
 	spaces: () =>
 		Object.freeze({
 			active: () => call("spacesActive", undefined, []),

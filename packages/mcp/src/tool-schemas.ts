@@ -21,6 +21,16 @@ const MAX_FIND_RESULTS = 25;
 
 export const emptySchema = z.object({});
 
+export const runAppleScriptSchema = z.object({
+	source: z.string().min(1),
+	language: z.enum(["applescript", "javascript"]).optional(),
+	timeout_ms: z.number().int().min(1).max(120_000).optional(),
+});
+
+export const listWindowsSchema = z.object({
+	app: appSchema.optional().describe("Only this app's windows: name, bundle id or pid. Omit to list every app's."),
+});
+
 export const iosObserveSchema = z.object({});
 export const iosScreenshotSchema = z.object({ path: z.string().min(1).optional() });
 const phoneToken = { observation_token: observationTokenSchema };
@@ -346,8 +356,16 @@ const keySequenceEntrySchema = z.union([
 	}),
 ]);
 
+/** A sequence of combos, or one combo ("cmd+shift+a"), the way agents most often write it. */
+const keySequenceSchema = z.union([z.string().min(1), z.array(keySequenceEntrySchema).min(1)]);
+
+/** The combos a keys argument names, in order. */
+export function keySequenceEntries<Entry>(keys: string | readonly Entry[]): readonly (string | Entry)[] {
+	return typeof keys === "string" ? [keys] : keys;
+}
+
 const pressKeysFields = {
-	keys: z.array(keySequenceEntrySchema).min(1),
+	keys: keySequenceSchema,
 	hold_seconds: z.number().nonnegative().optional(),
 	interval_seconds: z.number().nonnegative().optional(),
 };
@@ -612,29 +630,73 @@ export const runStepsSchema = z.object({
  * scheduled over explicit resources. The published step shape stays on `run_steps`; each lane
  * is validated against the strict per-type schema before any input is dispatched.
  */
+const handsKeyboardSchema = workerStepsSchema.describe(
+	"Same step objects as run_steps.steps; only type_text and press_keys.",
+);
+const handsPointerSchema = workerStepsSchema.describe(
+	"Same step objects as run_steps.steps; only click, drag, and scroll with explicit targets.",
+);
+const handsVisionSchema = z.object({
+	include_screenshot: includeScreenshotSchema.describe("default true"),
+	settle_ms: z.number().int().nonnegative().optional(),
+	max_elements: z.number().int().positive().optional(),
+});
+/** How many chunks one run_hands call may carry. */
+export const MAX_HANDS_CHUNKS = 32;
+
+/** The lanes of one hands call, shared by run_hands and run_script's app.hands. */
+const handsLanesShape = {
+	keyboard: handsKeyboardSchema.optional(),
+	pointer: handsPointerSchema.optional(),
+	vision: handsVisionSchema.optional(),
+	chunks: z
+		.array(
+			z
+				.object({
+					keyboard: workerStepsSchema.optional(),
+					pointer: workerStepsSchema.optional(),
+					vision: handsVisionSchema.optional(),
+				})
+				.refine(
+					(chunk) => chunk.keyboard !== undefined || chunk.pointer !== undefined || chunk.vision !== undefined,
+					{ message: "each chunk needs at least one of keyboard, pointer, or vision" },
+				),
+		)
+		.min(1)
+		.max(MAX_HANDS_CHUNKS)
+		.optional()
+		.describe(
+			"Instead of top-level lanes: ordered chunks whose lanes (same rules) run at once; the next starts when this chunk's input ends.",
+		),
+	overlap: z
+		.enum(["auto", "never", "always"])
+		.optional()
+		.describe(
+			"auto (default) overlaps lanes with disjoint resources; never serializes; always is refused when lanes share a resource.",
+		),
+};
+
+type HandsLanesInput = z.infer<z.ZodObject<typeof handsLanesShape>>;
+
+const handsLanesRule = {
+	check: (input: HandsLanesInput): boolean =>
+		input.chunks !== undefined
+			? input.keyboard === undefined && input.pointer === undefined && input.vision === undefined
+			: input.keyboard !== undefined || input.pointer !== undefined || input.vision !== undefined,
+	message: "run_hands needs keyboard, pointer, or vision, or chunks instead of them (not both)",
+};
+
+/** app.hands(spec) in run_script: the lanes alone, with the app and token supplied by the script host. */
+export const handsSpecSchema = z
+	.object(handsLanesShape)
+	.strict()
+	.refine(handsLanesRule.check, { message: handsLanesRule.message });
+
 export const runHandsSchema = z
 	.object({
 		app: appSchema,
 		observation_token: observationTokenSchema,
-		keyboard: workerStepsSchema
-			.describe("Same step objects as run_steps.steps; only type_text and press_keys.")
-			.optional(),
-		pointer: workerStepsSchema
-			.describe("Same step objects as run_steps.steps; only click, drag, and scroll with explicit targets.")
-			.optional(),
-		vision: z
-			.object({
-				include_screenshot: includeScreenshotSchema.describe("default true"),
-				settle_ms: z.number().int().nonnegative().optional(),
-				max_elements: z.number().int().positive().optional(),
-			})
-			.optional(),
-		overlap: z
-			.enum(["auto", "never", "always"])
-			.optional()
-			.describe(
-				"auto (default) overlaps lanes with disjoint resources; never serializes; always is refused when lanes share a resource.",
-			),
+		...handsLanesShape,
 		outcome: z
 			.enum(["live", "deferred"])
 			.optional()
@@ -645,9 +707,7 @@ export const runHandsSchema = z
 		full_state: fullStateSchema,
 		include_screenshot: includeScreenshotSchema,
 	})
-	.refine((input) => input.keyboard !== undefined || input.pointer !== undefined || input.vision !== undefined, {
-		message: "run_hands needs at least one of keyboard, pointer, or vision",
-	});
+	.refine(handsLanesRule.check, { message: handsLanesRule.message });
 
 function hasControlCharacter(value: string): boolean {
 	return Array.from(value).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
@@ -790,6 +850,7 @@ export type SelectTextInput = z.infer<typeof selectTextSchema>;
 export type RunStep = z.infer<typeof runStepSchema>;
 export type RunStepsInput = z.infer<typeof runStepsSchema>;
 export type RunHandsInput = z.infer<typeof runHandsSchema>;
+export type HandsSpecInput = z.infer<typeof handsSpecSchema>;
 
 export type ClickActionInput = Omit<ClickInput, "app" | "observation_token" | "full_state">;
 export type DragActionInput = Omit<DragInput, "app" | "observation_token" | "full_state">;

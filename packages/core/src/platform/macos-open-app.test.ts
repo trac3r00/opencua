@@ -267,3 +267,98 @@ describe("#given a background open #when the opened app takes the foreground any
 		expect(restored).toEqual([]);
 	});
 });
+
+describe("#given a background launch #when the launched app appears #then it is revealed without activation", () => {
+	it("reveals only the app this call launched", async () => {
+		const lister = new FakeLister();
+		lister.onCall = (call) => {
+			if (call >= 2) {
+				lister.apps = [app("Safari", "com.apple.Safari", 4321)];
+			}
+		};
+		const revealed: number[] = [];
+		const launcher: AppOpenLauncher = {
+			...recordingLauncher().launcher,
+			background: true,
+			reveal: (pid) => {
+				revealed.push(pid);
+				return true;
+			},
+		};
+
+		const result = await openApplication(lister, "Safari", { launcher, timeoutMs: 1_000, pollIntervalMs: 1 });
+
+		expect(result.revealed).toBe(true);
+		expect(revealed).toEqual([4321]);
+	});
+
+	it("leaves an already running app hidden", async () => {
+		const lister = new FakeLister();
+		lister.apps = [app("Safari", "com.apple.Safari", 4321)];
+		const revealed: number[] = [];
+		const launcher: AppOpenLauncher = {
+			...recordingLauncher().launcher,
+			background: true,
+			reveal: (pid) => {
+				revealed.push(pid);
+				return true;
+			},
+		};
+
+		const result = await openApplication(lister, "Safari", { launcher });
+
+		expect(result.revealed).toBeUndefined();
+		expect(revealed).toEqual([]);
+	});
+});
+
+describe("#given a running app with no window #when opened in the background #then it is reopened for one", () => {
+	function reopeningLauncher(windows: boolean): { readonly launcher: AppOpenLauncher; readonly reopened: string[] } {
+		const reopened: string[] = [];
+		return {
+			reopened,
+			launcher: {
+				...recordingLauncher().launcher,
+				background: true,
+				hasWindows: () => windows,
+				reopen: async (target) => {
+					reopened.push(target);
+				},
+			},
+		};
+	}
+
+	it("reopens a windowless app by bundle id", async () => {
+		const lister = new FakeLister();
+		lister.apps = [app("Messages", "com.apple.MobileSMS", 9227)];
+		const { launcher, reopened } = reopeningLauncher(false);
+
+		const result = await openApplication(lister, "Messages", { launcher });
+
+		expect(result.reopened).toBe(true);
+		expect(reopened).toEqual(["com.apple.MobileSMS"]);
+	});
+
+	it("leaves an app that has a window alone", async () => {
+		const lister = new FakeLister();
+		lister.apps = [app("Messages", "com.apple.MobileSMS", 9227)];
+		const { launcher, reopened } = reopeningLauncher(true);
+
+		const result = await openApplication(lister, "Messages", { launcher });
+
+		expect(result.reopened).toBeUndefined();
+		expect(reopened).toEqual([]);
+	});
+});
+
+describe("#given a Chromium browser #when launched in the background #then covered windows keep rendering", () => {
+	it("adds the occlusion switches for Chrome by name and by bundle id", () => {
+		expect(openArguments("Google Chrome")).toContain("--disable-backgrounding-occluded-windows");
+		expect(openArguments("com.google.Chrome")).toContain("--disable-features=CalculateNativeWinOcclusion");
+	});
+
+	it("adds nothing for other apps or foreground opens", () => {
+		expect(openArguments("Safari")).toEqual(["-g", "-j", "-a", "Safari"]);
+		expect(openArguments("Google Chrome", false)).toEqual(["-a", "Google Chrome"]);
+	});
+});

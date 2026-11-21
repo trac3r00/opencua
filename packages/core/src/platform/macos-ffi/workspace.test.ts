@@ -60,6 +60,8 @@ const ffiMock = vi.hoisted(() => {
 	const runLoop = vi.fn(() => 0);
 	const func = vi.fn((name: string) => {
 		if (name.includes("CFRunLoopRunInMode")) return runLoop;
+		// No process start time: every enumeration reads bundle identity afresh, as these cases expect.
+		if (name.includes("proc_pidinfo")) return () => 0;
 		if (name === "objc_getClass") return (className: string) => classes.get(className) ?? null;
 		if (name === "sel_registerName") return (selector: string) => selector;
 		if (name === "objc_msgSend") return send;
@@ -67,7 +69,9 @@ const ffiMock = vi.hoisted(() => {
 	});
 	return {
 		module: {
-			load: vi.fn((path: string) => (path.includes("libobjc") || path.includes("CoreFoundation") ? { func } : {})),
+			load: vi.fn((path: string) =>
+				path.includes("libobjc") || path.includes("CoreFoundation") || path.includes("libSystem") ? { func } : {},
+			),
 		},
 		runLoop,
 		pool,

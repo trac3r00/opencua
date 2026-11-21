@@ -10,6 +10,7 @@
 #import <libproc.h>
 #import <pthread.h>
 #import <signal.h>
+#import <spawn.h>
 #import <stdlib.h>
 #import <string.h>
 #import <sys/file.h>
@@ -38,6 +39,15 @@ static NSMutableDictionary<NSNumber *, NSView *> *gMarkerViews = nil;
 static NSMutableDictionary<NSNumber *, NSNumber *> *gMarkerModes = nil;
 static NSMutableDictionary<NSNumber *, NSTimer *> *gMarkerTimers = nil;
 static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerHighlights = nil;
+// The window each app's agent is working in: a lasting border with an OpenCUA
+// badge, so the person can tell at a glance which window is being driven.
+static NSMutableDictionary<NSNumber *, NSWindow *> *gMarkerFrames = nil;
+// The window rect (Quartz, top-left) each frame was asked to mark; the frame's
+// own window animates in and its size is not the marked window's.
+static NSMutableDictionary<NSNumber *, NSValue *> *gMarkerFrameTargets = nil;
+// The frame's badge sits this far above the window it marks.
+static const CGFloat kFrameBadgeRise = 11.0;
+static CGFloat primary_screen_height(void);
 static NSMutableDictionary<NSNumber *, NSTimer *> *gMarkerHighlightTimers = nil;
 static NSWindow *gHighlightWindow = nil;
 static NSTimer *gHighlightTimer = nil;
@@ -196,9 +206,20 @@ static BOOL stop_engaged(void) {
   return [NSFileManager.defaultManager fileExistsAtPath:stop_file_path()];
 }
 
+// The buddy's menu items run `<node> <cli.js> buddy settings`, given by
+// --buddy-cli; without it the items are not shown.
+static NSString *gBuddyNode = nil;
+static NSString *gBuddyCli = nil;
+
+extern char **environ;
+extern int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attributes,
+                                                 int disclaim);
+
 @interface StopMenuTarget : NSObject
 - (void)stopAll:(id)sender;
 - (void)resumeAll:(id)sender;
+- (void)stopBuddyTalking:(id)sender;
+- (void)openBuddySettings:(id)sender;
 @end
 
 static void update_status_item(void);
@@ -224,6 +245,36 @@ static void update_status_item(void);
                                                    error:nil];
   [data writeToFile:path atomically:YES];
   update_status_item();
+}
+- (void)stopBuddyTalking:(id)sender {
+  (void)sender;
+  // The same contract as stopSpeaking in buddy-voice.ts: the speaking process
+  // records its pid and ends its speech and caption on SIGTERM.
+  NSString *path = [stop_file_path().stringByDeletingLastPathComponent
+      stringByAppendingPathComponent:@"buddy/speaking.pid"];
+  NSString *text = [NSString stringWithContentsOfFile:path
+                                             encoding:NSUTF8StringEncoding
+                                                error:nil];
+  [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+  int pid = text.intValue;
+  if (pid > 1)
+    kill(pid, SIGTERM);
+}
+- (void)openBuddySettings:(id)sender {
+  (void)sender;
+  if (gBuddyNode == nil || gBuddyCli == nil)
+    return;
+  // Disclaimed, so the settings page is not charged to this helper: processes
+  // started under the opencua-mcp helper could not reach the network.
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+  responsibility_spawnattrs_setdisclaim(&attributes, 1);
+  char *args[] = {(char *)gBuddyNode.fileSystemRepresentation,
+                  (char *)gBuddyCli.fileSystemRepresentation, "buddy",
+                  "settings", NULL};
+  pid_t pid;
+  posix_spawn(&pid, args[0], NULL, &attributes, args, environ);
+  posix_spawnattr_destroy(&attributes);
 }
 - (void)resumeAll:(id)sender {
   (void)sender;
@@ -263,6 +314,21 @@ static NSMenu *control_menu(NSMenu *menu, NSArray<NSString *> *lines,
                                              keyEquivalent:@""];
     resume.target = gStopTarget;
     [menu addItem:resume];
+    if (gBuddyCli != nil) {
+      [menu addItem:[NSMenuItem separatorItem]];
+      NSMenuItem *quiet =
+          [[NSMenuItem alloc] initWithTitle:@"Stop buddy talking"
+                                     action:@selector(stopBuddyTalking:)
+                              keyEquivalent:@""];
+      quiet.target = gStopTarget;
+      [menu addItem:quiet];
+      NSMenuItem *settings =
+          [[NSMenuItem alloc] initWithTitle:@"Buddy settings…"
+                                     action:@selector(openBuddySettings:)
+                              keyEquivalent:@""];
+      settings.target = gStopTarget;
+      [menu addItem:settings];
+    }
   }
   for (NSUInteger index = 0; index < lines.count; index++) {
     [menu itemAtIndex:index].title = lines[index];
@@ -385,6 +451,28 @@ static BOOL stop_menu_visible(void) {
   return hold_stop_menu_lock() && !history_menu_running();
 }
 
+// Whether another process holds stop-menu.lock, that is, a status-only helper
+// already shows opencua's menu bar item.
+static BOOL stop_menu_held_elsewhere(void) {
+  if (gStopMenuLock >= 0) {
+    return NO;
+  }
+  int fd = open_state_lock(@"stop-menu.lock");
+  if (fd < 0) {
+    return NO;
+  }
+  BOOL held = flock(fd, LOCK_EX | LOCK_NB) != 0;
+  close(fd);
+  return held;
+}
+
+// A drawing overlay adds its own item only when neither a status-only helper
+// nor cua-history shows opencua's control, so the menu bar never carries two
+// opencua items while an agent acts.
+static BOOL drawing_status_visible(void) {
+  return !stop_menu_held_elsewhere() && !history_menu_running();
+}
+
 static void ensure_status_item(void);
 static void remove_status_item(void);
 
@@ -448,6 +536,10 @@ static void update_status_item(void) {
 }
 
 static void ensure_status_item(void) {
+  if (!gStatusOnly && !drawing_status_visible()) {
+    remove_status_item();
+    return;
+  }
   if (gStatusItem == nil) {
     gStatusItem = [[NSStatusBar systemStatusBar]
         statusItemWithLength:NSVariableStatusItemLength];
@@ -966,26 +1058,66 @@ static NSBezierPath *drag_anchor_path(void) {
 // any window the user brings in front of that app also covers its cursor, and a
 // target with no on-screen window (hidden, minimized, another Space) hides it.
 // `windows` is a front-to-back CGWindowListCopyWindowInfo result.
+// The app window a marker belongs to, in Quartz coordinates (top-left origin):
+// the frontmost of the app's normal windows that holds the marker's centre, or
+// for a frame, the window whose bounds the frame was drawn around. A frame
+// whose window is gone (a dialog that closed) has no target and is hidden.
 static CGWindowID marker_target_window(NSArray<NSDictionary *> *windows,
-                                       pid_t pid) {
+                                       pid_t pid, NSRect markerRect,
+                                       BOOL exactBounds) {
   if (pid <= 0) {
     return kCGNullWindowID;
   }
+  NSPoint centre = NSMakePoint(NSMidX(markerRect), NSMidY(markerRect));
+  CGWindowID frontmost = kCGNullWindowID;
   for (NSDictionary *info in windows) {
     NSNumber *owner = info[(__bridge NSString *)kCGWindowOwnerPID];
     NSNumber *layer = info[(__bridge NSString *)kCGWindowLayer];
     NSNumber *number = info[(__bridge NSString *)kCGWindowNumber];
+    NSDictionary *boundsInfo = info[(__bridge NSString *)kCGWindowBounds];
     if (![owner isKindOfClass:[NSNumber class]] ||
         ![layer isKindOfClass:[NSNumber class]] ||
-        ![number isKindOfClass:[NSNumber class]]) {
+        ![number isKindOfClass:[NSNumber class]] ||
+        ![boundsInfo isKindOfClass:[NSDictionary class]]) {
       continue;
     }
-    if (owner.intValue == pid && layer.intValue == 0 &&
-        number.unsignedIntValue != kCGNullWindowID) {
+    if (owner.intValue != pid || layer.intValue != 0 ||
+        number.unsignedIntValue == kCGNullWindowID) {
+      continue;
+    }
+    CGRect bounds;
+    if (!CGRectMakeWithDictionaryRepresentation(
+            (__bridge CFDictionaryRef)boundsInfo, &bounds)) {
+      continue;
+    }
+    if (exactBounds) {
+      if (fabs(bounds.origin.x - markerRect.origin.x) <= 2.0 &&
+          fabs(bounds.origin.y - markerRect.origin.y) <= 2.0 &&
+          fabs(bounds.size.width - markerRect.size.width) <= 2.0 &&
+          fabs(bounds.size.height - markerRect.size.height) <= 2.0) {
+        return (CGWindowID)number.unsignedIntValue;
+      }
+      continue;
+    }
+    if (frontmost == kCGNullWindowID) {
+      frontmost = (CGWindowID)number.unsignedIntValue;
+    }
+    if (CGRectContainsPoint(bounds, NSPointToCGPoint(centre))) {
       return (CGWindowID)number.unsignedIntValue;
     }
   }
-  return kCGNullWindowID;
+  return exactBounds ? kCGNullWindowID : frontmost;
+}
+
+// A marker window's rect in Quartz coordinates; a frame's rect is the target
+// window's bounds, without the badge that rises above it.
+static NSRect marker_quartz_rect(NSWindow *window, BOOL isFrame) {
+  NSRect frame = window.frame;
+  CGFloat height =
+      isFrame ? frame.size.height - kFrameBadgeRise : frame.size.height;
+  return NSMakeRect(frame.origin.x,
+                    primary_screen_height() - frame.origin.y - height,
+                    frame.size.width, height);
 }
 
 static void stack_marker_window(NSWindow *window, NSNumber *key,
@@ -993,11 +1125,18 @@ static void stack_marker_window(NSWindow *window, NSNumber *key,
   if (window == nil || key == nil) {
     return;
   }
-  CGWindowID target = marker_target_window(windows, (pid_t)key.intValue);
+  BOOL isFrame = gMarkerFrames[key] == window;
+  NSValue *marked = isFrame ? gMarkerFrameTargets[key] : nil;
+  CGWindowID target = marker_target_window(
+      windows, (pid_t)key.intValue,
+      marked != nil ? marked.rectValue : marker_quartz_rect(window, isFrame),
+      isFrame);
   if (target == kCGNullWindowID) {
     [window orderOut:nil];
     return;
   }
+  // Stacked just above the window the agent works in: visible exactly where
+  // that window is, and covered with it by whatever the person keeps in front.
   [window setLevel:NSNormalWindowLevel];
   [window orderWindow:NSWindowAbove relativeTo:(NSInteger)target];
 }
@@ -1015,15 +1154,24 @@ static void stack_marker(NSWindow *window, NSNumber *key) {
 // The user can raise, hide or move the target app at any time; re-stack every
 // marker and per-app highlight so each stays just above its own app.
 static void restack_markers(void) {
-  if (gMarkerWindows.count == 0 && gMarkerHighlights.count == 0) {
+  if (gMarkerWindows.count == 0 && gMarkerHighlights.count == 0 &&
+      gMarkerFrames.count == 0) {
     return;
   }
   NSArray<NSDictionary *> *windows = onscreen_windows();
+  // Only markers on screen are restacked: a marker window created ahead of its
+  // first position (a mode change) would otherwise appear at the screen origin.
   for (NSNumber *key in gMarkerHighlights.allKeys) {
-    stack_marker_window(gMarkerHighlights[key], key, windows);
+    if (gMarkerHighlights[key].isVisible)
+      stack_marker_window(gMarkerHighlights[key], key, windows);
+  }
+  for (NSNumber *key in gMarkerFrames.allKeys) {
+    if (gMarkerFrames[key].isVisible)
+      stack_marker_window(gMarkerFrames[key], key, windows);
   }
   for (NSNumber *key in gMarkerWindows.allKeys) {
-    stack_marker_window(gMarkerWindows[key], key, windows);
+    if (gMarkerWindows[key].isVisible)
+      stack_marker_window(gMarkerWindows[key], key, windows);
   }
 }
 
@@ -1138,6 +1286,55 @@ static void start_ripple(NSPoint windowOrigin) {
   [outline setLineWidth:5.0];
   [[NSColor colorWithSRGBRed:0.39 green:0.78 blue:1.0 alpha:0.9] setStroke];
   [outline stroke];
+}
+@end
+
+// How far the badge rises above the window's top edge; the frame window is
+// that much taller than the window it marks.
+
+@interface FrameView : NSView
+@end
+
+@implementation FrameView
+- (void)drawRect:(NSRect)dirtyRect {
+  (void)dirtyRect;
+  NSColor *accent = [NSColor colorWithSRGBRed:0.20
+                                        green:0.55
+                                         blue:1.0
+                                        alpha:0.9];
+  NSRect marked = NSMakeRect(0, 0, NSWidth(self.bounds),
+                             NSHeight(self.bounds) - kFrameBadgeRise);
+  NSBezierPath *outline =
+      [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(marked, 1.5, 1.5)
+                                      xRadius:10.0
+                                      yRadius:10.0];
+  [outline setLineWidth:3.0];
+  [accent setStroke];
+  [outline stroke];
+  NSDictionary *attributes = @{
+    NSFontAttributeName : [NSFont systemFontOfSize:11.0
+                                            weight:NSFontWeightSemibold],
+    NSForegroundColorAttributeName : NSColor.whiteColor
+  };
+  NSString *label = @"OpenCUA";
+  NSSize text = [label sizeWithAttributes:attributes];
+  CGFloat height = 2.0 * kFrameBadgeRise;
+  CGFloat width = text.width + 28.0;
+  // The badge sits across the top edge near the right corner, clear of the
+  // traffic lights and over as little of the window's own content as it can.
+  NSRect pill = NSMakeRect(NSMaxX(marked) - width - 14.0,
+                           NSMaxY(marked) - kFrameBadgeRise, width, height);
+  [accent setFill];
+  [[NSBezierPath bezierPathWithRoundedRect:pill
+                                   xRadius:height / 2.0
+                                   yRadius:height / 2.0] fill];
+  [NSColor.whiteColor setFill];
+  [[NSBezierPath
+      bezierPathWithOvalInRect:NSMakeRect(NSMinX(pill) + 9.0,
+                                          NSMidY(pill) - 3.0, 6.0, 6.0)] fill];
+  [label drawAtPoint:NSMakePoint(NSMinX(pill) + 19.0,
+                                 NSMidY(pill) - text.height / 2.0)
+      withAttributes:attributes];
 }
 @end
 
@@ -1329,6 +1526,40 @@ static void apply_highlight(double x, double y, double w, double h,
     gMarkerHighlightTimers[key] = fade;
 }
 
+// Mark the window an app's agent works in until that agent's cursor is hidden
+// or the overlay goes idle; repeated frames only follow the window.
+static void apply_frame(double x, double y, double w, double h, NSNumber *key) {
+  if (key == nil || w <= 0.0 || h <= 0.0) {
+    return;
+  }
+  NSWindow *window = gMarkerFrames[key];
+  if (window == nil) {
+    window = [[NSWindow alloc] initWithContentRect:NSZeroRect
+                                         styleMask:NSWindowStyleMaskBorderless
+                                           backing:NSBackingStoreBuffered
+                                             defer:NO];
+    [window setOpaque:NO];
+    [window setBackgroundColor:[NSColor clearColor]];
+    [window setHasShadow:NO];
+    [window setIgnoresMouseEvents:YES];
+    [window setCollectionBehavior:gHighlightWindow.collectionBehavior];
+    [window setContentView:[[FrameView alloc] initWithFrame:NSZeroRect]];
+    gMarkerFrames[key] = window;
+  }
+  if (gMarkerFrameTargets == nil) {
+    gMarkerFrameTargets = [NSMutableDictionary dictionary];
+  }
+  gMarkerFrameTargets[key] = [NSValue valueWithRect:NSMakeRect(x, y, w, h)];
+  CGFloat screenHeight = primary_screen_height();
+  NSRect frame = NSMakeRect(x, screenHeight - y - h, w, h + kFrameBadgeRise);
+  if (!NSEqualRects(window.frame, frame)) {
+    [window setFrame:frame display:YES];
+    [window.contentView setNeedsDisplay:YES];
+  }
+  [window setAlphaValue:1.0];
+  stack_marker(window, key);
+}
+
 static void apply_hide(NSNumber *markerKey) {
   if (markerKey != nil) {
     OverlayPointerView *view = (OverlayPointerView *)gMarkerViews[markerKey];
@@ -1339,6 +1570,9 @@ static void apply_hide(NSNumber *markerKey) {
     [gMarkerHighlightTimers removeObjectForKey:markerKey];
     [gMarkerHighlights[markerKey] orderOut:nil];
     [gMarkerHighlights removeObjectForKey:markerKey];
+    [gMarkerFrames[markerKey] orderOut:nil];
+    [gMarkerFrames removeObjectForKey:markerKey];
+    [gMarkerFrameTargets removeObjectForKey:markerKey];
     [gMarkerTimers[markerKey] invalidate];
     [gMarkerTimers removeObjectForKey:markerKey];
     NSWindow *window = marker_window(markerKey, NO);
@@ -1740,6 +1974,15 @@ static int dispatch_command_line(const char *line, int replyFd) {
       }
       reset_idle_timer();
     });
+  } else if (sscanf(command, "frame %lf %lf %lf %lf", &x, &y, &w, &h) == 4) {
+    if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) {
+      return 0;
+    }
+    NSNumber *markerKey = key;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      apply_frame(x, y, w, h, markerKey);
+      reset_idle_timer();
+    });
   } else if (sscanf(command, "highlight %lf %lf %lf %lf", &x, &y, &w, &h) ==
              4) {
     if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h)) {
@@ -1955,6 +2198,9 @@ int main(int argc, const char *argv[]) {
       gStatusOnly = YES;
     } else if (strcmp(argv[i], "--parent") == 0 && i + 1 < argc) {
       parent = (pid_t)strtol(argv[++i], NULL, 10);
+    } else if (strcmp(argv[i], "--buddy-cli") == 0 && i + 2 < argc) {
+      gBuddyNode = @(argv[++i]);
+      gBuddyCli = @(argv[++i]);
     }
   }
   signal(SIGPIPE, SIG_IGN);
@@ -2000,6 +2246,7 @@ int main(int argc, const char *argv[]) {
     gMarkerTimers = [NSMutableDictionary dictionary];
     gMarkerHighlights = [NSMutableDictionary dictionary];
     gMarkerHighlightTimers = [NSMutableDictionary dictionary];
+    gMarkerFrames = [NSMutableDictionary dictionary];
 
     NSRect frame = NSMakeRect(0, 0, kOverlaySize, kOverlaySize);
     gWindow = [[NSWindow alloc] initWithContentRect:frame

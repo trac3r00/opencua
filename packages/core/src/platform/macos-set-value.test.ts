@@ -56,19 +56,17 @@ function firstInputController(): (typeof inputControllerMock.instances)[number] 
 	return controller;
 }
 
-const HOST_REFUSAL = /host-window cannot operate on the human desktop/;
-
-describe("#given MacOSHostComputer.setValue on the human desktop #when called #then it is refused before any write or input", () => {
-	it("refuses before the accessibility write and keyboard feedback", async () => {
+describe("#given MacOSHostComputer.setValue on a host app #when called #then it writes through accessibility only", () => {
+	it("calls setValueByIndex with the requested value", async () => {
 		// given
 		const computer = new MacOSHostComputer();
 
 		// when
-		await expect(computer.setValue(1234, 7, "updated")).rejects.toThrow(HOST_REFUSAL);
+		await computer.setValue(1234, 7, "updated");
 
 		// then
-		expect(accessibilityMock.setValueByIndex).not.toHaveBeenCalled();
-		expect(firstInputController().showKeyboard).not.toHaveBeenCalled();
+		expect(accessibilityMock.setValueByIndex).toHaveBeenCalledWith(1234, 7, "updated");
+		expect(firstInputController().showKeyboard).toHaveBeenCalledTimes(1);
 	});
 
 	it("never falls back to synthetic keyboard input that would hijack the user", async () => {
@@ -76,7 +74,7 @@ describe("#given MacOSHostComputer.setValue on the human desktop #when called #t
 		const computer = new MacOSHostComputer();
 
 		// when
-		await expect(computer.setValue(1234, 7, "updated")).rejects.toThrow(HOST_REFUSAL);
+		await computer.setValue(1234, 7, "updated");
 
 		// then
 		const input = firstInputController();

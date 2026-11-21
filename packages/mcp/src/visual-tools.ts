@@ -53,7 +53,7 @@ export function registerVisualTools(server: McpServer, session: GuardedSession):
 			const observed = readObservationPayload(observation);
 			const state = observed;
 			const image = observation.content.find((item) => item.type === "image");
-			const unavailable = (reason: string, error?: unknown): ToolResult =>
+			const unavailable = (reason: string, error?: unknown, isError = true): ToolResult =>
 				withVisualMetadata(
 					observation,
 					observed,
@@ -61,7 +61,7 @@ export function registerVisualTools(server: McpServer, session: GuardedSession):
 						visualAnalysisUnavailable: reason,
 						...(error === undefined ? {} : { visualAnalysisFailure: failureDetail(error) }),
 					},
-					true,
+					isError,
 				);
 
 			if (state?.systemPrompts !== undefined && state.systemPrompts.length > 0) {
@@ -71,7 +71,9 @@ export function registerVisualTools(server: McpServer, session: GuardedSession):
 				return unavailable("approved window image unavailable");
 			}
 			if (server.server.getClientCapabilities()?.sampling === undefined) {
-				return unavailable("client sampling unsupported; direct agent visual fallback required");
+				// Most agent clients cannot sample. The observation, its image and its token are still a complete answer the
+				// agent reads itself, so this is a success that says no server-side analysis was added, not a failure.
+				return unavailable("client sampling unsupported; direct agent visual fallback required", undefined, false);
 			}
 
 			let sample: Awaited<ReturnType<typeof server.server.createMessage>>;

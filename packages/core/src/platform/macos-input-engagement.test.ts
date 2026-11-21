@@ -18,6 +18,7 @@ const native = vi.hoisted(() => {
 
 vi.mock("node:timers/promises", () => ({ setTimeout: () => Promise.resolve() }));
 vi.mock("./macos-ffi/accessibility.js", () => ({
+	focusedCaretFrame: () => undefined,
 	focusedWindowIdForPid: () => native.focused,
 }));
 vi.mock("./macos-ffi/skylight.js", () => ({
@@ -38,11 +39,9 @@ vi.mock("./macos-ffi/coregraphics.js", () => ({
 	K_CG_EVENT_FLAG_MASK_SHIFT: 0x00020000,
 }));
 
-const { NOOP_POINTER_OVERLAY } = await import("./macos-ffi/cursor-overlay.js");
 const { MacOSInputController, setOnscreenWindowIdsSourceForTesting } = await import("./macos-input.js");
 const { setOpenWindowsSourceForTesting } = await import("./macos-open-windows.js");
 const { needsActivationEngagement, runFocusLeasedGesture } = await import("./macos-targeted-gesture.js");
-const { MacOSHostComputer } = await import("./macos.js");
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -104,29 +103,6 @@ describe("#given focus engagement state", () => {
 });
 
 describe("#given attended click travel", () => {
-	it.each([
-		[undefined, "signature_arc"],
-		[null, "signature_arc"],
-		[undefined, "off"],
-		[{ style: "spring_settle" }, "off"],
-	] as const)(
-		"#when the host computer is asked for attended delivery with motion option %s and environment %s #then it is refused before any move",
-		(cursorMotion, environmentMotion) => {
-			vi.stubEnv("OPENCUA_CURSOR_MOTION", environmentMotion);
-			expect(
-				() =>
-					new MacOSHostComputer({
-						defaultTargetPid: 1234,
-						delivery: "attended",
-						overlay: NOOP_POINTER_OVERLAY,
-						isLocked: () => false,
-						cursorMotion,
-					}),
-			).toThrow(/global-input cannot operate on the human desktop/);
-			expect(native.post).not.toHaveBeenCalled();
-		},
-	);
-
 	it.each(["click", "doubleClick"] as const)(
 		"#when motion-enabled %s travels over eight points #then eased moves precede the click without cursor restoration",
 		async (action) => {

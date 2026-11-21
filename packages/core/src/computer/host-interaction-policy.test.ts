@@ -1,8 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import * as ts from "typescript";
-import { type HostInteraction, HostInteractionDenied, denyHostInteraction } from "./host-interaction-policy.js";
+import {
+	type HostInteraction,
+	HostInteractionDenied,
+	denyHostInteraction,
+	requireAttendedHostDelivery,
+	setAttendedHostDelivery,
+} from "./host-interaction-policy.js";
 
 const operations: readonly HostInteraction[] = [
 	"physical-pointer",
@@ -14,7 +20,7 @@ const operations: readonly HostInteraction[] = [
 	"host-overlay",
 ];
 
-describe("#given the human desktop #when an interaction is requested #then it is refused", () => {
+describe("#given the human desktop #when a denied interaction is requested #then it is refused", () => {
 	it.each(operations)("refuses %s without an opt-in bypass", (operation) => {
 		expect(() => denyHostInteraction(operation)).toThrow(HostInteractionDenied);
 		try {
@@ -30,7 +36,6 @@ describe("#given the human desktop #when an interaction is requested #then it is
 const dispatchSources = new Map(
 	[
 		"coregraphics-bindings",
-		"accessibility",
 		"skylight",
 		"workspace",
 		"pasteboard",
@@ -49,61 +54,85 @@ const dispatchSources = new Map(
 	]),
 );
 
-describe("#given native dispatch wrappers #when invoked in a fake-only context #then physical effects are denied", () => {
-	it.each([
-		{ module: "coregraphics-bindings", name: "postToHidEventTap" },
-		{ module: "coregraphics-bindings", name: "warpCursorPosition" },
-		{ module: "accessibility", name: "AXUIElementPerformAction" },
-		{ module: "accessibility", name: "AXUIElementSetAttributeValue" },
-		{ module: "skylight", name: "postMouseEventRecordToWindow" },
-		{ module: "skylight", name: "SLEventPostToPid" },
-		{ module: "skylight", name: "SLPSPostEventRecordTo" },
-		{ module: "skylight", name: "CGEventPostToPSN" },
-		{ module: "skylight", name: "activateWindowWithoutRaise" },
-		{ module: "skylight", name: "setProcessAppActive" },
-		{ module: "skylight", name: "beginFocusWithoutRaise" },
-		{ module: "skylight", name: "restoreFrontProcessNoWindows" },
-		{ module: "workspace", name: "activateApplication" },
-	])("refuses every generated input to $name", ({ module, name }) => {
-		const source = dispatchSources.get(module);
-		if (source === undefined) throw new Error(`Missing source: ${module}`);
-		const declaration = source.statements.find(
-			(statement): statement is ts.FunctionDeclaration =>
-				ts.isFunctionDeclaration(statement) && statement.name?.text === name,
-		);
-		if (declaration === undefined) throw new Error(`Missing dispatch wrapper: ${name}`);
-		const compiled = ts.transpileModule(`${declaration.getText(source)}\nexports["${name}"] = ${name};`, {
-			compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-		}).outputText;
-		const exports: Record<string, unknown> = {};
-		let nativeEffects = 0;
-		runInNewContext(
-			compiled,
-			{
-				exports,
-				denyHostInteraction,
-				CGEventPost: () => nativeEffects++,
-				CGWarpMouseCursorPosition: () => nativeEffects++,
-				Buffer,
-				K_CPS_NO_WINDOWS: 0x400,
-				K_CPS_USER_GENERATED: 0x200,
-				_SLPSGetFrontProcess: () => 0,
-				frontProcessSerialNumber: () => Buffer.alloc(8),
-				processSerialNumberForWindow: () => Buffer.alloc(8),
-				buildMouseEventRecord: () => Buffer.alloc(248),
-				SLPSSetFrontProcessWithOptions: () => nativeEffects++,
-				// No pid in these inputs is an opencua-owned surface, so the gate must refuse every one.
-				isOwnedSurfacePid: () => false,
-				SLEventPostToPidNative: () => nativeEffects++,
-				SLPSPostEventRecordTo: () => {
-					nativeEffects++;
-					return 0;
-				},
-			},
-			{ timeout: 5_000 },
-		);
-		const dispatch = exports[name];
-		if (typeof dispatch !== "function") throw new Error(`Wrapper was not exported: ${name}`);
+function compileWrapper(module: string, name: string): string {
+	const source = dispatchSources.get(module);
+	if (source === undefined) throw new Error(`Missing source: ${module}`);
+	const declaration = source.statements.find(
+		(statement): statement is ts.FunctionDeclaration =>
+			ts.isFunctionDeclaration(statement) && statement.name?.text === name,
+	);
+	if (declaration === undefined) throw new Error(`Missing wrapper: ${name}`);
+	return ts.transpileModule(`${declaration.getText(source)}\nexports["${name}"] = ${name};`, {
+		compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+	}).outputText;
+}
+
+function exportedFunction(exports: Record<string, unknown>, name: string): (...args: unknown[]) => unknown {
+	const dispatch = exports[name];
+	if (typeof dispatch !== "function") throw new Error(`Wrapper was not exported: ${name}`);
+	return (...args) => Reflect.apply(dispatch, undefined, args);
+}
+
+const window = { id: 7, bounds: { x: 0, y: 0, width: 100, height: 100 } };
+const nativeWrappers = [
+	{ module: "coregraphics-bindings", name: "postToHidEventTap", operation: "global-input", input: {} },
+	{
+		module: "coregraphics-bindings",
+		name: "warpCursorPosition",
+		operation: "physical-pointer",
+		input: { x: 1, y: 2 },
+	},
+	{ module: "skylight", name: "postMouseEventRecordToWindow", operation: "host-focus", input: window },
+	{ module: "skylight", name: "activateWindowWithoutRaise", operation: "host-focus", input: window },
+	{ module: "skylight", name: "beginFocusWithoutRaise", operation: "host-focus", input: window },
+	{ module: "workspace", name: "activateApplication", operation: "host-focus", input: 1234 },
+] as const;
+
+/** One wrapper compiled into a context whose every native primitive is a counter. */
+function fakeNativeWrapper(
+	module: string,
+	name: string,
+): { dispatch: (input: unknown) => unknown; effects: () => number } {
+	const exports: Record<string, unknown> = {};
+	let nativeEffects = 0;
+	const effect = () => {
+		nativeEffects++;
+		return 0;
+	};
+	runInNewContext(
+		compileWrapper(module, name),
+		{
+			exports,
+			requireAttendedHostDelivery,
+			CGEventPost: effect,
+			CGWarpMouseCursorPosition: effect,
+			K_CG_HID_EVENT_TAP: 0,
+			Buffer,
+			K_CPS_NO_WINDOWS: 0x400,
+			K_CPS_USER_GENERATED: 0x200,
+			_SLPSGetFrontProcess: () => 0,
+			frontProcessSerialNumber: () => Buffer.alloc(8),
+			processSerialNumberForWindow: () => Buffer.alloc(8),
+			buildMouseEventRecord: () => Buffer.alloc(248),
+			SLPSSetFrontProcessWithOptions: effect,
+			SLPSPostEventRecordTo: effect,
+			withAutoreleasePool: (operation: () => unknown) => operation(),
+			msgPointerProcessIdentifier: () => ({}),
+			runningApplicationClass: {},
+			runningApplicationWithProcessIdentifierSelector: {},
+			activateWithOptionsSelector: {},
+			ACTIVATE_IGNORING_OTHER_APPS: 2,
+			msgBoolUnsignedInteger: () => effect() === 0,
+		},
+		{ timeout: 5_000 },
+	);
+	const dispatch = exportedFunction(exports, name);
+	return { dispatch: (input) => dispatch(input), effects: () => nativeEffects };
+}
+
+describe("#given background delivery #when the focus, HID and pointer wrappers run in a fake-only context #then physical effects are denied", () => {
+	it.each(nativeWrappers)("refuses every generated input to $name", ({ module, name, operation }) => {
+		const { dispatch, effects } = fakeNativeWrapper(module, name);
 		const inputs: readonly unknown[] = [
 			undefined,
 			null,
@@ -111,10 +140,13 @@ describe("#given native dispatch wrappers #when invoked in a fake-only context #
 			{ x: 0, y: 0 },
 			{ x: -1, y: 1 },
 			{ x: Number.NaN, y: Number.POSITIVE_INFINITY },
+			window,
+			1234,
 		];
 		for (const input of inputs) {
 			expect(() => dispatch(input)).toThrow(HostInteractionDenied);
-			expect(nativeEffects).toBe(0);
+			expect(() => dispatch(input)).toThrow(`${operation} cannot operate on the human desktop`);
+			expect(effects()).toBe(0);
 		}
 	});
 
@@ -130,108 +162,160 @@ describe("#given native dispatch wrappers #when invoked in a fake-only context #
 	});
 });
 
-describe("#given the per-process event gate #when a pid is an opencua-owned surface #then only that pid receives input", () => {
-	it("posts once to the owned surface and still refuses every other pid", () => {
-		const source = dispatchSources.get("skylight");
-		const declaration = source?.statements.find(
-			(statement): statement is ts.FunctionDeclaration =>
-				ts.isFunctionDeclaration(statement) && statement.name?.text === "SLEventPostToPid",
-		);
-		if (source === undefined || declaration === undefined) throw new Error("Missing SLEventPostToPid");
-		const compiled = ts.transpileModule(`${declaration.getText(source)}\nexports.post = SLEventPostToPid;`, {
-			compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-		}).outputText;
-		const exports: Record<string, unknown> = {};
-		const posted: number[] = [];
-		runInNewContext(compiled, {
-			exports,
-			denyHostInteraction,
-			isOwnedSurfacePid: (pid: number) => pid === 4242,
-			SLEventPostToPidNative: (pid: number) => posted.push(pid),
-		});
-		const post = exports["post"];
-		if (typeof post !== "function") throw new Error("Wrapper was not exported");
+describe("#given attended delivery #when the focus, HID and pointer wrappers run in a fake-only context #then they reach their native primitive", () => {
+	afterEach(() => {
+		setAttendedHostDelivery(false);
+	});
 
-		post(4242, {});
+	it.each(nativeWrappers)("routes $name to its native call", ({ module, name, input }) => {
+		const { dispatch, effects } = fakeNativeWrapper(module, name);
+		setAttendedHostDelivery(true);
 
-		expect(posted).toEqual([4242]);
-		expect(() => post(4243, {})).toThrow(HostInteractionDenied);
-		expect(posted).toEqual([4242]);
+		dispatch(input);
+
+		expect(effects()).toBeGreaterThan(0);
 	});
 });
 
-describe("#given shared-host resource defaults #when used #then no native resource is touched", () => {
-	it.each([
-		{ module: "../macos-open-app", name: "spawnOpenLauncher", args: [], method: "launch" },
-		{ module: "../terminal-session", name: "createTerminalSession", args: [], method: "runCommand" },
-		{ module: "cursor-overlay", name: "createCursorOverlay", args: [] },
-		{ module: "cursor-overlay", name: "defaultSocketTransport", args: [Date.now, () => undefined] },
-		{ module: "pasteboard", name: "readClipboard", args: [] },
-		{ module: "pasteboard", name: "writeClipboard", args: [{ type: "text", text: "synthetic" }] },
-		{
-			module: "../macos-window-frame",
-			name: "setWindowFrame",
-			args: [123, 99, { x: 0, y: 0, width: 100, height: 100 }],
+describe("#given host resources outside background app control #when their native default is used #then nothing native is touched", () => {
+	it.each([{ module: "../terminal-session", name: "createTerminalSession", args: [], method: "runCommand" }])(
+		"refuses the native default for $name",
+		async (testCase) => {
+			const { module, name, args } = testCase;
+			const exports: Record<string, unknown> = {};
+			let nativeCalls = 0;
+			runInNewContext(
+				compileWrapper(module, name),
+				{
+					exports,
+					denyHostInteraction,
+					spawn: () => nativeCalls++,
+					connect: () => nativeCalls++,
+					cursorOverlaySocketPath: () => "/synthetic/host-overlay.sock",
+					nativeAccess: {
+						find: () => nativeCalls++,
+						run: () => nativeCalls++,
+					},
+				},
+				{ timeout: 5_000 },
+			);
+			const dispatch = exportedFunction(exports, name);
+			await expect(
+				Promise.resolve().then(() => {
+					const result: unknown = dispatch(...args);
+					if ("method" in testCase && testCase.method !== undefined) {
+						if (typeof result !== "object" || result === null) throw new Error("Missing resource");
+						const method: unknown = Reflect.get(result, testCase.method);
+						if (typeof method !== "function") throw new Error("Missing resource method");
+						return Reflect.apply(method, result, []);
+					}
+					return result;
+				}),
+			).rejects.toBeInstanceOf(HostInteractionDenied);
+			expect(nativeCalls).toBe(0);
 		},
-	])("refuses the native default for $name", async (testCase) => {
-		const { module, name, args } = testCase;
-		const source = dispatchSources.get(module);
-		if (source === undefined) throw new Error(`Missing source: ${module}`);
-		const declaration = source.statements.find(
-			(statement): statement is ts.FunctionDeclaration =>
-				ts.isFunctionDeclaration(statement) && statement.name?.text === name,
-		);
-		if (declaration === undefined) throw new Error(`Missing resource wrapper: ${name}`);
-		const compiled = ts.transpileModule(declaration.getText(source), {
-			compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-		}).outputText;
+	);
+});
+
+describe("#given host app resources #when their native default is used #then it reaches the native seam", () => {
+	const pasteboardConstants = {
+		TEXT_TYPE: "public.utf8-plain-text",
+		LEGACY_TEXT_TYPE: "NSStringPboardType",
+		FILE_URL_TYPE: "public.file-url",
+		IMAGE_TYPES: ["public.png", "public.jpeg", "public.tiff"],
+	};
+
+	it("reads the host clipboard through the native pasteboard", () => {
 		const exports: Record<string, unknown> = {};
-		let nativeCalls = 0;
-		runInNewContext(
-			compiled,
-			{
-				exports,
-				denyHostInteraction,
-				spawn: () => nativeCalls++,
-				connect: () => nativeCalls++,
-				cursorOverlaySocketPath: () => "/synthetic/host-overlay.sock",
-				validateFrame: () => undefined,
-				prepareClipboardInput: (input: unknown) => input,
-				activateApplication: () => nativeCalls++,
-				nativeAccess: {
-					find: () => nativeCalls++,
-					run: () => nativeCalls++,
-				},
-				nativePasteboard: {
-					types: () => {
-						nativeCalls++;
-						return [];
-					},
-					clear: () => nativeCalls++,
-				},
-				nativeWindowFrameDependencies: {
-					windowFrames: async () => {
-						nativeCalls++;
-						return [];
-					},
+		runInNewContext(compileWrapper("pasteboard", "readClipboard"), {
+			exports,
+			...pasteboardConstants,
+			nativePasteboard: {
+				types: () => ["public.utf8-plain-text"],
+				stringForType: (type: string) => (type === "public.utf8-plain-text" ? "copied" : null),
+				dataForType: () => null,
+			},
+		});
+
+		expect(exportedFunction(exports, "readClipboard")()).toEqual({
+			types: ["public.utf8-plain-text"],
+			text: "copied",
+			fileUrls: [],
+		});
+	});
+
+	it("writes the host clipboard through the native pasteboard", () => {
+		const exports: Record<string, unknown> = {};
+		const writes: string[] = [];
+		runInNewContext(compileWrapper("pasteboard", "writeClipboard"), {
+			exports,
+			...pasteboardConstants,
+			prepareClipboardInput: (input: unknown) => input,
+			nativePasteboard: {
+				clear: () => writes.push("clear"),
+				setString: (type: string, value: string) => writes.push(`${type}=${value}`) > 0,
+				types: () => ["public.utf8-plain-text"],
+			},
+		});
+
+		expect(exportedFunction(exports, "writeClipboard")({ type: "text", text: "synthetic" })).toEqual({
+			overwritten: true,
+			writtenType: "text",
+			types: ["public.utf8-plain-text"],
+		});
+		expect(writes).toEqual(["clear", "public.utf8-plain-text=synthetic"]);
+	});
+
+	it("resolves a host window frame through WindowServer instead of refusing", async () => {
+		const exports: Record<string, unknown> = {};
+		let frameReads = 0;
+		runInNewContext(compileWrapper("../macos-window-frame", "setWindowFrame"), {
+			exports,
+			validateFrame: () => undefined,
+			nativeWindowFrameDependencies: {
+				windowFrames: async () => {
+					frameReads++;
+					return [];
 				},
 			},
-			{ timeout: 5_000 },
-		);
-		const dispatch = exports[name];
-		if (typeof dispatch !== "function") throw new Error(`Wrapper was not exported: ${name}`);
+		});
+
 		await expect(
-			Promise.resolve().then(() => {
-				const result: unknown = dispatch(...args);
-				if ("method" in testCase && testCase.method !== undefined) {
-					if (typeof result !== "object" || result === null) throw new Error("Missing resource");
-					const method: unknown = Reflect.get(result, testCase.method);
-					if (typeof method !== "function") throw new Error("Missing resource method");
-					return Reflect.apply(method, result, []);
-				}
-				return result;
-			}),
-		).rejects.toBeInstanceOf(HostInteractionDenied);
-		expect(nativeCalls).toBe(0);
+			Promise.resolve().then(() =>
+				exportedFunction(exports, "setWindowFrame")(123, 99, { x: 0, y: 0, width: 100, height: 100 }),
+			),
+		).rejects.toThrow("window_id 99 is closed, stale, or unknown to WindowServer");
+		expect(frameReads).toBe(1);
+	});
+
+	it("launches an app in the background with open -g -j and no focus restore", async () => {
+		const exports: Record<string, unknown> = {};
+		const spawned: unknown[][] = [];
+		runInNewContext(compileWrapper("../macos-open-app", "spawnOpenLauncher"), {
+			exports,
+			Promise,
+			Error,
+			String,
+			openArguments: (target: string, background: boolean) => [...(background ? ["-g", "-j"] : []), "-a", target],
+			spawn: (...args: unknown[]) => {
+				spawned.push(args);
+				return {
+					stderr: { on: () => undefined },
+					once: (event: string, listener: (code: number) => void) => {
+						if (event === "close") listener(0);
+					},
+				};
+			},
+		});
+		const launcher: unknown = exportedFunction(exports, "spawnOpenLauncher")();
+		if (typeof launcher !== "object" || launcher === null) throw new Error("Missing launcher");
+		const launch: unknown = Reflect.get(launcher, "launch");
+		if (typeof launch !== "function") throw new Error("Missing launch");
+
+		await Reflect.apply(launch, launcher, ["Calculator"]);
+
+		expect(spawned).toEqual([["open", ["-g", "-j", "-a", "Calculator"], { stdio: ["ignore", "ignore", "pipe"] }]]);
+		expect(Reflect.get(launcher, "background")).toBe(true);
+		expect(Reflect.has(launcher, "restoreFrontmost")).toBe(false);
 	});
 });

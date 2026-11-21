@@ -24,6 +24,7 @@ export type BrowserStatus = {
 	readonly stopped: boolean;
 	readonly spaces: readonly unknown[];
 	readonly daemonRunning: boolean;
+	readonly buildId: string | null;
 };
 
 type BrowserSetupOptions = {
@@ -120,6 +121,7 @@ async function readStatus(): Promise<BrowserStatus> {
 	let connected = false;
 	let stopped = false;
 	let spaces: readonly unknown[] = [];
+	let buildId: string | null = null;
 	try {
 		const connection = await (await browserService()).readConnection();
 		const response = await fetch(`http://127.0.0.1:${connection.port}/rpc`, {
@@ -133,9 +135,15 @@ async function readStatus(): Promise<BrowserStatus> {
 		});
 		if (response.ok) {
 			const parsed = z
-				.object({ connected: z.boolean(), stopped: z.boolean(), spaces: z.array(z.unknown()) })
+				.object({
+					connected: z.boolean(),
+					stopped: z.boolean(),
+					spaces: z.array(z.unknown()),
+					build_id: z.string().optional(),
+				})
 				.safeParse(await response.json());
 			if (parsed.success) {
+				buildId = parsed.data.build_id ?? null;
 				connected = parsed.data.connected;
 				stopped = parsed.data.stopped;
 				spaces = parsed.data.spaces;
@@ -144,7 +152,7 @@ async function readStatus(): Promise<BrowserStatus> {
 	} catch {
 		connected = false;
 	}
-	return { connected, stopped, spaces, daemonRunning: doctor.running };
+	return { connected, stopped, spaces, daemonRunning: doctor.running, buildId };
 }
 
 async function waitForConnection(timeoutMs: number, onProgress: (elapsedMs: number) => void): Promise<BrowserStatus> {
@@ -261,6 +269,7 @@ export function registerBrowserCommands(program: Command, options: BrowserComman
 			}
 			const lines = [
 				`daemon:     ${status.daemonRunning ? "running" : "stopped"}`,
+				`build:      ${status.buildId ?? "unknown (daemon predates build reporting or is unreachable)"}`,
 				`extension:  ${status.connected ? "connected" : "not connected"}`,
 				`actions:    ${status.stopped ? "stopped by the user" : "available"}`,
 				`spaces:     ${status.spaces.length}`,

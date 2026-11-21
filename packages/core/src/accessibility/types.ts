@@ -79,6 +79,11 @@ export interface AppState {
 	};
 	frontmost: boolean;
 	axAvailable: boolean;
+	/**
+	 * Why `axAvailable` is false: this process lacks Accessibility trust, or the app answered with no tree. Absent
+	 * when the tree was read or not asked for.
+	 */
+	axUnavailable?: AxUnavailableReason;
 	elements: AXTreeElement[];
 	screenshotBase64: string;
 	screenshotWidth: number;
@@ -150,20 +155,26 @@ export interface AppState {
 	 * on over accessibility, only the menu bar can. {@link ocrText} is the window read from pixels.
 	 */
 	windowContentUnavailable?: boolean;
+	/**
+	 * The window sits on a Space no display shows, and its app is inactive: macOS hides it from accessibility, so the
+	 * observation is its pixels and {@link ocrText}, read where it is without switching the person's Space.
+	 */
+	windowOnHiddenSpace?: boolean;
 	/** Text recognized in the window image with its screen frame, present when window content is unavailable. */
 	ocrText?: readonly OcrTextEntry[];
 	/**
-	 * Why an observation that asked for an image carries none: the person's desktop is never captured
-	 * (isolated-session-required), or this process lacks the Screen Recording permission and capturing
-	 * anyway would raise macOS's permission prompt over the person's work.
+	 * Why an observation that asked for an image carries none: this process lacks the Screen Recording
+	 * permission and capturing anyway would raise macOS's permission prompt over the person's work.
 	 */
-	screenshotUnavailable?: "isolated-session-required" | "screen-recording-permission";
+	screenshotUnavailable?: "screen-recording-permission" | "window-capture-failed";
 	/**
 	 * Dialogs macOS itself has on screen (a permission request, a password sheet, a system alert).
 	 * They belong to no app being driven, can block input or capture, and only the person can answer.
 	 */
 	systemPrompts?: readonly SystemPrompt[];
 }
+
+export type AxUnavailableReason = "accessibility-permission" | "app-not-accessible";
 
 export interface OcrTextEntry {
 	readonly text: string;

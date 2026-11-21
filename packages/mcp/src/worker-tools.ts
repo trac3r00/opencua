@@ -5,6 +5,7 @@ import type { ToolContent, ToolResult } from "./tool-result.js";
 import { manageWorkersSchema, parseRunSteps, runWorkerSchema, workerManagementRequestSchema } from "./tool-schemas.js";
 import { WorkerControlRefusal, type WorkerCoordinator, WorkerRegionRefusal } from "./worker-coordinator.js";
 import type { WorkerAssignment, WorkerObservation, WorkerRunResult } from "./worker-coordinator.js";
+import { WorkerLeaseRefusal } from "./worker-registry.js";
 
 function attributedEntry(
 	attribution:
@@ -73,12 +74,22 @@ function objectResult(value: unknown): ToolResult {
 	return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 
-/** A user Take Over or Stop, or a pointer target outside the worker's region, answers as a refusal that provably sent nothing. */
+/**
+ * A user Take Over or Stop, a pointer target outside the worker's region, or a worker another opencua process owns or
+ * is running, answers as a refusal that provably sent nothing, under its own reason code.
+ */
 async function refusingControl(run: () => Promise<ToolResult>): Promise<ToolResult> {
 	try {
 		return await run();
 	} catch (error: unknown) {
-		if (!(error instanceof WorkerControlRefusal || error instanceof WorkerRegionRefusal)) throw error;
+		if (
+			!(
+				error instanceof WorkerControlRefusal ||
+				error instanceof WorkerRegionRefusal ||
+				error instanceof WorkerLeaseRefusal
+			)
+		)
+			throw error;
 		return {
 			content: [
 				{

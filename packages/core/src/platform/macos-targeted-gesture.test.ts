@@ -20,12 +20,20 @@ const timingKeys = [
 	"OPENCUA_GESTURE_CLICK_DRAIN_MS",
 ] as const;
 
+// The suite runner may set these for every file in a worker; each case leaves them as it found them.
+const initialTiming = timingKeys.map((key) => [key, process.env[key]] as const);
+
 afterEach(() => {
-	for (const key of timingKeys) delete process.env[key];
+	for (const [key, value] of initialTiming) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
 });
 
 describe("#given unset gesture timing variables #when reading timing getters #then lowered defaults are returned", () => {
 	it("returns each documented default", async () => {
+		// The suite runner lowers these for speed; this case reads the defaults behind them.
+		for (const key of timingKeys) delete process.env[key];
 		const timing = await import("./macos-targeted-gesture.js");
 		expect([
 			timing.gestureFocusSettleMilliseconds(),

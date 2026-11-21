@@ -33,6 +33,25 @@ describe("#given background call helpers #when discovering apps #then only verif
 		).toBe(true);
 	});
 
+	it("#given a third-party menu bar app #when discovering #then it is a target, while Apple's accessory prompts stay out", () => {
+		expect(isDiscoverableApplication(1, "dev.opentool.OpenTool", "/Applications/OpenTool.app")).toBe(true);
+		expect(
+			isDiscoverableApplication(
+				1,
+				"com.apple.SecurityAgent",
+				"/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle",
+			),
+		).toBe(false);
+		expect(
+			isDiscoverableApplication(
+				1,
+				"com.apple.accessibility.universalAccessAuthWarn",
+				"/System/Library/CoreServices/universalAccessAuthWarn.app",
+			),
+		).toBe(false);
+		expect(isDiscoverableApplication(2, "dev.opentool.OpenTool", "/Applications/OpenTool.app")).toBe(false);
+	});
+
 	it("#given Control Center #when the verified bundle path is discovered #then its system UI process is included", () => {
 		expect(
 			isDiscoverableApplication(1, "com.apple.controlcenter", "/System/Library/CoreServices/ControlCenter.app"),

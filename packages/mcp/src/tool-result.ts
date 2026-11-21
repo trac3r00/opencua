@@ -1,10 +1,11 @@
-import type {
-	AXTreeElement,
-	AppState,
-	AxTreeChanges,
-	ElementMatch,
-	InputObservation,
-	SystemPrompt,
+import {
+	type AXTreeElement,
+	type AppState,
+	type AxTreeChanges,
+	type ElementMatch,
+	type InputObservation,
+	type SystemPrompt,
+	axUnavailableNote,
 } from "@opencua/core";
 import { UNTRUSTED_CONTENT_NOTE, detectUntrustedContent } from "./untrusted-content.js";
 
@@ -35,11 +36,14 @@ const OMITTED_ELEMENTS_NOTE =
 const WINDOW_CONTENT_UNAVAILABLE_NOTE =
 	"this session does not own the Mac's physical screen (Screen Sharing or fast user switching), so the app's window content is not reachable over accessibility: ocrText is the window read from pixels, with screen frames. Keyboard input (type_text, press_keys) still reaches the app; pointer clicks and window-level menu items such as Save do not. Use keyboard routes, and call ask_user when a step needs a click or Save.";
 
-const ISOLATED_CAPTURE_NOTE =
-	"no image: opencua never captures the person's desktop. Elements and ids come from accessibility. For pixels, use an agent-owned isolated desktop.";
+const HIDDEN_SPACE_NOTE =
+	"this window is on another Space and its app is inactive: macOS hides its controls from accessibility, and capture of its pixels may be refused (see screenshotNote). It was read where it is; nothing switched the person's Space. ocrText, when present, is its text with screen frames; click by coordinates inside windowBounds. Keys reach it only while it is its app's focused window. To work on its controls, ask the person to bring it to their Space.";
 
 const SCREENSHOT_UNAVAILABLE_NOTE =
 	"no image: the process running opencua lacks macOS Screen Recording permission, so no capture was attempted (it would raise a permission prompt over the person's screen). Elements and ids are complete and actions work. If pixels are needed, ask the user to grant Screen Recording to the app that launches this server and restart it.";
+
+const WINDOW_CAPTURE_FAILED_NOTE =
+	"no image: the window capture failed twice (ScreenCaptureKit refused or timed out), although Screen Recording is granted. Elements and ids are complete and actions work. Retry the observation; if it keeps failing, ask the user to turn Screen Recording off and on again for the app that launches this server.";
 
 export const SYSTEM_PROMPT_NOTE =
 	"a macOS system dialog is on screen (see systemPrompts): it belongs to no app you are driving, only the person at the Mac can answer it, and it can block input or capture until they do. Never click or type into it; call ask_user to hand it over, naming what it asks for.";
@@ -166,6 +170,8 @@ export interface StepDispatch extends ActionDispatch {
 export interface RunHandsLaneReport {
 	readonly hand: "left" | "right" | "vision";
 	readonly lane: "keyboard" | "pointer" | "vision";
+	/** The chunk this lane ran in; only chunked calls carry it. */
+	readonly chunk?: number;
 	readonly status: "completed" | "failed" | "aborted" | "not_started";
 	readonly resources: readonly string[];
 	readonly steps: readonly RunStepReport[];
@@ -189,6 +195,15 @@ export interface RunHandsVisionReport {
 	readonly unavailable?: string;
 }
 
+export interface RunHandsChunkReport {
+	readonly chunk: number;
+	/** skipped: an earlier chunk failed or the run was stopped, so none of this chunk's input was sent. */
+	readonly status: "completed" | "failed" | "aborted" | "skipped";
+	readonly lanes: readonly RunHandsLaneReport["lane"][];
+	readonly overlap_ms: number;
+	readonly vision?: RunHandsVisionReport;
+}
+
 export interface RunHandsReport {
 	readonly policy: "auto" | "never" | "always";
 	readonly overlap_ms: number;
@@ -197,6 +212,7 @@ export interface RunHandsReport {
 	readonly lanes: readonly RunHandsLaneReport[];
 	readonly unstarted?: readonly string[];
 	readonly vision?: RunHandsVisionReport;
+	readonly chunks?: readonly RunHandsChunkReport[];
 }
 
 export interface RunStepReport {
@@ -296,7 +312,7 @@ export function refusalResult(reason: string, detail?: string): ToolResult {
 			: reason === "user-stopped"
 				? "Nothing was dispatched. Do not retry; tell the user."
 				: reason === "isolated-session-required"
-					? "Nothing was dispatched. This server never acts on the human desktop, so a retry cannot succeed; act in an agent-owned isolated desktop instead."
+					? "Nothing was dispatched. This platform's host backend takes no input (only the macOS host acts on the person's apps, in the background), so a retry cannot succeed; act in an agent-owned isolated desktop instead."
 					: escalation.target === "human"
 						? "Nothing was dispatched; call ask_user to request human help. Host policy must still authorize the app or URL before retrying."
 						: "Nothing was dispatched; observe the app again before retrying.";
@@ -789,10 +805,17 @@ function stateToolResult(
 	if (state.windowContentUnavailable === true) {
 		payload["windowContentNote"] = WINDOW_CONTENT_UNAVAILABLE_NOTE;
 	}
+	if (state.windowOnHiddenSpace === true) {
+		payload["windowSpace"] = "other";
+		payload["windowSpaceNote"] = HIDDEN_SPACE_NOTE;
+	}
+	if (state.axUnavailable !== undefined) {
+		payload["axNote"] = axUnavailableNote(state.axUnavailable, process.execPath);
+	}
 	if (state.screenshotUnavailable !== undefined) {
 		payload["screenshotNote"] =
-			state.screenshotUnavailable === "isolated-session-required"
-				? ISOLATED_CAPTURE_NOTE
+			state.screenshotUnavailable === "window-capture-failed"
+				? WINDOW_CAPTURE_FAILED_NOTE
 				: SCREENSHOT_UNAVAILABLE_NOTE;
 	}
 	if (state.systemPrompts !== undefined && state.systemPrompts.length > 0) {

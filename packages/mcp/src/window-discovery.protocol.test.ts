@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { SystemPrompt, TopLevelWindow } from "@opencua/core";
+import type { SystemPrompt, TopLevelWindow, TopLevelWindowOptions } from "@opencua/core";
 import { createHarness, jsonPayload } from "./protocol-client-harness.js";
 import { FakeGuardedComputer } from "./protocol-test-harness.js";
 
@@ -49,6 +49,110 @@ describe("window discovery #given a machine with on-screen windows #when the age
 				bounds: { ...WINDOW_BOUNDS, x: 213, y: 77 },
 			},
 		]);
+	});
+
+	it("lists a window on another Space, which attended input can still bring forward and target", async () => {
+		const offSpace = {
+			id: 8337,
+			ownerPid: 42729,
+			ownerName: "Calculator",
+			title: "Calculator",
+			bounds: WINDOW_BOUNDS,
+		};
+		const harness = await createHarness(undefined, async (options?: TopLevelWindowOptions) =>
+			options?.includeOffscreen === true ? [offSpace] : [],
+		);
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(await harness.client.callTool({ name: "list_windows", arguments: {} }));
+
+		expect(payload["windows"]).toEqual([
+			{ window_id: 8337, pid: 42729, app: "Calculator", title: "Calculator", bounds: WINDOW_BOUNDS },
+		]);
+	});
+
+	it("says which Space and display each window is on, and what reaches a window on another Space", async () => {
+		const asked: (TopLevelWindowOptions | undefined)[] = [];
+		const harness = await createHarness(undefined, async (options?: TopLevelWindowOptions) => {
+			asked.push(options);
+			return [
+				{
+					id: 1,
+					ownerPid: 489,
+					ownerName: "Finder",
+					title: "here",
+					bounds: WINDOW_BOUNDS,
+					space: { spaceIds: [3], current: true, display: "main" },
+				},
+				{
+					id: 2,
+					ownerPid: 42729,
+					ownerName: "Calculator",
+					title: "Calculator",
+					bounds: WINDOW_BOUNDS,
+					space: { spaceIds: [4], current: false, display: "main" },
+				},
+			];
+		});
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(await harness.client.callTool({ name: "list_windows", arguments: {} }));
+
+		expect(asked).toEqual([expect.objectContaining({ includeOffscreen: true, withSpaces: true })]);
+		expect(payload["windows"]).toEqual([
+			{
+				window_id: 1,
+				pid: 489,
+				app: "Finder",
+				title: "here",
+				bounds: WINDOW_BOUNDS,
+				space: "current",
+				space_ids: [3],
+				display: "main",
+			},
+			{
+				window_id: 2,
+				pid: 42729,
+				app: "Calculator",
+				title: "Calculator",
+				bounds: WINDOW_BOUNDS,
+				space: "other",
+				space_ids: [4],
+				display: "main",
+			},
+		]);
+		expect(typeof payload["space_note"]).toBe("string");
+	});
+
+	it("lists only the named app's windows when app is given", async () => {
+		const harness = await createHarness(
+			undefined,
+			probeWith([
+				{ id: 1, ownerPid: 1234, ownerName: "Finder", title: "here", bounds: WINDOW_BOUNDS },
+				{ id: 2, ownerPid: 5678, ownerName: "Other", title: "there", bounds: WINDOW_BOUNDS },
+			]),
+		);
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(
+			await harness.client.callTool({ name: "list_windows", arguments: { app: "Finder" } }),
+		);
+
+		expect(payload["windows"]).toEqual([
+			{ window_id: 1, pid: 1234, app: "Finder", title: "here", bounds: WINDOW_BOUNDS },
+		]);
+	});
+
+	it("a failed listing is a read-only failure: nothing was sent and retrying is safe", async () => {
+		const harness = await createHarness(undefined, async () => {
+			throw new Error("window list unreadable");
+		});
+		closeHarness = harness.close;
+
+		const result = await harness.client.callTool({ name: "list_windows", arguments: {} });
+
+		expect(result.isError).toBe(true);
+		expect(jsonPayload(result)).toMatchObject({ code: "TOOL_ERROR", retry: "safe" });
 	});
 
 	it("answers with an empty list instead of failing when no window probe is available", async () => {
@@ -157,5 +261,42 @@ describe("screen recording #given the server lacks the permission #when the agen
 		expect((result.content as { type: string }[]).some((block) => block.type === "image")).toBe(false);
 		expect(String(payload["screenshotNote"])).toContain("Screen Recording");
 		expect(payload["observation_token"]).toEqual(expect.any(String));
+	});
+});
+
+describe("list_apps #given running apps #when the agent lists them #then each entry carries only what tells apps apart", () => {
+	it("leaves out the always-true running flag and marks only the app in front", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.listApps = async () => [
+			{ name: "Finder", bundleId: "com.apple.finder", pid: 1234, isRunning: true, isFrontmost: true },
+			{ name: "Other", bundleId: "com.example.other", pid: 5678, isRunning: true, isFrontmost: false },
+		];
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+
+		const result = await harness.client.callTool({ name: "list_apps", arguments: {} });
+		const texts = (result.content as { type: string; text?: string }[]).filter((item) => item.type === "text");
+
+		expect(JSON.parse(texts.at(-1)?.text ?? "null")).toEqual([
+			{ name: "Finder", bundleId: "com.apple.finder", pid: 1234, isFrontmost: true },
+			{ name: "Other", bundleId: "com.example.other", pid: 5678 },
+		]);
+	});
+});
+
+describe("get_app_state #given an inactive app whose window is on a Space no display shows #when it is observed #then the agent is told where it is and what works", () => {
+	it("marks the window as on another Space and says how to act on it", async () => {
+		const computer = new FakeGuardedComputer();
+		computer.stateExtras = { windowOnHiddenSpace: true };
+		const harness = await createHarness(computer);
+		closeHarness = harness.close;
+
+		const payload = jsonPayload(
+			await harness.client.callTool({ name: "get_app_state", arguments: { app: "Finder" } }),
+		);
+
+		expect(payload["windowSpace"]).toBe("other");
+		expect(typeof payload["windowSpaceNote"]).toBe("string");
+		expect(typeof payload["observation_token"]).toBe("string");
 	});
 });

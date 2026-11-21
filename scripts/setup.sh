@@ -627,7 +627,7 @@ native_reason=""
 if ((rebuild_native)); then
 	native_reason="--rebuild-native was given"
 else
-	for binary in libsckit.dylib cursor-overlay history-recorder opencua-surface; do
+	for binary in libsckit.dylib cursor-overlay history-recorder opencua-surface voice-input buddy-hud; do
 		if [[ ! -f "$native_dir/$binary" ]]; then
 			native_reason="$binary is missing"
 			break
@@ -649,7 +649,7 @@ if [[ -n "$native_reason" ]]; then
 	info "building because $native_reason"
 	"$native_dir/build.sh"
 fi
-ok "libsckit.dylib ($(lipo -archs "$native_dir/libsckit.dylib")), cursor-overlay ($(lipo -archs "$native_dir/cursor-overlay")), history-recorder ($(lipo -archs "$native_dir/history-recorder")), opencua-surface, guest-axdump${native_reason:+, rebuilt}"
+ok "libsckit.dylib ($(lipo -archs "$native_dir/libsckit.dylib")), cursor-overlay ($(lipo -archs "$native_dir/cursor-overlay")), history-recorder ($(lipo -archs "$native_dir/history-recorder")), opencua-surface, voice-input, buddy-hud, guest-axdump${native_reason:+, rebuilt}"
 else
 	ok "skipped macOS native binaries on Linux"
 fi

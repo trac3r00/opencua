@@ -35,6 +35,13 @@ export class InputInterrupted extends Error {
 
 const scopes = new AsyncLocalStorage<InputScope>();
 
+let inputTargetListener: ((pid: number) => void) | undefined;
+
+/** Be told the target pid of every scoped input before it is sent (one listener; undefined removes it). */
+export function onInputTarget(listener: ((pid: number) => void) | undefined): void {
+	inputTargetListener = listener;
+}
+
 /** Run `action` with `scope` as the input scope of everything it awaits, and of nothing else. */
 export async function runInInputScope<T>(scope: InputScope, action: () => Promise<T>): Promise<T> {
 	const target = scope.target === undefined ? undefined : Object.freeze({ ...scope.target });
@@ -42,6 +49,9 @@ export async function runInInputScope<T>(scope: InputScope, action: () => Promis
 		...(target === undefined ? {} : { target }),
 		...(scope.interruption === undefined ? {} : { interruption: scope.interruption }),
 	});
+	if (target !== undefined) {
+		inputTargetListener?.(target.pid);
+	}
 	return await scopes.run(frozen, action);
 }
 

@@ -153,7 +153,7 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	/** Called at the start of every accessibility walk, so a test can change the tree between polls. */
 	onStateCall: ((call: number) => void) | undefined;
 	/** Delivery mode the fake computer reports, mirroring the native driver's default. */
-	delivery: "attended" | "background" = "attended";
+	delivery: "attended" | "background" = "background";
 	frontmost = true;
 	/** When set, every accessibility action throws it, modelling a control that rejects AXPress. */
 	performActionError: Error | undefined;
@@ -163,6 +163,8 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	windowBounds = { x: 300, y: 150, width: 1000, height: 800 };
 	/** macOS dialogs the fake reports on screen, as the native driver does with systemPrompts. */
 	systemPrompts: readonly SystemPrompt[] = [];
+	/** Fields merged into every observed state, for states the plain fake never produces. */
+	stateExtras: Partial<AppState> = {};
 	/** When true, the fake behaves like a server without Screen Recording: no image, and why. */
 	screenCaptureDenied = false;
 	/**
@@ -208,7 +210,8 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 	private pagesScrolled = 0;
 	private subtreeIds: ReadonlyMap<number, number> | undefined;
 	private generation = 0;
-	private stateCalls = 0;
+	/** How many app-state reads the fake has answered; tests compare it before and after an action. */
+	stateCalls = 0;
 	private readonly observations = new Map<number, InputObservation>();
 	private actionDispatched = false;
 
@@ -282,6 +285,7 @@ export class FakeGuardedComputer implements GuardedComputerInterface {
 						...(axChanges === undefined ? {} : { axChanges }),
 					}
 				: {}),
+			...this.stateExtras,
 		};
 		if (captureTree && !probe) {
 			this.generation += 1;

@@ -10,11 +10,13 @@ const NEVER_RETRY_REASONS = new Set([
 	"screen-locked",
 	"app-not-approved",
 	"url-blocked",
+	"foreground-refused",
 ]);
 
 function errorMetadata(
 	payload: Record<string, unknown>,
 	message: string,
+	readOnly: boolean,
 ): {
 	readonly code: string;
 	readonly retry: Retry;
@@ -49,12 +51,32 @@ function errorMetadata(
 		reason === "token-observation-mismatch" ||
 		message.startsWith("STALE_REF:") ||
 		message.includes("observation token is missing, stale") ||
-		message.includes("not the observed control")
+		message.includes("not the observed control") ||
+		message.includes("is not part of the current observation")
 	) {
 		return {
 			code: "STALE_REF",
 			retry: "safe",
 			suggestion: "Observe the app again and use only that snapshot's refs and token.",
+		};
+	}
+	// The session refuses an unassigned call on a worker's app before it runs: nothing was read or sent.
+	if (/^app ".+" is owned by worker ".+"/.test(message)) {
+		return {
+			code: "APP_OWNED_BY_WORKER",
+			retry: "safe",
+			suggestion:
+				"Nothing was sent. Act through run_worker or manage_workers observe for the worker named, or release it first.",
+		};
+	}
+	// App resolution fails before any read or input: the app is closed (or not an app), not unusable. The generic
+	// envelope told agents "delivery status unknown" here, and they gave up on the app instead of opening it.
+	if (message.startsWith("No running app matched")) {
+		return {
+			code: "APP_NOT_RUNNING",
+			retry: "safe",
+			suggestion:
+				"Nothing was sent: no running app matched. Check list_apps, or open it with open_app (an installed app by name or bundle id), then observe it again.",
 		};
 	}
 	// The coordinator refuses these before any read or input, so nothing was sent and asking again is safe.
@@ -101,15 +123,21 @@ function errorMetadata(
 				: "Delivery is unconfirmed. Observe and verify the target before retrying.",
 		};
 	}
-	return {
-		code: "TOOL_ERROR",
-		retry: "unsafe",
-		suggestion: "Observe and verify the target before retrying; the operation's delivery status is unknown.",
-	};
+	return readOnly
+		? {
+				code: "TOOL_ERROR",
+				retry: "safe",
+				suggestion: "Nothing was sent: this tool only reads. Correct the arguments or the app state, then retry.",
+			}
+		: {
+				code: "TOOL_ERROR",
+				retry: "unsafe",
+				suggestion: "Observe and verify the target before retrying; the operation's delivery status is unknown.",
+			};
 }
 
 /** Add machine-readable failure fields without replacing legacy error, reason, or evidence fields. */
-export function normalizeToolError(result: CallToolResult): CallToolResult {
+export function normalizeToolError(result: CallToolResult, readOnly = false): CallToolResult {
 	let payload: Record<string, unknown> = {};
 	let payloadIndex = -1;
 	let message = "Tool failed without error details.";
@@ -145,7 +173,7 @@ export function normalizeToolError(result: CallToolResult): CallToolResult {
 		}
 	}
 	if (result.isError !== true && payload["observationStatus"] !== "error") return result;
-	const metadata = errorMetadata(payload, message);
+	const metadata = errorMetadata(payload, message, readOnly);
 	const content = [...result.content];
 	const text = {
 		type: "text" as const,
@@ -164,12 +192,20 @@ export function normalizeToolError(result: CallToolResult): CallToolResult {
 
 /** Wrap the protocol boundary, including SDK argument validation and unknown-tool errors. */
 export function installToolErrorEnvelope(server: McpServer): void {
+	// Tools registered as read-only cannot have sent input, so their generic failures are safe to retry.
+	const readOnlyTools = new Set<string>();
+	const register = server.registerTool.bind(server);
+	server.registerTool = (name, config, callback) => {
+		if (config.annotations?.readOnlyHint === true) readOnlyTools.add(name);
+		return register(name, config, callback);
+	};
 	const original = server.server.setRequestHandler.bind(server.server);
 	server.server.setRequestHandler = (schema, handler) =>
 		original(schema, async (request, extra) => {
 			const result = await handler(request, extra);
 			if (request.method !== "tools/call") return result;
 			const parsed = CallToolResultSchema.safeParse(result);
-			return parsed.success ? { ...result, ...normalizeToolError(parsed.data) } : result;
+			const readOnly = readOnlyTools.has(String(request.params["name"]));
+			return parsed.success ? { ...result, ...normalizeToolError(parsed.data, readOnly) } : result;
 		});
 }

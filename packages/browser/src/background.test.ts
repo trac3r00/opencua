@@ -604,6 +604,107 @@ describe("page runtime select", () => {
 	});
 });
 
+const pairingSchema = z.object({
+	stored: z.function({ input: z.tuple([]), output: z.unknown() }),
+	nativeCalls: z.function({ input: z.tuple([]), output: z.number() }),
+	socket: z.function({ input: z.tuple([z.number()]), output: z.promise(z.number()) }),
+	fire: z.function({ input: z.tuple([z.number(), z.string(), z.unknown()]), output: z.void() }),
+	sent: z.function({ input: z.tuple([z.number()]), output: z.array(z.unknown()) }),
+});
+
+const STALE_TOKEN = "a".repeat(64);
+const FRESH_TOKEN = "b".repeat(64);
+
+async function pairingHarness() {
+	const source = await readFile(new URL("../extension/background.js", import.meta.url), "utf8");
+	// Chrome and the socket are the external boundary; the shipped worker's connect path runs unchanged.
+	const script = new Script(`
+		const pageRuntime = () => {};
+		const store = { port: 47953, token: '${STALE_TOKEN}' };
+		const sockets = [];
+		const waiters = [];
+		const changeListeners = [];
+		let nativeCalls = 0;
+		const event = { addListener() {}, removeListener() {} };
+		class WebSocket {
+			static CONNECTING = 0;
+			static OPEN = 1;
+			constructor(url) {
+				this.url = url; this.readyState = 0; this.listeners = {}; this.sent = [];
+				sockets.push(this);
+				for (const waiter of waiters.splice(0)) waiter();
+			}
+			addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); }
+			send(raw) { this.sent.push(JSON.parse(raw)); }
+			close() {}
+		}
+		const chrome = {
+			storage: {
+				local: {
+					get: async () => ({ ...store }),
+					set: async (value) => {
+						const changes = {};
+						for (const key of Object.keys(value)) changes[key] = { oldValue: store[key], newValue: value[key] };
+						Object.assign(store, value);
+						for (const listener of changeListeners) listener(changes, 'local');
+					},
+				},
+				session: { set: async () => {}, remove: async () => {} },
+				onChanged: { addListener(listener) { changeListeners.push(listener); } },
+			},
+			action: { setBadgeText: async () => {}, setTitle: async () => {} },
+			runtime: {
+				sendNativeMessage: async () => { nativeCalls++; return { port: 47953, token: '${FRESH_TOKEN}' }; },
+				onMessage: event,
+			},
+			alarms: { create() {}, onAlarm: event },
+			windows: { onRemoved: event, onFocusChanged: event, onBoundsChanged: event },
+			tabs: { onRemoved: event, onAttached: event, onUpdated: event },
+			debugger: { onEvent: event, onDetach: event },
+		};
+		${source.replace(/^import .*$/m, "")}
+		({
+			stored: () => store.token,
+			nativeCalls: () => nativeCalls,
+			socket: (index) => sockets.length > index
+				? Promise.resolve(index)
+				: new Promise((resolve) => waiters.push(() => { if (sockets.length > index) resolve(index); })),
+			fire: (index, type, value) => {
+				const ws = sockets[index];
+				ws.readyState = type === 'open' ? 1 : type === 'close' ? 3 : ws.readyState;
+				for (const listener of ws.listeners[type] ?? []) listener(value);
+			},
+			sent: (index) => sockets[index].sent,
+		})
+	`);
+	const value: unknown = script.runInNewContext({ setTimeout, clearTimeout, setInterval, clearInterval, URL });
+	return pairingSchema.parse(value);
+}
+
+describe("background worker pairing", () => {
+	it("#given a stored token the daemon no longer accepts #when it refuses the pairing #then refetches the token from the native host and reconnects with it", async () => {
+		const worker = await pairingHarness();
+		await worker.socket(0);
+		worker.fire(0, "open", {});
+		expect(worker.sent(0)).toEqual([{ token: STALE_TOKEN }]);
+		worker.fire(0, "close", { code: 1008, reason: "Invalid pairing" });
+		expect(worker.nativeCalls()).toBe(1);
+		await worker.socket(1);
+		expect(worker.stored()).toBe(FRESH_TOKEN);
+		worker.fire(1, "open", {});
+		expect(worker.sent(1)).toEqual([{ token: FRESH_TOKEN }]);
+	});
+
+	it("#given an ordinary disconnect #when the socket closes #then keeps the stored token without asking the native host", async () => {
+		const worker = await pairingHarness();
+		await worker.socket(0);
+		worker.fire(0, "open", {});
+		worker.fire(0, "close", { code: 1006, reason: "" });
+		expect(worker.nativeCalls()).toBe(0);
+		expect(worker.stored()).toBe(STALE_TOKEN);
+	});
+});
+
 describe("page runtime target ranking", () => {
 	it("#given several name matches #when finding #then ranks the exact interactive control first", async () => {
 		const result = await pageScenario(`
