@@ -232,7 +232,10 @@ describe("strict explicit observation #given no visible capture #when get_app_st
 		closeHarness = harness.close;
 		harness.computer.stateError = new Error("window missing");
 
-		const observation = await harness.client.callTool({ name: "get_app_state", arguments: { app: "Finder" } });
+		const observation = await harness.client.callTool({
+			name: "get_app_state",
+			arguments: { profile: "full", app: "Finder" },
+		});
 		const mutation = await harness.client.callTool({
 			name: "click",
 			arguments: { app: "Finder", observation_token: "invented", x: 1, y: 1 },
@@ -250,11 +253,11 @@ describe("strict explicit observation #given no visible capture #when get_app_st
 
 		const first = await harness.client.callTool({
 			name: "get_app_state",
-			arguments: { app: "Finder", diff_only: false },
+			arguments: { profile: "full", app: "Finder", diff_only: false },
 		});
 		const second = await harness.client.callTool({
 			name: "get_app_state",
-			arguments: { app: "Finder", diff_only: true },
+			arguments: { profile: "full", app: "Finder", diff_only: true },
 		});
 
 		expect(jsonPayload(first)["elements"]).toEqual(expect.any(Array));

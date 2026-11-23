@@ -265,7 +265,10 @@ describe("screen recording #given the server lacks the permission #when the agen
 		const harness = await createHarness(computer);
 		closeHarness = harness.close;
 
-		const result = await harness.client.callTool({ name: "get_app_state", arguments: { app: "Finder" } });
+		const result = await harness.client.callTool({
+			name: "get_app_state",
+			arguments: { profile: "full", app: "Finder" },
+		});
 		const payload = jsonPayload(result);
 
 		expect(result.isError).toBeFalsy();
@@ -303,7 +306,7 @@ describe("get_app_state #given an inactive app whose window is on a Space no dis
 		closeHarness = harness.close;
 
 		const payload = jsonPayload(
-			await harness.client.callTool({ name: "get_app_state", arguments: { app: "Finder" } }),
+			await harness.client.callTool({ name: "get_app_state", arguments: { profile: "full", app: "Finder" } }),
 		);
 
 		expect(payload["windowSpace"]).toBe("other");

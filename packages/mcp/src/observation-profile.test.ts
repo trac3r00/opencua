@@ -18,8 +18,11 @@ describe("#given an observation profile #when resolving defaults #then the fast 
 		});
 	});
 
-	it("leaves options untouched without a profile", () => {
-		expect(profileDefaults(undefined)).toEqual({});
+	it("keeps an observation without a profile compact: a table and no image", () => {
+		expect(profileDefaults(undefined)).toEqual({ includeScreenshot: false, elementFormat: "table" });
+	});
+
+	it("leaves options untouched for the full profile", () => {
 		expect(profileDefaults("full")).toEqual({});
 	});
 });

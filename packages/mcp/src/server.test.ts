@@ -84,7 +84,7 @@ describe("strict observations #given an approved app #when state is requested #t
 
 		const result = await harness.client.callTool({
 			name: "get_app_state",
-			arguments: { app: "Finder", diff_only: true },
+			arguments: { profile: "full", app: "Finder", diff_only: true },
 		});
 		const payload = jsonPayload(result);
 
@@ -107,7 +107,10 @@ describe("strict observations #given an approved app #when state is requested #t
 		closeHarness = harness.close;
 		harness.computer.stateError = new Error("target window missing");
 
-		const observation = await harness.client.callTool({ name: "get_app_state", arguments: { app: "Finder" } });
+		const observation = await harness.client.callTool({
+			name: "get_app_state",
+			arguments: { profile: "full", app: "Finder" },
+		});
 		const mutation = await harness.client.callTool({
 			name: "click",
 			arguments: { app: "Finder", observation_token: "unobserved", element_index: "9" },

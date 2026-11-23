@@ -27,7 +27,7 @@ describe("capture-only observation #given a caller that already holds the tree #
 
 		const captureOnly = await harness.client.callTool({
 			name: "get_app_state",
-			arguments: { app: "Finder", include_accessibility_tree: false },
+			arguments: { profile: "full", app: "Finder", include_accessibility_tree: false },
 		});
 		const payload = jsonPayload(captureOnly);
 
@@ -60,7 +60,7 @@ describe("capture-only observation #given a caller that already holds the tree #
 
 		await harness.client.callTool({
 			name: "get_app_state",
-			arguments: { app: "Finder", include_accessibility_tree: false, settle_ms: 0 },
+			arguments: { profile: "full", app: "Finder", include_accessibility_tree: false, settle_ms: 0 },
 		});
 
 		expect(harness.computer.stateOptions.at(-1)).toMatchObject({
