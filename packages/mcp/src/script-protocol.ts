@@ -32,6 +32,7 @@ export type CallMethod =
 	| "spacesDisplays"
 	| "visibleFrames"
 	| "cleanUp"
+	| "browser"
 	| "menubarObserve"
 	| "menubarPress";
 

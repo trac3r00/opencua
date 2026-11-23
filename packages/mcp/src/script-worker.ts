@@ -516,6 +516,49 @@ function makeAppHandle(target: WorkerTarget): Readonly<Record<string, unknown>> 
 	});
 }
 
+/**
+ * OpenCUA Browser from a script: each call goes to the bsk tool named, and the handle carries the latest context_id and
+ * observation_id forward, so a flow reads like plain code and only what the script returns reaches the agent.
+ */
+function makeBrowserHandle(options: unknown): Readonly<Record<string, unknown>> {
+	const scopeOption = pick(options, "scope");
+	const scope = typeof scopeOption === "string" && scopeOption !== "" ? scopeOption : "opencua";
+	let context: string | undefined;
+	let observation: string | undefined;
+	const remember = (result: unknown): unknown => {
+		const nextContext = pick(result, "context_id") ?? pick(pick(result, "post"), "context_id");
+		const nextObservation = pick(result, "observation_id") ?? pick(pick(result, "post"), "observation_id");
+		if (typeof nextContext === "string") context = nextContext;
+		if (typeof nextObservation === "string") observation = nextObservation;
+		return result;
+	};
+	const send = async (tool: string, args: Record<string, unknown>): Promise<unknown> =>
+		remember(await call("browser", undefined, [tool, args]));
+	const guarded = (args: Record<string, unknown>) =>
+		defined({ ...args, context: args["context"] ?? context, observation: args["observation"] ?? observation, scope });
+	const record = (value: unknown): Record<string, unknown> => (isRecord(value) ? value : {});
+	return Object.freeze({
+		open: (url: unknown, extra?: unknown) => send("bsk_session", { ...record(extra), action: "open", url, scope }),
+		sync: (extra?: unknown) => send("bsk_session", { ...record(extra), action: "sync", scope }),
+		stop: () => send("bsk_session", { action: "stop", scope }),
+		act: (action: unknown, params?: unknown, extra?: unknown) =>
+			send("bsk_interact", guarded({ ...record(extra), action, params: record(params) })),
+		plan: (steps: unknown, extra?: unknown) => send("bsk_plan", guarded({ ...record(extra), steps })),
+		read: (fields: unknown, extra?: unknown) =>
+			send("bsk_inspect", defined({ ...record(extra), action: "read", read_fields: fields, context, scope })),
+		inspect: (action: unknown, extra?: unknown) => send("bsk_inspect", { ...record(extra), action, scope }),
+		page: (action: unknown, extra?: unknown) => send("bsk_page", { ...record(extra), action, scope }),
+		tabs: (action: unknown, extra?: unknown) =>
+			send("bsk_tabs", defined({ ...record(extra), action, caller_scope: scope, context })),
+		help: (prompt: unknown, extra?: unknown) =>
+			send("bsk_assist", { ...record(extra), action: "request_help", prompt, scope }),
+		call: (tool: unknown, args?: unknown) => send(String(tool), { scope, ...record(args) }),
+		get context() {
+			return context;
+		},
+	});
+}
+
 const apple = Object.freeze({
 	app: (name: unknown, options?: unknown) => {
 		if (typeof name !== "string" || name === "") {
@@ -533,6 +576,7 @@ const apple = Object.freeze({
 	},
 	steps: stepBuilders,
 	arrange,
+	browser: (options?: unknown) => makeBrowserHandle(options),
 	cleanUp: (options?: unknown) => {
 		const keep = pick(options, "keep");
 		if (keep !== undefined && (!Array.isArray(keep) || !keep.every((entry) => typeof entry === "string"))) {

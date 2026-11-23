@@ -13,6 +13,7 @@ import {
 import type { DockAction, DockSnapshot, ElementQuery, GuardedComputerInterface, TopLevelWindow } from "@opencua/core";
 import { z } from "zod/v4";
 import type { AppleScriptGuardSession } from "./applescript-session.js";
+import { BROWSER_TOOLS, BrowserCallError, type BrowserCaller, bskBrowserCaller, resolveBsk } from "./browser-bridge.js";
 import { type CleanupDeps, cleanupLedger, nativeCleanupDeps } from "./cleanup-ledger.js";
 import type { DockGuardSession } from "./dock-session.js";
 import type { ExtrasGuardSession } from "./extras-session.js";
@@ -80,6 +81,28 @@ function observeOptions(options: unknown): unknown {
 
 let visibleFramesSource: () => readonly ScreenFrames[] | undefined = visibleScreenFrames;
 let cleanupDepsSource: () => CleanupDeps = () => nativeCleanupDeps;
+let browserCaller: BrowserCaller | undefined;
+let browserCallerSource: () => BrowserCaller | undefined = () => {
+	if (browserCaller === undefined) {
+		const binary = resolveBsk();
+		if (binary !== undefined) browserCaller = bskBrowserCaller(binary);
+	}
+	return browserCaller;
+};
+
+/** Test seam for where apple.browser() calls go (null: not installed); production starts `bsk mcp` on first use. */
+export function setBrowserCallerForTesting(caller: BrowserCaller | null | undefined): void {
+	const production = browserCallerSource;
+	browserCallerSource = caller === undefined ? production : () => caller ?? undefined;
+	restoreBrowserCaller = () => {
+		browserCallerSource = production;
+	};
+}
+let restoreBrowserCaller = (): void => undefined;
+
+export function restoreBrowserCallerForTesting(): void {
+	restoreBrowserCaller();
+}
 
 /** Test seam for what cleanUp quits and restores through; production uses the macOS host. */
 export function setCleanupDepsForTesting(deps: CleanupDeps | undefined): void {
@@ -105,11 +128,11 @@ const app=apple.app("Finder",{window:"title or id"}); await apple.apps(); await 
 app.observe(options); app.find(query); app.click(target|{x,y},options); app.setValue(target,value); app.type(text); app.press(keys); app.selectText(target,text,options); app.secondaryAction(target,action); app.menu(path); app.scroll(target,direction,pages); app.drag(from,to,options).
 Targets are observed ids or unique queries {role,label,label_contains,value_contains,text,index}. IDs/coordinates need observe/find first; queries and keyboard/menu actions observe themselves. Scroll modifiers are refused.
 app.waitFor(target|{window_title},options); app.verify(checks,options); app.step(step); app.batch(steps,options); app.chain(steps) (fast; batch verifies intermediate targets by default); app.reveal(query,findOptions) only scrolls.
-app.hands({chunks:[{keyboard:[steps],pointer:[steps],vision:{}}...]},{expect}) runs each chunk's lanes at once (type while pointing while capturing), chunk after chunk, in one call; pointer steps need observed ids or x/y.
-Find options: scrollWithin,maxPages,vision,direction. OCR needs Screen Recording and finds click targets, not AX values.
+app.hands({chunks:[{keyboard:[steps],pointer:[steps],vision:{}}...]},{expect}) runs each chunk's lanes at once, chunk after chunk; pointer steps need observed ids or x/y.
+Find options: scrollWithin,maxPages,vision,direction. OCR needs Screen Recording; finds click targets only.
 const dock=apple.dock(); await dock.observe(); dock.click/showMenu/cancel(target). Dock actions need explicit approval and attended delivery.
 apple.terminal(): run/read; approval required. apple.osascript(source,{language,args,timeoutMs}): AppleScript/JXA; screen-taking statements refused.
-apple.arrange([a,b]) tiles windows; then use Promise.all. apple.cleanUp({keep}) when done.
+apple.arrange([a,b]) tiles windows; then use Promise.all. apple.cleanUp({keep}) when done. apple.browser(): open/sync/plan/act/read/tabs/help/stop (bsk; ids carried).
 apple.spaces(): active()/displays() read-only; apple.menubar(): observe(), press(observedId), guarded.
 Refusals throw ScriptActionError; read_only forbids mutations. Timeout stops input. Background apps overlap. Returns {ok,value,log,actions}.`;
 
@@ -475,6 +498,33 @@ class ScriptRun {
 			return type === undefined ? { activeSpaceId: id } : { activeSpaceId: id, type };
 		} catch (error: unknown) {
 			return { activeSpaceId: undefined, reason: errorMessage(error) };
+		}
+	}
+
+	async browser(tool: unknown, args: unknown): Promise<unknown> {
+		if (typeof tool !== "string" || !BROWSER_TOOLS.has(tool)) {
+			throw invalid(`apple.browser calls one of: ${[...BROWSER_TOOLS].join(", ")}`);
+		}
+		const caller = browserCallerSource();
+		if (caller === undefined) {
+			throw new ScriptActionError("OpenCUA Browser is not installed (no bsk binary). Run: opencua browser setup", {
+				kind: "refused",
+				refused: "browser-not-installed",
+			});
+		}
+		const startedAt = Date.now();
+		const n = this.nextAction++;
+		try {
+			const value = await caller.call(tool, isRecord(args) ? args : {});
+			this.actions.push({ n, app: "browser", kind: tool, ms: Date.now() - startedAt, status: "ok" });
+			return value;
+		} catch (error: unknown) {
+			this.actions.push({ n, app: "browser", kind: tool, ms: Date.now() - startedAt, status: "failed" });
+			this.lastFailure = this.actions.at(-1);
+			throw new ScriptActionError(errorMessage(error), {
+				kind: "failed",
+				payload: error instanceof BrowserCallError ? error.payload : undefined,
+			});
 		}
 	}
 
@@ -1270,6 +1320,8 @@ async function perform(
 			return run.visibleFrames();
 		case "cleanUp":
 			return await run.cleanUp(first);
+		case "browser":
+			return await run.browser(first, second);
 		case "menubarObserve":
 			return await run.menubarObserve();
 		case "menubarPress":

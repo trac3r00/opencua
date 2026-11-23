@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "bun:test";
 import type { Rect } from "@opencua/core";
 import { createHarness, jsonPayload } from "./protocol-client-harness.js";
 import { FakeGuardedComputer } from "./protocol-test-harness.js";
-import { setCleanupDepsForTesting, setVisibleFramesSourceForTesting } from "./script-tools.js";
+import {
+	restoreBrowserCallerForTesting,
+	setBrowserCallerForTesting,
+	setCleanupDepsForTesting,
+	setVisibleFramesSourceForTesting,
+} from "./script-tools.js";
 import { keySequenceEntries } from "./tool-schemas.js";
 
 let closeHarness: (() => Promise<void>) | undefined;
@@ -10,6 +15,7 @@ let closeHarness: (() => Promise<void>) | undefined;
 afterEach(async () => {
 	setVisibleFramesSourceForTesting(undefined);
 	setCleanupDepsForTesting(undefined);
+	restoreBrowserCallerForTesting();
 	if (closeHarness !== undefined) {
 		await closeHarness();
 		closeHarness = undefined;
@@ -229,5 +235,52 @@ describe("run_script #given two app handles #when apple.arrange puts them side b
 
 		expect(payload["ok"]).toBe(false);
 		expect(String(payload["error"])).toContain("handles from apple.app");
+	});
+});
+
+describe("run_script #given OpenCUA Browser #when a script drives a page through apple.browser #then one call carries the whole flow", () => {
+	it("passes the context from each answer to the next call and returns only what the script keeps", async () => {
+		const calls: { readonly tool: string; readonly args: Record<string, unknown> }[] = [];
+		setBrowserCallerForTesting({
+			async call(tool, args) {
+				calls.push({ tool, args });
+				if (tool === "bsk_session")
+					return {
+						session_id: "s1",
+						context_id: "ctx-1",
+						observation_id: "obs-1",
+						observation: { text: "textbox Name [ref=@e3]" },
+					};
+				if (tool === "bsk_plan") return { completed: 2, post: { context_id: "ctx-2", observation_id: "obs-2" } };
+				return { fields: { title: "Thanks, Ada" } };
+			},
+			async close() {},
+		});
+
+		const { payload } = await runScript(`
+			const b = apple.browser();
+			const page = await b.open("https://example.test/form");
+			const ref = page.observation.text.match(/@e\\d+/)[0];
+			await b.plan([{ action: "fill", ref, value: "Ada" }, { action: "click", ref: "@e4" }]);
+			const read = await b.read([{ key: "title", read: "text", selector: "h1" }]);
+			return read.fields.title;
+		`);
+
+		expect(payload).toMatchObject({ ok: true, value: "Thanks, Ada" });
+		expect(calls.map((entry) => entry.tool)).toEqual(["bsk_session", "bsk_plan", "bsk_inspect"]);
+		expect(calls[1]?.args).toMatchObject({ context: "ctx-1", observation: "obs-1", scope: "opencua" });
+		expect(calls[1]?.args["steps"]).toEqual([
+			{ action: "fill", ref: "@e3", value: "Ada" },
+			{ action: "click", ref: "@e4" },
+		]);
+		expect(calls[2]?.args).toMatchObject({ action: "read", context: "ctx-2" });
+	});
+
+	it("refuses with the setup command when OpenCUA Browser is not installed", async () => {
+		setBrowserCallerForTesting(null);
+		const { payload } = await runScript(`await apple.browser().call("bsk_tabs", { action: "list" });`);
+
+		expect(payload["ok"]).toBe(false);
+		expect(String(payload["error"])).toContain("opencua browser setup");
 	});
 });
