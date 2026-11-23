@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMainThread } from "node:worker_threads";
 import type { KoffiFunc } from "koffi";
+import { CaptureMaskedError } from "../capture-mask.js";
 import { koffi } from "./koffi.js";
 
 type SckBindings = {
@@ -41,6 +42,8 @@ const SCK_ERR_CAPTURE_FAILED = -3;
 const SCK_ERR_ENCODE_FAILED = -4;
 const SCK_ERR_INVALID_ARGS = -5;
 const SCK_ERR_TIMEOUT = -6;
+/** sckit_capture_window's length when it left a masked app's window uncaptured. */
+const SCK_ERR_MASKED = -7;
 const SCK_WINDOW_FORMAT_PNG = 0;
 const SCK_WINDOW_FORMAT_JPEG = 1;
 /** One main-run-loop slice while an async capture is pending; see sck_service_main_run_loop in sckit.m. */
@@ -263,6 +266,9 @@ function takeWindowBytes(
 	bytesPointer: Buffer | null,
 	byteLength: number,
 ): Buffer {
+	if (byteLength === SCK_ERR_MASKED) {
+		throw new CaptureMaskedError(windowId);
+	}
 	if (bytesPointer === null || byteLength <= 0) {
 		throw new Error(`Native ScreenCaptureKit window capture failed for window ${windowId}`);
 	}

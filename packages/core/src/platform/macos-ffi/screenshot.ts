@@ -1,5 +1,6 @@
 import type { KoffiFunc } from "koffi";
 import type { Rect } from "../../types/index.js";
+import { CaptureMaskedError, maskedCaptureWindows } from "../capture-mask.js";
 import { type CFTypeRef, cfRelease, toCFString, withCFString } from "./corefoundation.js";
 import { koffi } from "./koffi.js";
 import {
@@ -9,6 +10,8 @@ import {
 	getSckitLoadError,
 	isSckitAvailable,
 } from "./sckit.js";
+import { listWindows } from "./window-list.js";
+import { findRunningApplication } from "./workspace.js";
 
 type CGImageRef = CFTypeRef;
 type CGImageDestinationRef = CFTypeRef;
@@ -191,6 +194,51 @@ function assertWindowCaptureArguments(windowId: number, maxWidth: number, maxHei
 	}
 }
 
+const bundleIdOfPid = (pid: number): string | undefined => findRunningApplication(pid)?.bundleId;
+
+/** The screencapture fallback captures any window id it is given, so a masked app's window is refused before it runs. */
+export function assertWindowCaptureNotMasked(windowId: number): void {
+	const window = readableWindowList({ onScreenOnly: false }).find((candidate) => candidate.id === windowId);
+	if (window !== undefined && maskedCaptureWindows([window], bundleIdOfPid).length > 0) {
+		throw new CaptureMaskedError(windowId);
+	}
+}
+
+/** Masking needs to know which windows are up: when the list cannot be read, nothing is captured. */
+function readableWindowList(options?: Parameters<typeof listWindows>[0]): NonNullable<ReturnType<typeof listWindows>> {
+	const windows = listWindows(options);
+	if (windows === undefined) {
+		throw new Error(
+			"capture refused: the window list could not be read, so password manager and authentication windows could not be masked",
+		);
+	}
+	return windows;
+}
+
+/** CoreGraphics cannot leave a window out of a display image, so it captures nothing while a masked window is in the area. */
+function assertAreaHasNoMaskedWindow(areaOf: () => Rect): void {
+	const masked = maskedCaptureWindows(readableWindowList(), bundleIdOfPid);
+	if (masked.length === 0) {
+		return;
+	}
+	const area = areaOf();
+	const inside = masked.find(
+		({ bounds }) =>
+			bounds.x < area.x + area.width &&
+			area.x < bounds.x + bounds.width &&
+			bounds.y < area.y + area.height &&
+			area.y < bounds.y + bounds.height,
+	);
+	if (inside !== undefined) {
+		throw new CaptureMaskedError(inside.id);
+	}
+}
+
+function displayArea(displayId: number): Rect {
+	const bounds = CGDisplayBounds(displayId);
+	return { x: bounds.origin.x, y: bounds.origin.y, width: bounds.size.width, height: bounds.size.height };
+}
+
 function clampQuality(quality: number): number {
 	return Math.min(100, Math.max(1, Math.round(quality)));
 }
@@ -287,6 +335,7 @@ export function captureDisplayImage(
 		}
 	}
 
+	assertAreaHasNoMaskedWindow(() => displayArea(displayId));
 	let sourceImage: CGImageRef;
 	try {
 		sourceImage = openDisplayImage(displayId);
@@ -326,6 +375,7 @@ export function captureDisplayRegionImage(
 		throw new Error(`captureDisplayRegionImage requires positive dimensions, got ${targetWidth}x${targetHeight}`);
 	}
 
+	assertAreaHasNoMaskedWindow(() => region);
 	const sourceImage = openDisplayImage(displayId);
 	try {
 		const crop = computeDisplayCrop(region, CGDisplayBounds(displayId), {

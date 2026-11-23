@@ -175,3 +175,18 @@ describe("#given a window capture whose completion needs the main run loop #when
 		expect(koffiMock.sckitFunctions.sck_service_main_run_loop).toHaveBeenCalled();
 	});
 });
+
+describe("#given a window of a masked app #when ScreenCaptureKit leaves it uncaptured #then the capture reports it as masked", () => {
+	it("throws CaptureMaskedError instead of a capture failure", async () => {
+		const { sckit } = await loadCaptureModules("supported");
+		const { CaptureMaskedError } = await import("../capture-mask.js");
+		koffiMock.sckitFunctions.sckit_capture_window.async.mockImplementationOnce((...args: unknown[]) => {
+			const outLen = args[5] as [number];
+			const done = args[6] as (error: unknown, result: object | null) => void;
+			outLen[0] = -7;
+			done(null, null);
+		});
+
+		await expect(sckit.captureWindowViaSckAsync(42, 800, 600, "png", 100)).rejects.toBeInstanceOf(CaptureMaskedError);
+	});
+});

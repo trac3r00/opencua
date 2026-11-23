@@ -26,6 +26,12 @@ export type WindowTextRead =
 	| { readonly entries: readonly OcrTextEntry[] }
 	| { readonly unavailable: "screen-recording-permission" | "no-window" | "recognition-failed" };
 
+/** What a click at a point would reach, as the target app's own accessibility hit test answers it. */
+export type ElementHit =
+	| { readonly hit: "target" }
+	| { readonly hit: "covered"; readonly role: string; readonly label?: string; readonly within?: string }
+	| { readonly hit: "unknown" };
+
 export interface ComputerInterface {
 	readonly capabilities: ComputerCapabilities;
 	/**
@@ -86,6 +92,11 @@ export interface ComputerInterface {
 	elementFrame?(targetPid: number, elementIndex: number): Promise<Rect | undefined>;
 	/** Whether this current observed element belongs to a live web accessibility subtree. */
 	isWebElement?(targetPid: number, elementIndex: number): Promise<boolean>;
+	/**
+	 * What the app's own hit test finds at a screen point (global logical points), relative to an observed element:
+	 * the element or part of it, something of the app covering it (a sheet, popover or overlay), or unknown.
+	 */
+	elementHitAt?(targetPid: number, elementIndex: number, point: Point): Promise<ElementHit>;
 	/** Start the drawn cursor toward a click point ahead of the click; sends nothing to the app. */
 	aimPointer?(targetPid: number, point: Point): void;
 	/** Give the web page holding an observed control keyboard focus before a pointer click; true when moved. */

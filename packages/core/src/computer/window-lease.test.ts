@@ -1,9 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	LEASE_FILE,
+	LEASE_HOLDER_ENV,
 	type LeaseProbes,
 	MAX_AUDIT_LINE_BYTES,
 	MAX_LEASE_MS,
@@ -12,10 +23,12 @@ import {
 	currentLease,
 	findLiveLease,
 	leaseAuditPath,
+	leaseHolderFromEnvironment,
 	leaseLiveness,
 	leasedHere,
 	parseLeaseFile,
 	readLeases,
+	resolveLease,
 	withLease,
 	writeLeases,
 } from "./window-lease.js";
@@ -245,5 +258,111 @@ describe("#given the person edits the file by hand #when an entry is malformed #
 	it("refuses a lease longer than the hard maximum", () => {
 		const long = lease({ expiresAt: new Date(GRANTED + MAX_LEASE_MS + 1).toISOString() });
 		expect(parseLeaseFile(JSON.stringify({ version: 1, leases: [long] }))).toEqual([]);
+	});
+});
+
+describe("#given the server environment #when the lease holder is read", () => {
+	it("#then no variable or a blank one means leases are off", () => {
+		expect(leaseHolderFromEnvironment({})).toBeUndefined();
+		expect(leaseHolderFromEnvironment({ [LEASE_HOLDER_ENV]: "" })).toBeUndefined();
+		expect(leaseHolderFromEnvironment({ [LEASE_HOLDER_ENV]: "   " })).toBeUndefined();
+	});
+
+	it("#then a name is returned trimmed", () => {
+		expect(leaseHolderFromEnvironment({ [LEASE_HOLDER_ENV]: " claude-code " })).toBe("claude-code");
+	});
+
+	it("#then a value that is not a holder name is a configuration error, never leases off", () => {
+		expect(() => leaseHolderFromEnvironment({ [LEASE_HOLDER_ENV]: "claude\ncode" })).toThrow(LEASE_HOLDER_ENV);
+		expect(() => leaseHolderFromEnvironment({ [LEASE_HOLDER_ENV]: "x".repeat(129) })).toThrow(LEASE_HOLDER_ENV);
+		expect(leaseHolderFromEnvironment({ [LEASE_HOLDER_ENV]: "x".repeat(128) })).toBe("x".repeat(128));
+	});
+});
+
+describe("#given a holder's leases #when one tool on one window is resolved", () => {
+	const window77 = { pid: 4242, windowId: 77 };
+
+	it("#then a live whole-window lease that lists the tool is the answer", () => {
+		expect(resolveLease([lease()], "claude-code", window77, "click", probes())).toEqual({ lease: lease() });
+	});
+
+	it("#then another holder, process or window has no lease", () => {
+		for (const [holder, target] of [
+			["codex", window77],
+			["claude-code", { pid: 4243, windowId: 77 }],
+			["claude-code", { pid: 4242, windowId: 78 }],
+		] as const) {
+			expect(resolveLease([lease()], holder, target, "click", probes())).toMatchObject({ code: "lease-required" });
+		}
+	});
+
+	it("#then a lapsed lease says why: expired, or its window or process is gone", () => {
+		const late = probes({ now: GRANTED + 31 * 60 * 1000 });
+		expect(resolveLease([lease()], "claude-code", window77, "click", late)).toMatchObject({ code: "lease-expired" });
+		const reused = probes({ startTime: () => "Sat Nov  8 06:00:00 2026" });
+		expect(resolveLease([lease()], "claude-code", window77, "click", reused)).toMatchObject({
+			code: "lease-window-gone",
+		});
+		const closed = probes({ windowOwner: () => undefined });
+		expect(resolveLease([lease()], "claude-code", window77, "click", closed)).toMatchObject({
+			code: "lease-window-gone",
+		});
+	});
+
+	it("#then a tool the lease does not list is forbidden, unless another live lease on the window lists it", () => {
+		expect(resolveLease([lease()], "claude-code", window77, "drag", probes())).toMatchObject({
+			code: "lease-tool-forbidden",
+		});
+		const dragging = lease({ id: "L-2", tools: ["drag"] });
+		expect(resolveLease([lease(), dragging], "claude-code", window77, "drag", probes())).toEqual({
+			lease: dragging,
+		});
+	});
+
+	it("#then with no tool named any live lease on the window is enough", () => {
+		expect(resolveLease([lease()], "claude-code", window77, undefined, probes())).toEqual({ lease: lease() });
+	});
+
+	it("#then a lease confined to a region never stands in for the whole window", () => {
+		const confined = lease({ target: { ...lease().target, region: { x: 0, y: 0, width: 10, height: 5 } } });
+		expect(resolveLease([confined], "claude-code", window77, "click", probes())).toMatchObject({
+			code: "lease-region-exceeded",
+		});
+	});
+
+	it("#then an expired lease is passed over for a live one on the same window", () => {
+		const expired = lease({ expiresAt: new Date(GRANTED + 30_000).toISOString() });
+		const fresh = lease({ id: "L-2" });
+		expect(resolveLease([expired, fresh], "claude-code", window77, "click", probes())).toEqual({ lease: fresh });
+	});
+
+	it("#then with no window named a lease on any window of the process is enough, and none on another process", () => {
+		const scripting = lease({ tools: ["script"] });
+		expect(resolveLease([scripting], "claude-code", { pid: 4242 }, "script", probes())).toEqual({ lease: scripting });
+		expect(resolveLease([scripting], "claude-code", { pid: 4242 }, "terminal", probes())).toMatchObject({
+			code: "lease-tool-forbidden",
+		});
+		expect(resolveLease([scripting], "claude-code", { pid: 4243 }, "script", probes())).toEqual({
+			code: "lease-required",
+			detail: '"claude-code" holds no lease on any window of process 4243',
+		});
+	});
+});
+
+describe("#given a lease file this user does not solely control #when it is read #then it grants nothing", () => {
+	it("#given a file others may write #then there are no leases until it is written privately again", () => {
+		writeLeases(stateDir, [lease()]);
+		chmodSync(join(stateDir, LEASE_FILE), 0o666);
+		expect(readLeases(stateDir)).toEqual([]);
+		writeLeases(stateDir, [lease()]);
+		expect(readLeases(stateDir)).toHaveLength(1);
+	});
+
+	it("#given a symlink in the lease file's place #then the file it points at is not followed", () => {
+		writeLeases(stateDir, [lease()]);
+		const elsewhere = join(stateDir, "planted.json");
+		renameSync(join(stateDir, LEASE_FILE), elsewhere);
+		symlinkSync(elsewhere, join(stateDir, LEASE_FILE));
+		expect(readLeases(stateDir)).toEqual([]);
 	});
 });

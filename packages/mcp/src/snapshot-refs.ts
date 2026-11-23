@@ -1,8 +1,21 @@
+import { ToolFailure, type ToolFailureFields } from "@opencua/core";
 import type { ToolResult } from "./tool-result.js";
 
-export class StaleElementRef extends Error {
+const STALE_REF: ToolFailureFields = {
+	code: "STALE_REF",
+	delivery: "not_sent",
+	retry: "safe",
+	hint: "Observe the app again and use only that snapshot's refs and token.",
+};
+
+/** A ref or token that no longer names the current observation, caught before anything is sent. */
+export function staleRef(message: string): ToolFailure {
+	return new ToolFailure(message, STALE_REF);
+}
+
+export class StaleElementRef extends ToolFailure {
 	constructor() {
-		super("STALE_REF: the element ref does not belong to the supplied observation_token; observe again.");
+		super("STALE_REF: the element ref does not belong to the supplied observation_token; observe again.", STALE_REF);
 		this.name = "StaleElementRef";
 	}
 }

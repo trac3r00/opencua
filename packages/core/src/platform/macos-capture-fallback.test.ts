@@ -10,6 +10,7 @@ type ExecFileMock = (
 ) => void;
 
 const captureMocks = vi.hoisted(() => ({
+	assertWindowCaptureNotMasked: vi.fn(),
 	captureWindowImage: vi.fn(),
 	execFile: vi.fn<ExecFileMock>(),
 }));
@@ -19,6 +20,7 @@ vi.mock("node:child_process", () => ({
 }));
 
 vi.mock("./macos-ffi/screenshot.js", () => ({
+	assertWindowCaptureNotMasked: captureMocks.assertWindowCaptureNotMasked,
 	captureDisplayImage: vi.fn(),
 	captureDisplayRegionImage: vi.fn(),
 	captureWindowImage: captureMocks.captureWindowImage,
@@ -30,6 +32,7 @@ vi.mock("./macos-ffi/screenshot.js", () => ({
 }));
 
 const { captureMacOSScreenshot, classifyCaptureFailure } = await import("./macos.js");
+const { CaptureMaskedError } = await import("./capture-mask.js");
 
 function createFakePng(): Buffer {
 	const data = Buffer.alloc(24);
@@ -40,6 +43,7 @@ function createFakePng(): Buffer {
 }
 
 beforeEach(() => {
+	captureMocks.assertWindowCaptureNotMasked.mockReset();
 	captureMocks.captureWindowImage.mockReset();
 	captureMocks.execFile.mockReset();
 });
@@ -123,5 +127,34 @@ describe("#given unknown native capture failure #when capturing a window #then o
 		await expect(captureMacOSScreenshot({ width: 1920, height: 1080 }, 42)).resolves.toBe(image);
 		expect(captureMocks.captureWindowImage).toHaveBeenCalledTimes(1);
 		expect(captureMocks.execFile).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("#given a window of a masked app #when it is captured #then no path returns its pixels", () => {
+	it("#when ScreenCaptureKit masks it #then the error stands and screencapture never runs", async () => {
+		captureMocks.captureWindowImage.mockImplementation(() => {
+			throw new CaptureMaskedError(42);
+		});
+
+		await expect(captureMacOSScreenshot({ width: 1920, height: 1080 }, 42)).rejects.toBeInstanceOf(
+			CaptureMaskedError,
+		);
+		expect(captureMocks.captureWindowImage).toHaveBeenCalledTimes(1);
+		expect(captureMocks.execFile).not.toHaveBeenCalled();
+	});
+
+	it("#when ScreenCaptureKit is unavailable #then the screencapture fallback refuses it", async () => {
+		captureMocks.captureWindowImage.mockImplementationOnce(() => {
+			throw new Error("libsckit.dylib not found (looked in /native/libsckit.dylib)");
+		});
+		captureMocks.assertWindowCaptureNotMasked.mockImplementationOnce((windowId: number) => {
+			throw new CaptureMaskedError(windowId);
+		});
+
+		await expect(captureMacOSScreenshot({ width: 1920, height: 1080 }, 42)).rejects.toBeInstanceOf(
+			CaptureMaskedError,
+		);
+		expect(captureMocks.assertWindowCaptureNotMasked).toHaveBeenCalledWith(42);
+		expect(captureMocks.execFile).not.toHaveBeenCalled();
 	});
 });

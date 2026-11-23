@@ -215,8 +215,11 @@ function postScroll(
 	if (targetWindow === undefined) {
 		throw new Error("targeted scroll input requires a target window from get_app_state or a prior pointer action");
 	}
+	// One wheel event, one delivery. Posting it to the pid and again to the window owner's PSN reached the same
+	// process twice, so an app that takes both scrolled double (the keyboard doubled "abc" to "aabbcc" the same
+	// way). The per-pid SkyLight post, stamped above with the window and its window-local point, is the route AppKit
+	// views and Chromium/Electron windows both take a background wheel through.
 	postSkyLightEventToPid(targetPid, event);
-	postCoreGraphicsEventToWindowOwner(targetWindow, event);
 }
 
 /** Aim a wheel event at a point instead of wherever the real cursor happens to be. */

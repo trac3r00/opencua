@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { denyHostInteraction } from "../computer/host-interaction-policy.js";
 import { extractAccessibilityTree } from "./macos-ffi/accessibility.js";
 import { findRunningApplication } from "./macos-ffi/workspace.js";
 
@@ -104,7 +103,6 @@ export function createTerminalSession(access: TerminalAccess = nativeAccess) {
 		},
 
 		async runCommand(options: TerminalRunOptions): Promise<number | undefined> {
-			if (access === nativeAccess) denyHostInteraction("host-window");
 			this.findTerminal();
 			// On macOS 26 builds Terminal never answers a `do script` Apple Event, so the dispatch must not
 			// wait for its reply; the window is resolved afterwards with reply-capable plain queries.

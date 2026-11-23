@@ -166,7 +166,12 @@ export interface AppState {
 	 * Why an observation that asked for an image carries none: this process lacks the Screen Recording
 	 * permission and capturing anyway would raise macOS's permission prompt over the person's work.
 	 */
-	screenshotUnavailable?: "screen-recording-permission" | "window-capture-failed";
+	screenshotUnavailable?: "screen-recording-permission" | "window-capture-failed" | "capture-masked";
+	/**
+	 * The window belongs to a password manager or an authentication prompt: captures mask it (no image), while its
+	 * elements and input work as usual. See MASKED_CAPTURE_BUNDLE_IDS.
+	 */
+	masked?: true;
 	/**
 	 * Dialogs macOS itself has on screen (a permission request, a password sheet, a system alert).
 	 * They belong to no app being driven, can block input or capture, and only the person can answer.

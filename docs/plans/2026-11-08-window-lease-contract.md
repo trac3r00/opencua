@@ -1,5 +1,37 @@
 # Window lease contract (2026-11-08)
 
+> Status 2026-11-23: superseded in part. Host control is allowed by default and there is no
+> human-presence (Touch ID / password) step. Leases are opt-in: a server started with
+> `OPENCUA_LEASE_HOLDER=<name>` sends input only to windows leased to that holder
+> (`packages/mcp/src/lease-gate.ts`, wired in `native-policy.ts`); leases are granted with
+> `opencua lease grant|list|revoke` (`packages/cli/src/lease-commands.ts`). Leases gate input on
+> whole windows only (no capture or region leases). Grantable tools: `click, drag, scroll, key, type,
+> set_value, script, terminal`. The routes that reach a whole app rather than one window take an
+> app-wide check (`appLeaseGate` in `lease-gate.ts`, wired in `mcp-server.ts`): a live whole-window
+> lease on any window of the app that lists the tool allows them.
+>
+> - AppleScript (`run_applescript`, `apple.osascript`): every app the script names needs a `script`
+>   lease; a script that names no app, computes a name or names an app that is not running is
+>   refused. A script drives the app's scripting objects, not one window, so the lease is app-wide.
+>   System Events has no window to lease, so scripts addressed to it are refused.
+> - JXA is refused (`jxa-refused`) whenever `OPENCUA_ALLOWED_BUNDLE_IDS` or a lease holder is set:
+>   its ObjC bridge (`ObjC`, `$`, `Ref`, `Library`) is a set of globals a script cannot delete, so a
+>   computed name gets past every text check. AppleScript stays available.
+> - Terminal (`apple.terminal().run`): a `terminal` lease on Terminal.app. The command opens a window
+>   of its own, so any Terminal window's lease allows it. `read` is observation and is not gated.
+> - Dock: pressing an item of an app's Dock menu (Quit, Hide, New Window, Options) needs a `click`
+>   lease on that app; the app is the one whose menu this session opened with `showMenu`, and a menu
+>   it did not open is refused. Pressing a Dock item (launch or bring forward) and opening or
+>   cancelling a menu need none: they send no input to a window, as `open_app` does not.
+> - Menu extras: not gated. A press opens a Control Center panel; every control inside it is input
+>   to Control Center through the window computer, which the window lease gate already refuses.
+> - `open_app`: not gated. Launching sends no input to an existing window, and every input to the
+>   launched app still needs its window lease.
+>
+> Refusals carry `LEASE_REQUIRED` (or the lapse code), retry never, escalation human, and the exact
+> `opencua lease grant` command; nothing is sent. Without a holder every route acts as before.
+> Sections below describe the original presence-proof design.
+
 Scope: advisory design for per-window and per-region input leases on the macOS host. No source
 changes were made for this document. Every `file:line` below was read on commit c13b0f4 (origin/main);
 paths are relative to the repo root and `packages/core/src/platform/` is shortened to `platform/`,

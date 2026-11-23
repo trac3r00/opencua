@@ -32,12 +32,24 @@ vi.mock("./macos-ffi/skylight.js", () => ({
 	postMouseEventRecordToWindow: native.record,
 	restoreFrontProcessNoWindows: vi.fn(),
 }));
-vi.mock("./macos-ffi/pasteboard.js", () => ({ readClipboard: vi.fn(), writeClipboard: vi.fn() }));
+const clipboard = vi.hoisted(() => ({
+	read: vi.fn<() => { readonly text?: string }>(() => ({})),
+	write: vi.fn<(input: { readonly type: "text"; readonly text: string }) => void>(),
+}));
+vi.mock("./macos-ffi/pasteboard.js", () => ({ readClipboard: clipboard.read, writeClipboard: clipboard.write }));
 
 const { InputInterrupted, runInInputScope } = await import("../computer/input-scope.js");
+const { HostInteractionDenied } = await import("../computer/host-interaction-policy.js");
 
-const { longPressMirroring, pressMirroringCombo, scrollMirroring, swipeMirroring, tapMirroring, typeIntoMirroring } =
-	await import("./ios-input.js");
+const {
+	IPhoneTouchNeedsAttendedDelivery,
+	longPressMirroring,
+	pressMirroringCombo,
+	scrollMirroring,
+	swipeMirroring,
+	tapMirroring,
+	typeIntoMirroring,
+} = await import("./ios-input.js");
 
 const target = {
 	pid: 1,
@@ -52,6 +64,7 @@ beforeEach(() => {
 	native.sleep.mockResolvedValue(undefined);
 	native.record.mockReturnValue(true);
 	native.focus.mockReturnValue(null);
+	clipboard.read.mockReturnValue({});
 });
 afterEach(() => vi.clearAllMocks());
 
@@ -170,5 +183,46 @@ describe("phone native input interruption", () => {
 			[0, true],
 			[0, false],
 		]);
+	});
+});
+
+describe("#given the person's text on the clipboard #when a paste into the phone is refused", () => {
+	it("#then the person's text is put back", async () => {
+		let board: string | undefined = "mine";
+		clipboard.read.mockImplementation(() => (board === undefined ? {} : { text: board }));
+		clipboard.write.mockImplementation((input) => {
+			board = input.text;
+		});
+		native.key.mockImplementation(() => {
+			throw new HostInteractionDenied("host-focus");
+		});
+
+		await expect(typeIntoMirroring(target, "agent text")).rejects.toThrow();
+
+		expect(clipboard.write.mock.calls.map(([input]) => input.text)).toEqual(["agent text", "mine"]);
+		expect(board).toBe("mine");
+	});
+});
+
+describe("#given background delivery #when the phone is tapped #then the refusal names the phone and what to do", () => {
+	it.each([
+		{ name: "tap", action: async () => tapMirroring(target, at) },
+		{ name: "long press", action: async () => longPressMirroring(target, at, 10) },
+		{ name: "swipe", action: async () => swipeMirroring(target, { from: at, to: { x: 300, y: 400 }, steps: 2 }) },
+	])("refuses $name as HOST_INTERACTION_FORBIDDEN with the iPhone hint and sends nothing", async ({ action }) => {
+		native.record.mockImplementation(() => {
+			throw new HostInteractionDenied("host-focus");
+		});
+
+		const refusal = await action().then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+
+		expect(refusal).toBeInstanceOf(IPhoneTouchNeedsAttendedDelivery);
+		expect(refusal).toMatchObject({ code: "HOST_INTERACTION_FORBIDDEN", operation: "host-focus" });
+		expect(String(refusal)).toContain("OPENCUA_DELIVERY=attended");
+		expect(native.mouse).not.toHaveBeenCalled();
+		expect(native.warp).not.toHaveBeenCalled();
 	});
 });

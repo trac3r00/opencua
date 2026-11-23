@@ -1,15 +1,31 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { type Socket, connect } from "node:net";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MOUTH_SCRIPT } from "../surface/mouth.js";
+import { processExecutablePath } from "./macos-ffi/process-info.js";
+import { trustedStateFile } from "./state-file.js";
 import { resolveStateDir } from "./stop-switch.js";
 
 /**
- * A window opencua launched itself on the person's desktop. It is the only kind of host window opencua may send
- * input to or capture: the person's own apps stay refused. Ownership is the launched pid plus its process start
- * time, so a later process that reuses the pid is not treated as owned.
+ * A window opencua launched itself on the person's desktop. Being owned changes how opencua treats a process: its
+ * pointer input goes to the surface's own socket, it skips the focus lease, background activation and the shared
+ * input lock, workers may share it, its audio may be heard and it may be closed. None of that may reach one of the
+ * person's own apps, so the registry file only nominates a process: it counts as owned when it is also still the
+ * process that was launched (same start time, so a reused pid does not pass) and the file it executes is this
+ * installation's surface binary. Any process running as the person can write the registry; none can make another
+ * app's process execute that binary.
  */
 export interface OwnedSurface {
 	readonly pid: number;
@@ -21,6 +37,8 @@ export interface OwnedSurface {
 export interface OwnedSurfaceOptions {
 	readonly stateDir?: string;
 	readonly startTime?: (pid: number) => string | undefined;
+	/** The file a pid is executing, as the kernel reports it; undefined when it cannot say. */
+	readonly executablePath?: (pid: number) => string | undefined;
 }
 
 export interface OpenSurfaceRequest {
@@ -60,7 +78,8 @@ const CURSOR_COLORS = [
 	"#ffffff",
 ];
 
-export function processStartTime(pid: number): string | undefined {
+/** When `pid` started as `ps -o lstart=` prints it; surface-listen reads the registry's `startedAt` as this date. */
+function launchTime(pid: number): string | undefined {
 	try {
 		const out = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim();
 		return out.length > 0 ? out : undefined;
@@ -84,9 +103,12 @@ function isSurface(value: unknown): value is OwnedSurface {
 	);
 }
 
+/** The surfaces the registry names; none when the file is not this user's alone to write (see trustedStateFile). */
 export function readOwnedSurfaces(options: OwnedSurfaceOptions = {}): OwnedSurface[] {
+	const path = registryPath(options);
+	if (trustedStateFile(path) === undefined) return [];
 	try {
-		const parsed: unknown = JSON.parse(readFileSync(registryPath(options), "utf8"));
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
 		const surfaces = typeof parsed === "object" && parsed !== null ? Reflect.get(parsed, "surfaces") : undefined;
 		return Array.isArray(surfaces) ? surfaces.filter(isSurface) : [];
 	} catch {
@@ -103,30 +125,50 @@ function writeOwnedSurfaces(surfaces: readonly OwnedSurface[], options: OwnedSur
 }
 
 const verified = new Map<number, { readonly owned: boolean; readonly at: number }>();
-let cachedRegistry: { readonly path: string; readonly mtimeMs: number; readonly surfaces: OwnedSurface[] } | undefined;
+let cachedRegistry: { readonly path: string; readonly stamp: string; readonly surfaces: OwnedSurface[] } | undefined;
 
+/**
+ * The registry, read again whenever the file is replaced or its size, contents time, owner or mode changes (the
+ * change time catches a chmod or chown that leaves the contents alone).
+ */
 function currentRegistry(options: OwnedSurfaceOptions): OwnedSurface[] {
 	const path = registryPath(options);
-	let mtimeMs: number;
-	try {
-		mtimeMs = statSync(path).mtimeMs;
-	} catch {
+	const stat = trustedStateFile(path);
+	if (stat === undefined) {
+		cachedRegistry = undefined;
+		verified.clear();
 		return [];
 	}
-	if (cachedRegistry?.path !== path || cachedRegistry.mtimeMs !== mtimeMs) {
-		cachedRegistry = { path, mtimeMs, surfaces: readOwnedSurfaces(options) };
+	const stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+	if (cachedRegistry?.path !== path || cachedRegistry.stamp !== stamp) {
+		cachedRegistry = { path, stamp, surfaces: readOwnedSurfaces(options) };
 		verified.clear();
 	}
 	return cachedRegistry.surfaces;
 }
 
-/** Whether `pid` is a window process opencua launched and still running as the same process. */
+/** `path` with every link in it resolved, or as given when it names nothing. */
+function resolved(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
+}
+
+/** Whether the file `pid` executes is this installation's surface binary. */
+function runsSurfaceBinary(pid: number, options: OwnedSurfaceOptions): boolean {
+	const executable = (options.executablePath ?? processExecutablePath)(pid);
+	return executable !== undefined && resolved(executable) === resolved(surfaceBinaryPath());
+}
+
+/** Whether `pid` is a window process opencua launched, still running as the same process and as the surface binary. */
 export function isOwnedSurfacePid(pid: number, options: OwnedSurfaceOptions = {}, now = Date.now()): boolean {
 	const entry = currentRegistry(options).find((surface) => surface.pid === pid);
 	if (entry === undefined) return false;
 	const cached = verified.get(pid);
 	if (cached !== undefined && now - cached.at < RECHECK_MS) return cached.owned;
-	const owned = (options.startTime ?? processStartTime)(pid) === entry.startedAt;
+	const owned = (options.startTime ?? launchTime)(pid) === entry.startedAt && runsSurfaceBinary(pid, options);
 	verified.set(pid, { owned, at: now });
 	return owned;
 }
@@ -136,10 +178,10 @@ export function registerOwnedSurface(
 	surface: Omit<OwnedSurface, "startedAt">,
 	options: OwnedSurfaceOptions = {},
 ): OwnedSurface {
-	const startedAt = (options.startTime ?? processStartTime)(surface.pid);
+	const startedAt = (options.startTime ?? launchTime)(surface.pid);
 	if (startedAt === undefined) throw new Error(`owned surface process ${surface.pid} is not running`);
 	const live = readOwnedSurfaces(options).filter(
-		(entry) => entry.pid !== surface.pid && (options.startTime ?? processStartTime)(entry.pid) === entry.startedAt,
+		(entry) => entry.pid !== surface.pid && (options.startTime ?? launchTime)(entry.pid) === entry.startedAt,
 	);
 	const registered: OwnedSurface = { ...surface, startedAt };
 	writeOwnedSurfaces([...live, registered], options);
@@ -154,9 +196,18 @@ export function unregisterOwnedSurface(pid: number, options: OwnedSurfaceOptions
 	verified.delete(pid);
 }
 
+let surfaceBinaryForTesting: string | undefined;
+
 /** The opencua-surface binary built next to the other native helpers. */
 export function surfaceBinaryPath(): string {
-	return new URL("../../native/opencua-surface", import.meta.url).pathname;
+	// fileURLToPath, not .pathname: the kernel reports an install path with spaces unescaped.
+	return surfaceBinaryForTesting ?? fileURLToPath(new URL("../../native/opencua-surface", import.meta.url));
+}
+
+/** Names the file that counts as the surface binary, so a test process can stand in for a surface; undefined restores it. */
+export function setSurfaceBinaryForTesting(path: string | undefined): void {
+	surfaceBinaryForTesting = path;
+	verified.clear();
 }
 
 /** The built-in drawing page where every pointer keeps its own color and brush size. */

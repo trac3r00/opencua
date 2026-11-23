@@ -14,7 +14,7 @@ import {
 	withoutMenuBarStrips,
 } from "./macos-open-windows.js";
 import type { MacOSWindowInfo } from "./macos-window-target.js";
-import { registerOwnedSurface } from "./owned-surfaces.js";
+import { registerOwnedSurface, setSurfaceBinaryForTesting } from "./owned-surfaces.js";
 
 function listed(partial: Partial<ListedWindow> & { id: number }): ListedWindow {
 	return {
@@ -209,6 +209,8 @@ describe("#given a window one level below normal windows #when it is mapped for 
 		const stateDir = realpathSync(mkdtempSync(join(tmpdir(), "opencua-owned-window-")));
 		const previous = process.env["OPENCUA_STATE_DIR"];
 		process.env["OPENCUA_STATE_DIR"] = stateDir;
+		// This test process stands in for the surface, so the file it executes stands in for the surface binary.
+		setSurfaceBinaryForTesting(process.execPath);
 		try {
 			registerOwnedSurface({ pid: process.pid, title: "canvas", url: "http://127.0.0.1/" }, { stateDir });
 
@@ -219,6 +221,7 @@ describe("#given a window one level below normal windows #when it is mapped for 
 
 			expect(windows.map((entry) => entry.id)).toEqual([7]);
 		} finally {
+			setSurfaceBinaryForTesting(undefined);
 			if (previous === undefined) Reflect.deleteProperty(process.env, "OPENCUA_STATE_DIR");
 			else process.env["OPENCUA_STATE_DIR"] = previous;
 			rmSync(stateDir, { recursive: true, force: true });

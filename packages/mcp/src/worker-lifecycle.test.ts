@@ -24,7 +24,7 @@ afterEach(async () => {
 const FINDER_PID = 1234;
 
 function registryFor(pid: number): WorkerRegistry {
-	return fileWorkerRegistry(directory, (candidate) => !dead.has(candidate), pid);
+	return fileWorkerRegistry(directory, (candidate) => (dead.has(candidate) ? undefined : "boot"), pid);
 }
 
 function processAt(pid: number): {

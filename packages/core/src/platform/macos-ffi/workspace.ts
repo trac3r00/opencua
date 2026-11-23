@@ -3,6 +3,7 @@ import { requireAttendedHostDelivery } from "../../computer/host-interaction-pol
 import { isDiscoverableApplication } from "../macos-call-helpers.js";
 import { OWNED_SURFACE_BUNDLE_ID, isOwnedSurfacePid } from "../owned-surfaces.js";
 import { koffi } from "./koffi.js";
+import { processStartTime } from "./process-info.js";
 
 const appKit = koffi.load("/System/Library/Frameworks/AppKit.framework/AppKit");
 const objc = koffi.load("/usr/lib/libobjc.A.dylib");
@@ -268,27 +269,8 @@ interface ProcessIdentity {
 	readonly path: string;
 }
 
-const libSystem = koffi.load("/usr/lib/libSystem.B.dylib");
-const procPidInfo = libSystem.func(
-	"int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer, int buffersize)",
-) as KoffiFunc<(pid: number, flavor: number, argument: number, buffer: Buffer, bufferSize: number) => number>;
-const PROC_PIDTBSDINFO = 3;
-/** sizeof(struct proc_bsdinfo); pbi_start_tvsec and pbi_start_tvusec are its last two uint64 fields. */
-const PROC_BSD_INFO_BYTES = 136;
-const PROC_START_SECONDS_OFFSET = 120;
-const PROC_START_MICROSECONDS_OFFSET = 128;
-
 /** Bundle identity of each listed process, keyed by pid and checked against the process's start time. */
 const processIdentities = new Map<number, ProcessIdentity>();
-
-/** When `pid` started, to the microsecond; undefined when the process is gone. A reused pid starts at another time. */
-function processStartTime(pid: number): string | undefined {
-	const info = Buffer.alloc(PROC_BSD_INFO_BYTES);
-	if (procPidInfo(pid, PROC_PIDTBSDINFO, 0, info, PROC_BSD_INFO_BYTES) !== PROC_BSD_INFO_BYTES) {
-		return undefined;
-	}
-	return `${info.readBigUInt64LE(PROC_START_SECONDS_OFFSET)}.${info.readBigUInt64LE(PROC_START_MICROSECONDS_OFFSET)}`;
-}
 
 /**
  * A process's bundle identifier and bundle path. Both are fixed for the life of the process, yet NSWorkspace

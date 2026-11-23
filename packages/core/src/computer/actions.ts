@@ -4,6 +4,7 @@ import type { AppStateOptions, KeyModifierName, ScrollOptions } from "../types/i
 import { currentInputScope, runInInputScope } from "./input-scope.js";
 import type { ComputerInterface } from "./interface.js";
 import { type KeyModifier, MODIFIER_ALIASES, normalizeModifiers } from "./modifiers.js";
+import { appNotRunning } from "./tool-failure.js";
 
 export { normalizeModifiers };
 
@@ -81,7 +82,7 @@ export async function resolveAppPid(computer: ComputerInterface, app: string): P
 		computer.listAppIdentities === undefined ? await computer.listApps() : await computer.listAppIdentities();
 	const match = findMatchingApp(apps, app);
 	if (match === undefined) {
-		throw new Error(`No running app matched "${app}"`);
+		throw appNotRunning(`No running app matched "${app}"`);
 	}
 	return match.pid;
 }

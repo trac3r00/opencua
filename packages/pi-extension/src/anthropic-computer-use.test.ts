@@ -2,11 +2,12 @@ import { describe, expect, it } from "bun:test";
 
 import { RecordingComputer } from "../test/support/recording-computer.js";
 import {
-	ANTHROPIC_COMPUTER_USE_BETA,
+	ANTHROPIC_COMPUTER_TOOL_20250124,
+	ANTHROPIC_COMPUTER_TOOL_20251124,
 	ANTHROPIC_NATIVE_COMPUTER_TOOL_NAME,
-	ANTHROPIC_NATIVE_COMPUTER_TOOL_TYPE,
 	ComputerUseError,
 	addAnthropicComputerUseToPayload,
+	anthropicComputerToolVersion,
 	executeNativeComputerAction,
 	supportsAnthropicNativeComputerUse,
 } from "./anthropic-computer-use.js";
@@ -74,6 +75,32 @@ describe("#given a documented computer-use model #when checking support #then re
 	});
 });
 
+describe("#given a documented computer-use model #when picking the tool version #then it gets the one it accepts", () => {
+	it.each(["claude-opus-4-5-20251101", "claude-opus-4-6", "claude-opus-4.7", "claude-sonnet-4-6"])(
+		"gives %s computer_20251124",
+		(modelId) => {
+			expect(anthropicComputerToolVersion(modelId)).toEqual(ANTHROPIC_COMPUTER_TOOL_20251124);
+		},
+	);
+
+	it.each(["claude-sonnet-4-5", "claude-opus-4-1-20250805", "claude-opus-4-20250514", "claude-haiku-4-5"])(
+		"gives %s computer_20250124",
+		(modelId) => {
+			expect(anthropicComputerToolVersion(modelId)).toEqual(ANTHROPIC_COMPUTER_TOOL_20250124);
+		},
+	);
+
+	it("injects computer_20251124 with its beta for Opus 4.6", () => {
+		const result = addAnthropicComputerUseToPayload("anthropic-messages", {}, WINDOW_DISPLAY, "claude-opus-4-6");
+
+		expect(result).toEqual({
+			tools: [{ type: "computer_20251124", name: "computer", display_width_px: 1280, display_height_px: 720 }],
+			headers: { "anthropic-beta": "computer-use-2025-11-24" },
+			extra_body: { betas: ["computer-use-2025-11-24"] },
+		});
+	});
+});
+
 describe("#given a fresh Anthropic payload #when adding computer use #then beta and native tool are injected", () => {
 	it("adds headers, extra_body betas, and the declared display dimensions", () => {
 		const result = addAnthropicComputerUseToPayload(
@@ -87,21 +114,21 @@ describe("#given a fresh Anthropic payload #when adding computer use #then beta 
 			messages: [],
 			tools: [
 				{
-					type: ANTHROPIC_NATIVE_COMPUTER_TOOL_TYPE,
+					type: ANTHROPIC_COMPUTER_TOOL_20250124.type,
 					name: ANTHROPIC_NATIVE_COMPUTER_TOOL_NAME,
 					display_width_px: 1280,
 					display_height_px: 720,
 				},
 			],
-			headers: { "anthropic-beta": ANTHROPIC_COMPUTER_USE_BETA },
-			extra_body: { betas: [ANTHROPIC_COMPUTER_USE_BETA] },
+			headers: { "anthropic-beta": ANTHROPIC_COMPUTER_TOOL_20250124.beta },
+			extra_body: { betas: [ANTHROPIC_COMPUTER_TOOL_20250124.beta] },
 		});
 	});
 });
 
 describe("#given an existing Anthropic beta header #when adding computer use #then beta is comma-deduped", () => {
 	it("does not duplicate the computer-use beta header", () => {
-		const payload = { headers: { "anthropic-beta": `foo, ${ANTHROPIC_COMPUTER_USE_BETA}` } };
+		const payload = { headers: { "anthropic-beta": `foo, ${ANTHROPIC_COMPUTER_TOOL_20250124.beta}` } };
 
 		const result = addAnthropicComputerUseToPayload(
 			"anthropic-messages",
@@ -110,13 +137,13 @@ describe("#given an existing Anthropic beta header #when adding computer use #th
 			"claude-sonnet-4-5",
 		);
 
-		expect(result).toMatchObject({ headers: { "anthropic-beta": `foo,${ANTHROPIC_COMPUTER_USE_BETA}` } });
+		expect(result).toMatchObject({ headers: { "anthropic-beta": `foo,${ANTHROPIC_COMPUTER_TOOL_20250124.beta}` } });
 	});
 });
 
 describe("#given an existing extra_body beta #when adding computer use #then beta array is deduped", () => {
 	it("does not duplicate the computer-use beta entry", () => {
-		const payload = { extra_body: { betas: [ANTHROPIC_COMPUTER_USE_BETA] } };
+		const payload = { extra_body: { betas: [ANTHROPIC_COMPUTER_TOOL_20250124.beta] } };
 
 		const result = addAnthropicComputerUseToPayload(
 			"anthropic-messages",
@@ -125,7 +152,7 @@ describe("#given an existing extra_body beta #when adding computer use #then bet
 			"claude-sonnet-4-5",
 		);
 
-		expect(result).toMatchObject({ extra_body: { betas: [ANTHROPIC_COMPUTER_USE_BETA] } });
+		expect(result).toMatchObject({ extra_body: { betas: [ANTHROPIC_COMPUTER_TOOL_20250124.beta] } });
 	});
 });
 
@@ -149,14 +176,14 @@ describe("#given a function-shaped computer tool #when adding computer use #then
 			tools: [
 				unrelatedTool,
 				{
-					type: ANTHROPIC_NATIVE_COMPUTER_TOOL_TYPE,
+					type: ANTHROPIC_COMPUTER_TOOL_20250124.type,
 					name: ANTHROPIC_NATIVE_COMPUTER_TOOL_NAME,
 					display_width_px: 100,
 					display_height_px: 80,
 				},
 			],
-			headers: { "x-custom": "kept", "anthropic-beta": ANTHROPIC_COMPUTER_USE_BETA },
-			extra_body: { temperature: 0.2, betas: ["other-beta", ANTHROPIC_COMPUTER_USE_BETA] },
+			headers: { "x-custom": "kept", "anthropic-beta": ANTHROPIC_COMPUTER_TOOL_20250124.beta },
+			extra_body: { temperature: 0.2, betas: ["other-beta", ANTHROPIC_COMPUTER_TOOL_20250124.beta] },
 		});
 	});
 });

@@ -48,7 +48,8 @@ system prompt, as an MCP client would show them.
 
 ## Native computer-use shapes
 
-Anthropic models get the native `computer-use-2025-01-24` tool with its beta header, and OpenAI
+Anthropic models get the native computer tool version they accept, with its beta header (`computer_20251124`
+for Claude Opus 4.5 to 4.7 and Sonnet 4.6, `computer_20250124` for earlier models), and OpenAI
 Responses models can get `{ "type": "computer" }` (off until `OPENCUA_OPENAI_NATIVE_TRANSPORT=1`,
 because the pi-ai transport cannot carry computer calls yet). `OPENCUA_DISABLE_COMPUTER_USE_BETA=1`
 turns both off.

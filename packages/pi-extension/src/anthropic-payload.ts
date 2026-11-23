@@ -2,9 +2,31 @@ import { type Static, Type } from "typebox";
 
 import type { DisplayConfig } from "./computer-use/coords.js";
 
-export const ANTHROPIC_COMPUTER_USE_BETA = "computer-use-2025-01-24";
-export const ANTHROPIC_NATIVE_COMPUTER_TOOL_TYPE = "computer_20250124";
 export const ANTHROPIC_NATIVE_COMPUTER_TOOL_NAME = "computer";
+
+export interface AnthropicComputerToolVersion {
+	readonly type: string;
+	readonly beta: string;
+}
+
+/** Claude Opus 4.5, 4.6, 4.7 and Sonnet 4.6 take computer use only through this version (they reject 20250124). */
+export const ANTHROPIC_COMPUTER_TOOL_20251124: AnthropicComputerToolVersion = {
+	type: "computer_20251124",
+	beta: "computer-use-2025-11-24",
+};
+/** The version every earlier documented model takes (Sonnet 4.5, 4, 3.7, 3.5, Opus 4 and 4.1, Haiku 4.5). */
+export const ANTHROPIC_COMPUTER_TOOL_20250124: AnthropicComputerToolVersion = {
+	type: "computer_20250124",
+	beta: "computer-use-2025-01-24",
+};
+const COMPUTER_20251124_MODEL = /(opus-4[-.][5-7]|sonnet-4[-.]6)(?!\d)/;
+
+/** The computer tool version and beta header a model accepts. */
+export function anthropicComputerToolVersion(modelId: string): AnthropicComputerToolVersion {
+	return COMPUTER_20251124_MODEL.test(modelId.toLowerCase())
+		? ANTHROPIC_COMPUTER_TOOL_20251124
+		: ANTHROPIC_COMPUTER_TOOL_20250124;
+}
 
 // Anthropic documents the native computer tool on Sonnet 4.5, Sonnet 4, 3.7 Sonnet,
 // 3.5 Sonnet, Opus 4.x and Haiku 4.5. Each family prefix covers the dated and dotted id
@@ -85,7 +107,7 @@ function sanitizeTools(tools: readonly unknown[]): ToolDefinition[] {
 	return sanitizedTools;
 }
 
-function mergeBetaHeader(existing: unknown): string {
+function mergeBetaHeader(existing: unknown, beta: string): string {
 	const existingParts =
 		typeof existing === "string"
 			? existing
@@ -93,10 +115,10 @@ function mergeBetaHeader(existing: unknown): string {
 					.map((part) => part.trim())
 					.filter(Boolean)
 			: [];
-	if (existingParts.includes(ANTHROPIC_COMPUTER_USE_BETA)) {
+	if (existingParts.includes(beta)) {
 		return existingParts.join(",");
 	}
-	return [...existingParts, ANTHROPIC_COMPUTER_USE_BETA].join(",");
+	return [...existingParts, beta].join(",");
 }
 
 export function addAnthropicComputerUseToPayload(
@@ -105,16 +127,22 @@ export function addAnthropicComputerUseToPayload(
 	display: DisplayConfig,
 	modelId?: string,
 ): unknown {
-	if (api !== "anthropic-messages" || !isRecord(payload) || !supportsAnthropicNativeComputerUse(modelId)) {
+	if (
+		api !== "anthropic-messages" ||
+		!isRecord(payload) ||
+		modelId === undefined ||
+		!supportsAnthropicNativeComputerUse(modelId)
+	) {
 		return payload;
 	}
+	const version = anthropicComputerToolVersion(modelId);
 
 	const tools = Array.isArray(payload["tools"]) ? payload["tools"] : [];
 	const sanitizedTools = sanitizeTools(tools);
 	const hasNativeComputer = sanitizedTools.some((tool) => isComputerToolType(tool["type"]));
 	if (!hasNativeComputer) {
 		sanitizedTools.push({
-			type: ANTHROPIC_NATIVE_COMPUTER_TOOL_TYPE,
+			type: version.type,
 			name: ANTHROPIC_NATIVE_COMPUTER_TOOL_NAME,
 			display_width_px: display.modelWidth,
 			display_height_px: display.modelHeight,
@@ -124,17 +152,17 @@ export function addAnthropicComputerUseToPayload(
 	const extraBody = payload["extra_body"];
 	const existingBetas = isRecord(extraBody) ? extraBody["betas"] : undefined;
 	const mergedBetas = Array.isArray(existingBetas)
-		? existingBetas.includes(ANTHROPIC_COMPUTER_USE_BETA)
+		? existingBetas.includes(version.beta)
 			? existingBetas
-			: [...existingBetas, ANTHROPIC_COMPUTER_USE_BETA]
-		: [ANTHROPIC_COMPUTER_USE_BETA];
+			: [...existingBetas, version.beta]
+		: [version.beta];
 	const headers = payload["headers"];
 	const headerRecord = isRecord(headers) ? headers : {};
 
 	return {
 		...payload,
 		tools: sanitizedTools,
-		headers: { ...headerRecord, "anthropic-beta": mergeBetaHeader(headerRecord["anthropic-beta"]) },
+		headers: { ...headerRecord, "anthropic-beta": mergeBetaHeader(headerRecord["anthropic-beta"], version.beta) },
 		extra_body: { ...(isRecord(extraBody) ? extraBody : {}), betas: mergedBetas },
 	};
 }

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { vi } from "@opencua/test-support";
 
 const koffiMock = vi.hoisted(() => {
@@ -165,6 +168,7 @@ const koffiMock = vi.hoisted(() => {
 			return 0;
 		}),
 		AXUIElementSetAttributeValue: vi.fn((element: Reference, attribute: Reference, value: Reference) => {
+			if (element === applicationElement && attribute.value === "AXManualAccessibility") return 0;
 			if (element !== textField) return -25205;
 			if (attribute.value === "AXValue" && value.value !== undefined) {
 				observableState.fieldValue = value.value;
@@ -261,9 +265,18 @@ const koffiMock = vi.hoisted(() => {
 		return value === undefined ? { type: "null" } : { type: "string", value };
 	}
 
+	/** What proc_pidpath reports for every pid; empty reads as a process with no path. */
+	const executable = { path: "" };
+	const libSystemFunctions = {
+		proc_pidpath: vi.fn((_pid: number, buffer: Buffer) =>
+			executable.path.length === 0 ? 0 : buffer.write(executable.path, "utf8"),
+		),
+	};
+
 	function libraryFor(path: string) {
 		if (path.includes("ApplicationServices.framework")) return accessibilityFunctions;
 		if (path.includes("CoreFoundation.framework")) return coreFoundationFunctions;
+		if (path === "/usr/lib/libSystem.B.dylib") return libSystemFunctions;
 		throw new Error(`Unexpected library: ${path}`);
 	}
 
@@ -271,6 +284,7 @@ const koffiMock = vi.hoisted(() => {
 		accessibilityFunctions,
 		applicationElement,
 		coreFoundationFunctions,
+		executable,
 		focus,
 		insertedPrefix,
 		menuBarElement,
@@ -299,7 +313,9 @@ const koffiMock = vi.hoisted(() => {
 					if (nativeFunction === undefined) throw new Error(`Unexpected native function: ${functionName}`);
 					return nativeFunction;
 				}),
+				symbol: vi.fn((name: string) => ({ type: "symbol", value: name })),
 			})),
+			decode: vi.fn((symbol: Reference) => ({ type: "boolean", value: symbol.value })),
 			opaque: vi.fn(() => ({ type: "opaque" })),
 			pointer: vi.fn((name: unknown) => ({ type: "pointer", name })),
 			out: vi.fn((type: unknown) => ({ type: "out", inner: type })),
@@ -1056,14 +1072,90 @@ describe("#given an outline that holds more rows than it shows #when it is walke
 	});
 
 	it("finds the same row when the element has to be located by walking again", async () => {
-		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
+		const { extractAccessibilityTree, performAction, refetchElement, releaseAXElement } = await import(
+			"./accessibility.js"
+		);
 		koffiMock.windowElement.children = [koffiMock.outlineElement];
-		// A different element cap than the action's own, so the retained references are not used.
 		const shown = extractAccessibilityTree(process.pid, { windowId: 42, visibleOnly: true, maxElements: 50 });
 		const row = shown.elements.find((element) => element.label === "row-2");
 
-		performActionByIndex(process.pid, row?.id ?? -1, "AXPress");
+		// A different element cap than the observation's own, so the retained references are not used.
+		const element = refetchElement(process.pid, row?.id ?? -1, undefined, 2_000);
+		try {
+			performAction(element, "AXPress");
+		} finally {
+			releaseAXElement(element);
+		}
 
 		expect(koffiMock.observableState.pressedTitles).toEqual(["row-2"]);
+	});
+});
+
+describe("#given an observation that grew its budget past the default", () => {
+	it("#when an action names an id past the default budget without a budget #then that element is pressed", async () => {
+		const { extractAccessibilityTree, performActionByIndex } = await import("./accessibility.js");
+		koffiMock.windowElement.children = Array.from({ length: 2_100 }, (_, index) => ({
+			type: "ax",
+			attributes: { AXRole: "AXButton", AXTitle: `button-${index}` },
+			actions: ["AXPress"],
+			children: [],
+		}));
+		const observed = extractAccessibilityTree(process.pid, { windowId: 42, maxElements: 4_000 });
+		const button = observed.elements.find((element) => element.label === "button-2050");
+
+		performActionByIndex(process.pid, button?.id ?? -1, "AXPress");
+
+		expect(button?.id).toBeGreaterThan(2_000);
+		expect(koffiMock.observableState.pressedTitles).toEqual(["button-2050"]);
+	});
+});
+
+describe("#given an Electron app bundle", () => {
+	let bundle = "";
+
+	beforeEach(async () => {
+		const { restoreAxActivation } = await import("./accessibility.js");
+		// Earlier tests observed this pid as a plain process; restoring also forgets that.
+		restoreAxActivation();
+		bundle = mkdtempSync(join(tmpdir(), "opencua-ax-activation-"));
+		mkdirSync(join(bundle, "Fixture.app/Contents/Frameworks/Electron Framework.framework"), { recursive: true });
+		koffiMock.executable.path = join(bundle, "Fixture.app/Contents/MacOS/Fixture");
+		koffiMock.accessibilityFunctions.AXUIElementSetAttributeValue.mockClear();
+	});
+
+	afterEach(async () => {
+		const { restoreAxActivation } = await import("./accessibility.js");
+		restoreAxActivation();
+		koffiMock.executable.path = "";
+		rmSync(bundle, { recursive: true, force: true });
+	});
+
+	function manualAccessibilityWrites(): Array<string | undefined> {
+		return koffiMock.accessibilityFunctions.AXUIElementSetAttributeValue.mock.calls
+			.filter(
+				([element, attribute]) =>
+					element === koffiMock.applicationElement && attribute.value === "AXManualAccessibility",
+			)
+			.map(([, , value]) => value.value);
+	}
+
+	it("#when it is observed twice #then AXManualAccessibility is set once, before the first walk", async () => {
+		const { extractAccessibilityTree } = await import("./accessibility.js");
+		extractAccessibilityTree(process.pid, { windowId: 42 });
+		extractAccessibilityTree(process.pid, { windowId: 42 });
+
+		expect(manualAccessibilityWrites()).toEqual(["kCFBooleanTrue"]);
+	});
+
+	it("#when activation is restored #then the app gets its prior value back", async () => {
+		const { extractAccessibilityTree, restoreAxActivation } = await import("./accessibility.js");
+		extractAccessibilityTree(process.pid, { windowId: 42 });
+
+		const restored = restoreAxActivation(process.pid);
+
+		expect(restored).toEqual([
+			{ pid: process.pid, attribute: "AXManualAccessibility", restoredTo: false, restored: true },
+		]);
+		expect(manualAccessibilityWrites()).toEqual(["kCFBooleanTrue", "kCFBooleanFalse"]);
 	});
 });

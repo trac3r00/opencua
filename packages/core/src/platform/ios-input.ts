@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { HostInteractionDenied } from "../computer/host-interaction-policy.js";
 import { assertInputMayContinue, currentInputScope } from "../computer/input-scope.js";
 import type { Point } from "../types/index.js";
 import {
@@ -28,10 +29,12 @@ import { virtualKeyCodeFor } from "./macos-keycodes.js";
 /**
  * How input reaches the phone.
  *
- * "background" (the default) delivers synthesized mouse records straight to the mirroring
- * window's process, so the phone is driven without bringing the window forward and without
- * touching the user's pointer. "attended" is the explicit foreground path. If window-targeted
- * delivery is unavailable, background input refuses rather than sending global mouse events.
+ * "background" (the default) observes the phone without taking focus or the pointer, but refuses
+ * every phone input with HOST_INTERACTION_FORBIDDEN: a touch is posted to the mirroring window by a
+ * route that first brings iPhone Mirroring to the front, keys and typing make its window key, and a
+ * scroll moves the real pointer, none of which background delivery does. "attended"
+ * (OPENCUA_DELIVERY=attended) is the path that drives the phone. Neither falls back to global mouse
+ * events when window-targeted delivery is unavailable.
  */
 export type IOSDelivery = "background" | "attended";
 
@@ -234,7 +237,7 @@ function deliveryFor(target: IOSInputTarget): IOSDelivery {
 export function assertScrollMayBorrowPointer(delivery: IOSDelivery, borrowPointer: boolean | undefined): void {
 	if (delivery === "background" && borrowPointer !== true) {
 		throw new Error(
-			"scrolling the phone would borrow the person's pointer: macOS sends wheel events to the window under the real cursor, so the cursor must move onto the phone and back. Background delivery refuses that by default. Pass borrow_pointer: true to allow a brief pointer borrow, or use a swipe (ios_swipe) for pages and carousels, which leaves the pointer alone.",
+			"scrolling the phone would borrow the person's pointer: macOS sends wheel events to the window under the real cursor, so the cursor must move onto the phone and back, and background delivery never moves it (borrow_pointer: true does not change that). Hint: restart the server with OPENCUA_DELIVERY=attended to drive the phone, or ask the person to scroll.",
 		);
 	}
 }
@@ -243,9 +246,28 @@ function skyLightWindow(target: IOSInputTarget): SkyLightTargetWindow {
 	return { id: target.windowId, bounds: target.bounds };
 }
 
+/**
+ * Background delivery's refusal of a phone touch, with what to do instead. It stays a HostInteractionDenied
+ * (HOST_INTERACTION_FORBIDDEN): only the explanation is the phone's own.
+ */
+export class IPhoneTouchNeedsAttendedDelivery extends HostInteractionDenied {
+	constructor() {
+		super("host-focus");
+		this.name = "IPhoneTouchNeedsAttendedDelivery";
+		this.message =
+			"iPhone Mirroring taps, long presses and swipes need attended delivery: the only way to post a touch to the mirroring window brings iPhone Mirroring to the front, which background delivery never does, so nothing was sent. Hint: observing the phone (ios_observe, ios_screenshot, ios_find_text without scrolling) works in the background; to drive it, restart the server with OPENCUA_DELIVERY=attended (it then takes the Mac's front app and pointer while it runs) or ask the person to do the step.";
+	}
+}
+
 function postRecord(target: IOSInputTarget, eventType: number, point: Point): boolean {
 	if (eventType !== CGS_EVENT_LEFT_MOUSE_UP) assertInputMayContinue(currentInputScope());
-	const posted = postMouseEventRecordToWindow(skyLightWindow(target), eventType, point);
+	let posted: boolean;
+	try {
+		posted = postMouseEventRecordToWindow(skyLightWindow(target), eventType, point);
+	} catch (error) {
+		if (error instanceof HostInteractionDenied) throw new IPhoneTouchNeedsAttendedDelivery();
+		throw error;
+	}
 	if (!posted && eventType !== CGS_EVENT_LEFT_MOUSE_UP) {
 		throw new Error("Window-targeted iPhone input is unavailable; refusing global mouse fallback.");
 	}
@@ -257,7 +279,7 @@ async function postAttendedMouse(kind: "move" | "down" | "up", point: Point): Pr
 	postMouseEvent({ kind, position: point, button: "left", clickState: undefined, targetPid: undefined });
 }
 
-/** A tap: press, hold briefly, release. In the background path nothing is moved or focused. */
+/** A tap: press, hold briefly, release. Background delivery refuses it (IPhoneTouchNeedsAttendedDelivery). */
 export async function tapMirroring(target: IOSInputTarget, point: Point): Promise<void> {
 	if (deliveryFor(target) === "background" && postRecord(target, CGS_EVENT_LEFT_MOUSE_DOWN, point)) {
 		await sleep(TAP_HOLD_MILLISECONDS);
@@ -442,13 +464,20 @@ export async function typeIntoMirroring(
 
 async function pasteIntoMirroring(target: IOSInputTarget, text: string): Promise<void> {
 	assertInputMayContinue(currentInputScope());
+	const previous = readClipboard().text;
 	writeClipboard({ type: "text", text });
-	const written = readClipboard().text;
-	if (written !== text) {
-		throw new Error("the clipboard did not take the text, so pasting would send the previous contents");
+	try {
+		const written = readClipboard().text;
+		if (written !== text) {
+			throw new Error("the clipboard did not take the text, so pasting would send the previous contents");
+		}
+		await sleep(WARP_SETTLE_MILLISECONDS);
+		await pressMirroringCombo(target, "cmd+v");
+	} catch (error: unknown) {
+		// Nothing was pasted, so the person's own text goes back on the clipboard.
+		if (previous !== undefined) writeClipboard({ type: "text", text: previous });
+		throw error;
 	}
-	await sleep(WARP_SETTLE_MILLISECONDS);
-	await pressMirroringCombo(target, "cmd+v");
 }
 
 async function typeKeystrokes(target: IOSInputTarget, text: string, delayMs: number): Promise<void> {

@@ -1,5 +1,13 @@
+import { existsSync, readdirSync } from "node:fs";
 import type { KoffiFunc } from "koffi";
 import type { AXTreeElement, AxUnavailableReason } from "../../accessibility/types.js";
+import {
+	type AxRestoreResult,
+	DEFAULT_WALK_BUDGET,
+	DEFAULT_WALK_DEPTH,
+	createAxActivation,
+	looksFlat,
+} from "./ax-activation.js";
 import { AX_ERROR_CANNOT_COMPLETE, resolveAxMessagingTimeoutSeconds } from "./ax-timeout.js";
 import {
 	type CFArrayRef,
@@ -25,7 +33,9 @@ import {
 	withCFString,
 } from "./corefoundation.js";
 import { koffi } from "./koffi.js";
+import { processExecutablePath } from "./process-info.js";
 
+export type { AxRestoreResult } from "./ax-activation.js";
 export {
 	DEFAULT_AX_MESSAGING_TIMEOUT_SECONDS,
 	resolveAxMessagingTimeoutSeconds,
@@ -643,6 +653,7 @@ export function accessibilitySnapshotPids(): readonly number[] {
 
 export function releaseSnapshotsForExitedPids(runningPids: readonly number[]): number {
 	const runningPidSet = new Set(runningPids);
+	axActivation.forgetExcept(runningPidSet);
 	let released = 0;
 	for (const pid of elementSnapshots.keys()) {
 		if (!runningPidSet.has(pid)) {
@@ -651,6 +662,73 @@ export function releaseSnapshotsForExitedPids(runningPids: readonly number[]): n
 		}
 	}
 	return released;
+}
+
+let booleanFalse: CFTypeRef | undefined;
+
+/** The kCFBooleanFalse constant, read the way corefoundation.ts reads kCFBooleanTrue, on first use. */
+function cfBooleanFalse(): CFTypeRef {
+	booleanFalse ??= koffi.decode(
+		koffi
+			.load("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+			.symbol("kCFBooleanFalse", "void *"),
+		"void *",
+	);
+	if (booleanFalse === undefined || booleanFalse === null) {
+		throw new Error("kCFBooleanFalse is unavailable");
+	}
+	return booleanFalse;
+}
+
+function readApplicationBoolean(pid: number, attribute: string): boolean | undefined {
+	const root = createApplicationElement(pid);
+	let value: CFTypeRef | null = null;
+	try {
+		value = copyOptionalAttributeValue(root, attribute);
+		if (value === null) {
+			return undefined;
+		}
+		if (isCFBoolean(value)) {
+			return fromCFBoolean(value);
+		}
+		return isCFNumber(value) ? fromCFNumber(value) !== 0 : undefined;
+	} finally {
+		cfRelease(value);
+		releaseAXElement(root);
+	}
+}
+
+function writeApplicationBoolean(pid: number, attribute: string, value: boolean): boolean {
+	const root = createApplicationElement(pid);
+	try {
+		return withCFString(
+			attribute,
+			(attributeReference) =>
+				AXUIElementSetAttributeValue(root, attributeReference, value ? cfBooleanTrue() : cfBooleanFalse()) ===
+				AX_SUCCESS,
+		);
+	} finally {
+		releaseAXElement(root);
+	}
+}
+
+const axActivation = createAxActivation({
+	executablePath: processExecutablePath,
+	pathExists: existsSync,
+	listDirectory: (path) => readdirSync(path),
+	readBooleanAttribute: readApplicationBoolean,
+	writeBooleanAttribute: writeApplicationBoolean,
+	now: Date.now,
+});
+
+/**
+ * Put back the AXManualAccessibility / AXEnhancedUserInterface value each Electron or Chromium app had before an
+ * observation woke its accessibility tree, for one pid or every app this process changed. Call it when the agent is
+ * done with the apps (clean-up, server shutdown): AXEnhancedUserInterface left on changes how a browser animates and
+ * places its windows.
+ */
+export function restoreAxActivation(pid?: number): readonly AxRestoreResult[] {
+	return axActivation.restore(pid);
 }
 
 export function performAction(element: AXUIElementRef, action: string): void {
@@ -980,11 +1058,17 @@ export interface AccessibilityTreeOptions {
 }
 
 export function extractAccessibilityTree(pid: number, options: AccessibilityTreeOptions = {}): AccessibilityTreeResult {
-	const maxDepth = options.maxDepth ?? DEFAULT_AX_MAX_DEPTH;
-	const maxElements = options.maxElements ?? DEFAULT_AX_MAX_ELEMENTS;
 	const keepIndexSpace = options.signatureOnly === true;
 	const trusted = AXIsProcessTrusted();
-	if (!trusted || !isRunning(pid) || maxDepth < 0 || maxElements <= 0) {
+	const reachable = trusted && isRunning(pid);
+	// Electron and Chromium trees run to thousands of elements and dozens of levels once awake, so a walk that did not
+	// ask for limits gets ones grown from how far that app's tree overran them before.
+	const limits = reachable
+		? axActivation.walkLimits(pid)
+		: { maxElements: DEFAULT_AX_MAX_ELEMENTS, maxDepth: DEFAULT_AX_MAX_DEPTH };
+	const maxDepth = options.maxDepth ?? limits.maxDepth;
+	const maxElements = options.maxElements ?? limits.maxElements;
+	if (!reachable || maxDepth < 0 || maxElements <= 0) {
 		if (!keepIndexSpace) {
 			replaceElementSnapshot(pid, undefined);
 		}
@@ -1003,6 +1087,7 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 	let snapshotInstalled = false;
 	try {
 		assertAppAnswersAccessibility(root, pid);
+		axActivation.beforeWalk(pid);
 		const scope =
 			options.subtreeOf === undefined
 				? resolveWalkScope(root, options)
@@ -1038,6 +1123,17 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 		);
 		const contentUnavailable =
 			scope.degenerate > 0 || walkResult.skippedApplications > 0 ? { windowContentUnavailable: true } : {};
+		const budgetExhausted = elements.length >= maxElements;
+		const truncated = budgetExhausted || walkResult.depthTruncated;
+		// A subtree is a branch, not the app, so neither its size nor a missing web area under it says anything.
+		if (options.subtreeOf === undefined) {
+			axActivation.afterWalk(pid, {
+				budgetExhausted,
+				depthTruncated: walkResult.depthTruncated,
+				sizesTree: options.maxElements === undefined && options.maxDepth === undefined && !keepIndexSpace,
+				flat: looksFlat(elements),
+			});
+		}
 		if (elements.length === 0) {
 			if (!keepIndexSpace) {
 				replaceElementSnapshot(pid, undefined);
@@ -1078,7 +1174,7 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 		return {
 			elements,
 			axAvailable: true,
-			truncated: elements.length >= maxElements || walkResult.depthTruncated,
+			truncated,
 			walkKey: walkKeyFor(descriptor, maxDepth, maxElements),
 			...(windowTitle === undefined ? {} : { windowTitle }),
 			...contentUnavailable,
@@ -1098,8 +1194,8 @@ export function extractAccessibilityTree(pid: number, options: AccessibilityTree
 
 // Browser chrome and web layout wrappers can consume ten levels before a
 // toolbar button is reached. The element budget still bounds the walk's cost.
-const DEFAULT_AX_MAX_DEPTH = 30;
-const DEFAULT_AX_MAX_ELEMENTS = 2_000;
+const DEFAULT_AX_MAX_DEPTH = DEFAULT_WALK_DEPTH;
+const DEFAULT_AX_MAX_ELEMENTS = DEFAULT_WALK_BUDGET;
 
 interface ResolvedWalkScope {
 	/** Top-level elements to walk, excluding the application element itself. Caller releases them. */
@@ -1807,8 +1903,8 @@ export function setValueByIndex(pid: number, elementIndex: number, value: string
 export function refetchElement(
 	pid: number,
 	elementIndex: number,
-	maxDepth = DEFAULT_AX_MAX_DEPTH,
-	maxElements = DEFAULT_AX_MAX_ELEMENTS,
+	requestedMaxDepth?: number,
+	requestedMaxElements?: number,
 ): AXUIElementRef {
 	if (!AXIsProcessTrusted()) {
 		replaceElementSnapshot(pid, undefined);
@@ -1818,11 +1914,14 @@ export function refetchElement(
 		replaceElementSnapshot(pid, undefined);
 		throw new Error(`invalid process or element index: ${pid}:${elementIndex}`);
 	}
+	const snapshot = elementSnapshots.get(pid);
+	// Ids name the walk that produced them, whose budget may have grown past the default for a large app.
+	const maxDepth = requestedMaxDepth ?? snapshot?.maxDepth ?? DEFAULT_AX_MAX_DEPTH;
+	const maxElements = requestedMaxElements ?? snapshot?.maxElements ?? DEFAULT_AX_MAX_ELEMENTS;
 	if (elementIndex < 0 || elementIndex >= maxElements) {
 		throw new Error(`invalid process or element index: ${pid}:${elementIndex}`);
 	}
 
-	const snapshot = elementSnapshots.get(pid);
 	if (snapshot?.maxDepth === maxDepth && snapshot.maxElements === maxElements) {
 		const cached = snapshot.elements[elementIndex];
 		if (cached === undefined) {

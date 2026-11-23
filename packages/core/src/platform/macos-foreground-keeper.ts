@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 
 import { onInputTarget } from "../computer/input-scope.js";
 import { ForegroundKeeper } from "./foreground-keeper.js";
+import { getCurrentCursorPosition } from "./macos-ffi/coregraphics.js";
 import { frontProcessPid, setFrontProcessOfWindowNoWindows } from "./macos-ffi/skylight.js";
 import { listWindows } from "./macos-ffi/window-list.js";
 import { getRunningApplications } from "./macos-ffi/workspace.js";
@@ -13,6 +14,15 @@ const FAST_RESTORE_POLL_MILLISECONDS = 25;
 /** The WindowServer's front process: a launching app holds the front before AppKit reports any app active. */
 function frontmostPid(): number | undefined {
 	return frontProcessPid() ?? getRunningApplications().find((application) => application.isActive)?.pid;
+}
+
+/** The owner of the topmost app window under the physical pointer, which a press there would have hit. */
+function pidUnderPointer(): number | undefined {
+	const { x, y } = getCurrentCursorPosition();
+	return listWindows({ onScreenOnly: true })?.find(
+		({ layer, bounds }) =>
+			layer === 0 && x >= bounds.x && x < bounds.x + bounds.width && y >= bounds.y && y < bounds.y + bounds.height,
+	)?.ownerPid;
 }
 
 /**
@@ -53,6 +63,7 @@ export function startNativeForegroundKeeper(): ForegroundKeeper {
 		frontmostPid,
 		secondsSinceMouseDown: hidPhysicalInputProbe.secondsSinceMouseDown,
 		commandHeld: hidPhysicalInputProbe.commandHeld,
+		pidUnderPointer,
 		restore: restorePersonApp,
 		now: () => Date.now(),
 	});

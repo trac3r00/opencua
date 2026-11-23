@@ -1,5 +1,6 @@
 import type { HostCapabilities, StopStatusSource } from "@opencua/core";
 import { describeUserStop, dispatchTerminalCommand, readVisibleText } from "@opencua/core";
+import type { AppLeaseGate } from "./lease-gate.js";
 import type { ToolResult } from "./tool-result.js";
 import { refusalResult, textResult } from "./tool-result.js";
 
@@ -12,6 +13,11 @@ export interface TerminalGuardOptions {
 	readonly stopSwitch?: StopStatusSource;
 	readonly dispatch?: TerminalCommandSource;
 	readonly readText?: TerminalTextReader;
+	/**
+	 * Window leases are on: a command needs the holder's `terminal` lease on Terminal.app. The command opens a window of
+	 * its own, so a lease on any Terminal window allows it. Reading is observation, which leases do not gate.
+	 */
+	readonly leases?: AppLeaseGate;
 }
 
 export type TerminalCommandSource = (command: string) => Promise<{
@@ -37,6 +43,8 @@ export class TerminalGuardSession {
 		if (typeof command !== "string" || command.trim() === "") {
 			return refusalResult("terminal-invalid-command", "terminal.run requires a non-empty command string.");
 		}
+		const leaseRefusal = this.options.leases?.refuse(TERMINAL_BUNDLE_ID, "terminal");
+		if (leaseRefusal !== undefined) return refusalResult(leaseRefusal.reason, leaseRefusal.message);
 		try {
 			return textResult(JSON.stringify(await this.dispatch(command)));
 		} catch (error) {

@@ -1,9 +1,10 @@
 import type { ComputerToolInput } from "./anthropic-payload.js";
 export {
-	ANTHROPIC_COMPUTER_USE_BETA,
+	ANTHROPIC_COMPUTER_TOOL_20250124,
+	ANTHROPIC_COMPUTER_TOOL_20251124,
 	ANTHROPIC_NATIVE_COMPUTER_TOOL_NAME,
-	ANTHROPIC_NATIVE_COMPUTER_TOOL_TYPE,
 	addAnthropicComputerUseToPayload,
+	anthropicComputerToolVersion,
 	computerToolSchema,
 	supportsAnthropicNativeComputerUse,
 } from "./anthropic-payload.js";
@@ -28,7 +29,7 @@ export function buildComputerUseSection(): string {
 	return "## Computer Use\n`computer` drives the app window you last observed with `get_app_state`, so call that first. Its screenshot re-observes that window, coordinates are pixels in that screenshot, and every action answers with what changed. An answer without an observation_token means take a screenshot before acting again. `computer` cannot scroll at a point, hover or read the pointer; use the element tools for those.\n";
 }
 
-/** One Anthropic computer_20250124 action as opencua-mcp calls; actions the server cannot do are refused by name. */
+/** One Anthropic computer action (computer_20250124 or computer_20251124) as opencua-mcp calls; actions the server cannot do are refused by name. */
 export async function executeNativeComputerAction(
 	input: ComputerToolInput,
 	computer: NativeComputer,

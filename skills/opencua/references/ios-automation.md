@@ -80,8 +80,8 @@ On macOS 26 a vertical touch-drag is dropped, so lists move with `scroll` (the w
    that never taps: `max_scrolls` defaults to 8 (max 30), `timeout_ms` to 10000 (max 30000), and
    `max_scrolls: 0` reads the visible screen only. It answers `search.matches`, `search.scrolls`,
    `search.reason` (`matched`, `max_scrolls`, `no_progress`, `timeout`, `interrupted`), `verification`
-   and a fresh `observation_token`. It scrolls through the same wheel path, so background delivery
-   still needs an explicit `borrow_pointer: true`. Two unchanged screens stop it as `no_progress`;
+   and a fresh `observation_token`. It scrolls through the same wheel path, so its scrolls need attended
+   delivery like every phone input (see below); `max_scrolls: 0` works in the background. Two unchanged screens stop it as `no_progress`;
    treat that as a stall, not a cue to raise the limits. After a partial failure (`interrupted`,
    `actionDispatched: true`) re-observe before deciding; do not replay the search blindly.
 5. **Batch only a proven same-screen sequence.** `ios_run` takes one token, up to eight steps
@@ -116,8 +116,11 @@ invitation to clear it for them.
 
 The MCP server registers these tools only with `OPENCUA_IPHONE=1`.
 
-Delivery defaults to background: the phone is driven without taking focus or the pointer. A scroll
-would have to borrow the pointer (macOS routes wheel events by pointer position), so in background
-`ios_scroll` refuses unless you pass `borrow_pointer: true`; prefer `ios_swipe` while the person is
-working. `ios_press_keys` briefly makes the phone window key and then returns focus. If another
-window covers the phone, background scroll refuses instead of raising the phone.
+Delivery defaults to background, which observes the phone (`ios_observe`, `ios_screenshot`,
+`ios_find_text` with `max_scrolls: 0`) without taking focus or the pointer, and refuses every phone
+input with `HOST_INTERACTION_FORBIDDEN`, sending nothing: a tap, long press or swipe is posted by a
+route that brings iPhone Mirroring to the front, keys and typing (and so home, app switcher and
+open-app) make its window key, and a scroll moves the real pointer, since macOS routes wheel events
+by pointer position (`borrow_pointer: true` does not change that). To drive the phone, run the server
+with `OPENCUA_DELIVERY=attended`, which takes the Mac's front app and pointer while it runs, or hand
+the step to the person with `ask_user`.

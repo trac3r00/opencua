@@ -47,6 +47,9 @@ const SCREENSHOT_UNAVAILABLE_NOTE =
 const WINDOW_CAPTURE_FAILED_NOTE =
 	"no image: the window capture failed twice (ScreenCaptureKit refused or timed out), although Screen Recording is granted. Elements and ids are complete and actions work. Retry the observation; if it keeps failing, ask the user to turn Screen Recording off and on again for the app that launches this server.";
 
+export const CAPTURE_MASKED_NOTE =
+	"no image, on purpose: this window belongs to a password manager or an authentication prompt, and captures mask it. The app is not blocked: elements, ids and actions work as usual, so read and act through them. Never ask the person to unmask it to get pixels.";
+
 export const SYSTEM_PROMPT_NOTE =
 	"a macOS system dialog is on screen (see systemPrompts): it belongs to no app you are driving, only the person at the Mac can answer it, and it can block input or capture until they do. Never click or type into it; call ask_user to hand it over, naming what it asks for.";
 
@@ -293,6 +296,15 @@ const REFUSAL_ESCALATIONS: Readonly<Record<string, ActionEscalation>> = {
 	"user-stopped": { target: "human", reason: "user_stopped" },
 	"url-unavailable": { target: "session", reason: "route_unavailable" },
 	"isolated-session-required": { target: "session", reason: "route_unavailable" },
+	"shell-refused": { target: "session", reason: "route_unavailable" },
+	"raw-event-refused": { target: "session", reason: "route_unavailable" },
+	"script-loading-refused": { target: "session", reason: "route_unavailable" },
+	"jxa-refused": { target: "session", reason: "route_unavailable" },
+	"lease-required": { target: "human", reason: "needs_user" },
+	"lease-expired": { target: "human", reason: "needs_user" },
+	"lease-window-gone": { target: "human", reason: "needs_user" },
+	"lease-region-exceeded": { target: "human", reason: "needs_user" },
+	"lease-tool-forbidden": { target: "human", reason: "needs_user" },
 };
 
 /**
@@ -814,11 +826,16 @@ function stateToolResult(
 	if (state.axUnavailable !== undefined) {
 		payload["axNote"] = axUnavailableNote(state.axUnavailable, process.execPath);
 	}
+	if (state.masked === true) {
+		payload["masked"] = true;
+	}
 	if (state.screenshotUnavailable !== undefined) {
 		payload["screenshotNote"] =
 			state.screenshotUnavailable === "window-capture-failed"
 				? WINDOW_CAPTURE_FAILED_NOTE
-				: SCREENSHOT_UNAVAILABLE_NOTE;
+				: state.screenshotUnavailable === "capture-masked"
+					? CAPTURE_MASKED_NOTE
+					: SCREENSHOT_UNAVAILABLE_NOTE;
 	}
 	if (state.systemPrompts !== undefined && state.systemPrompts.length > 0) {
 		payload["systemPrompts"] = state.systemPrompts.map(describeSystemPrompt);

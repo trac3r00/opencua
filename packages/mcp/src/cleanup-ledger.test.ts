@@ -68,7 +68,7 @@ describe("#given apps OpenCUA launched and windows it moved #when it cleans up #
 		expect(quit).toEqual([CHROME.pid]);
 	});
 
-	it("keeps the app the person has in front and any app named in keep, and can close them later", async () => {
+	it("keeps the app the person has in front and any app named in keep, and can close the one in front later", async () => {
 		const ledger = new CleanupLedger();
 		const { deps, quit } = host(CHROME.pid);
 		ledger.noteLaunched(NOTES);
@@ -85,7 +85,7 @@ describe("#given apps OpenCUA launched and windows it moved #when it cleans up #
 
 		const later = host();
 		await ledger.cleanUp(later.deps);
-		expect(later.quit).toEqual([NOTES.pid, CHROME.pid]);
+		expect(later.quit).toEqual([CHROME.pid]);
 	});
 
 	it("forgets an app that already quit, without asking it to quit", async () => {
@@ -98,6 +98,24 @@ describe("#given apps OpenCUA launched and windows it moved #when it cleans up #
 
 		expect(quit).toEqual([]);
 		expect(report.quit).toEqual([]);
+		expect(ledger.empty).toBe(true);
+	});
+
+	it("#given apps and windows kept by an explicit clean-up #when the client disconnects later #then that clean-up leaves them", async () => {
+		const ledger = new CleanupLedger();
+		const first = host();
+		ledger.noteLaunched(NOTES);
+		ledger.noteLaunched(CHROME);
+		ledger.noteFrameChange({ pid: FINDER_PID, windowId: 7, original: ORIGINAL });
+
+		await ledger.cleanUp(first.deps, ["Notes", "Finder"]);
+		const onDisconnect = host();
+		const report = await ledger.cleanUp(onDisconnect.deps);
+
+		expect(first.quit).toEqual([CHROME.pid]);
+		expect(onDisconnect.quit).toEqual([]);
+		expect(onDisconnect.frames).toEqual([]);
+		expect(report).toEqual({ restoredFrames: [], quit: [], kept: [] });
 		expect(ledger.empty).toBe(true);
 	});
 });

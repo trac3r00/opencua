@@ -1,31 +1,38 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import {
+	chmodSync,
 	existsSync,
 	mkdtempSync,
 	readFileSync,
 	readdirSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { type Socket, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { processExecutablePath } from "./macos-ffi/process-info.js";
 import {
 	boardPageUrl,
+	closeOwnedSurface,
 	isOwnedSurfacePid,
 	nameSurfaceCursor,
 	readOwnedSurfaces,
 	registerOwnedSurface,
 	sendSurfacePointer,
 	setSessionCursorName,
+	setSurfaceBinaryForTesting,
 	setSurfaceCursorIntent,
 	setSurfaceCursorRegion,
 	speakOnSurface,
 	surfaceAudioState,
 	surfaceAudioStatePath,
+	surfaceBinaryPath,
 	surfaceCursorFor,
 	surfaceCursorTag,
 	surfaceCursorUserData,
@@ -36,49 +43,140 @@ import {
 let stateDir: string;
 const starts = new Map<number, string>();
 const startTime = (pid: number) => starts.get(pid);
+/** The file each fake pid executes; a pid left out is one of the person's own apps. */
+const executables = new Map<number, string>();
+const executablePath = (pid: number) => executables.get(pid) ?? "/Applications/Safari.app/Contents/MacOS/Safari";
+const probes = () => ({ stateDir, startTime, executablePath });
+const registryFile = () => join(stateDir, "owned-surfaces.json");
+const STARTED = "Wed Nov  4 04:00:00 2026";
+
+/** Pid 4242 is a surface opencua launched: it runs the surface binary and is in the registry. */
+function launchSurface(): void {
+	starts.set(4242, STARTED);
+	executables.set(4242, surfaceBinaryPath());
+	registerOwnedSurface({ pid: 4242, title: "canvas", url: "http://127.0.0.1:8765/" }, probes());
+}
+
+/** What any process running as the person can do: write a registry that names a process of its choosing. */
+function forgeRegistry(pid: number, startedAt: string): void {
+	writeFileSync(
+		registryFile(),
+		`${JSON.stringify({ surfaces: [{ pid, startedAt, title: "canvas", url: "http://127.0.0.1/" }] })}\n`,
+		{ mode: 0o600 },
+	);
+}
 
 beforeEach(() => {
 	stateDir = realpathSync(mkdtempSync(join(tmpdir(), "opencua-owned-surfaces-")));
 	starts.clear();
+	executables.clear();
 });
 
 afterEach(() => {
+	setSurfaceBinaryForTesting(undefined);
 	rmSync(stateDir, { recursive: true, force: true });
 });
 
 describe("#given the owned-surface registry #when a pid is checked #then only opencua's own live window counts", () => {
 	it("treats a registered, still-running surface as owned and writes the registry privately", () => {
-		starts.set(4242, "Wed Nov  4 04:00:00 2026");
-		registerOwnedSurface({ pid: 4242, title: "canvas", url: "http://127.0.0.1:8765/" }, { stateDir, startTime });
+		launchSurface();
 
-		expect(isOwnedSurfacePid(4242, { stateDir, startTime }, 0)).toBe(true);
-		expect(statSync(join(stateDir, "owned-surfaces.json")).mode & 0o777).toBe(0o600);
+		expect(isOwnedSurfacePid(4242, probes(), 0)).toBe(true);
+		expect(statSync(registryFile()).mode & 0o777).toBe(0o600);
 	});
 
 	it("never treats an unregistered process, such as one of the person's apps, as owned", () => {
 		starts.set(777, "Wed Nov  4 03:00:00 2026");
 
-		expect(isOwnedSurfacePid(777, { stateDir, startTime }, 0)).toBe(false);
+		expect(isOwnedSurfacePid(777, probes(), 0)).toBe(false);
 	});
 
 	it("refuses a different process that reused the surface's pid", () => {
-		starts.set(4242, "Wed Nov  4 04:00:00 2026");
-		registerOwnedSurface({ pid: 4242, title: "canvas", url: "http://127.0.0.1:8765/" }, { stateDir, startTime });
+		launchSurface();
 		starts.set(4242, "Wed Nov  4 05:30:00 2026");
 
-		expect(isOwnedSurfacePid(4242, { stateDir, startTime }, 10_000)).toBe(false);
+		expect(isOwnedSurfacePid(4242, probes(), 10_000)).toBe(false);
 	});
 
 	it("refuses to register a process that is not running and forgets a closed surface", () => {
-		expect(() =>
-			registerOwnedSurface({ pid: 9, title: "gone", url: "http://127.0.0.1/" }, { stateDir, startTime }),
-		).toThrow(/not running/);
-		starts.set(4242, "Wed Nov  4 04:00:00 2026");
-		registerOwnedSurface({ pid: 4242, title: "canvas", url: "http://127.0.0.1:8765/" }, { stateDir, startTime });
+		expect(() => registerOwnedSurface({ pid: 9, title: "gone", url: "http://127.0.0.1/" }, probes())).toThrow(
+			/not running/,
+		);
+		launchSurface();
 		unregisterOwnedSurface(4242, { stateDir });
 
 		expect(readOwnedSurfaces({ stateDir })).toEqual([]);
-		expect(isOwnedSurfacePid(4242, { stateDir, startTime }, 20_000)).toBe(false);
+		expect(isOwnedSurfacePid(4242, probes(), 20_000)).toBe(false);
+	});
+});
+
+describe("#given a registry any process of the person can write #when it names a process opencua did not launch #then that process gains nothing", () => {
+	it("#given an entry with one of the person's apps and its true start time #when the pid is checked #then it is not owned", () => {
+		starts.set(777, STARTED);
+		forgeRegistry(777, STARTED);
+
+		expect(readOwnedSurfaces({ stateDir }).map((surface) => surface.pid)).toEqual([777]);
+		expect(isOwnedSurfacePid(777, probes(), 0)).toBe(false);
+	});
+
+	it("#given such an entry #when the surface is closed through opencua #then the app is not killed and the entry stays out of reach", () => {
+		starts.set(777, STARTED);
+		forgeRegistry(777, STARTED);
+		const kill = spyOn(process, "kill").mockImplementation(() => true);
+		try {
+			expect(closeOwnedSurface(777, probes())).toBe(false);
+			expect(kill).not.toHaveBeenCalled();
+		} finally {
+			kill.mockRestore();
+		}
+	});
+
+	it("#given an entry naming this very process with its true start time #when checked with the real probes #then it is not owned", () => {
+		const own = registerOwnedSurface({ pid: process.pid, title: "canvas", url: "http://127.0.0.1/" }, { stateDir });
+
+		expect(own.startedAt.length).toBeGreaterThan(0);
+		expect(processExecutablePath(process.pid)).not.toBe(surfaceBinaryPath());
+		expect(isOwnedSurfacePid(process.pid, { stateDir }, 0)).toBe(false);
+	});
+
+	it("#given the surface binary is the file this process executes #when checked with the real probes #then it is owned", () => {
+		setSurfaceBinaryForTesting(process.execPath);
+		registerOwnedSurface({ pid: process.pid, title: "canvas", url: "http://127.0.0.1/" }, { stateDir });
+
+		expect(isOwnedSurfacePid(process.pid, { stateDir }, 0)).toBe(true);
+	});
+
+	it("#given a surface reached through a symlinked install path #when its pid is checked #then the resolved binary still matches", () => {
+		const link = join(stateDir, "linked-surface");
+		symlinkSync(process.execPath, link);
+		setSurfaceBinaryForTesting(link);
+		registerOwnedSurface({ pid: process.pid, title: "canvas", url: "http://127.0.0.1/" }, { stateDir });
+
+		expect(isOwnedSurfacePid(process.pid, { stateDir }, 0)).toBe(true);
+	});
+});
+
+describe("#given a registry file this user does not solely control #when it is read #then nothing in it is trusted", () => {
+	it("#given a file others may write #when read #then it holds no surfaces, and the next registration replaces it privately", () => {
+		launchSurface();
+		chmodSync(registryFile(), 0o666);
+
+		expect(readOwnedSurfaces({ stateDir })).toEqual([]);
+		expect(isOwnedSurfacePid(4242, probes(), 0)).toBe(false);
+
+		launchSurface();
+		expect(statSync(registryFile()).mode & 0o777).toBe(0o600);
+		expect(isOwnedSurfacePid(4242, probes(), 30_000)).toBe(true);
+	});
+
+	it("#given a symlink in the registry's place #when read #then the file it points at is not followed", () => {
+		launchSurface();
+		const elsewhere = join(stateDir, "planted.json");
+		renameSync(registryFile(), elsewhere);
+		symlinkSync(elsewhere, registryFile());
+
+		expect(readOwnedSurfaces({ stateDir })).toEqual([]);
+		expect(isOwnedSurfacePid(4242, probes(), 0)).toBe(false);
 	});
 });
 

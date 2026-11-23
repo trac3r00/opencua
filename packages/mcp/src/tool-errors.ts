@@ -1,8 +1,17 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { type FailureDelivery, type FailureRetry, ToolFailure, type ToolFailureFields } from "@opencua/core";
 
-type Retry = "safe" | "unsafe" | "never";
+type Retry = FailureRetry;
+
+interface ErrorMetadata {
+	readonly code: string;
+	readonly retry: Retry;
+	readonly delivery: FailureDelivery;
+	readonly suggestion: string;
+	readonly evidence?: Readonly<Record<string, unknown>> | undefined;
+}
 
 const NEVER_RETRY_REASONS = new Set([
 	"user-stopped",
@@ -11,27 +20,70 @@ const NEVER_RETRY_REASONS = new Set([
 	"app-not-approved",
 	"url-blocked",
 	"foreground-refused",
+	"shell-refused",
+	"raw-event-refused",
+	"script-loading-refused",
+	"jxa-refused",
+	"lease-required",
+	"lease-expired",
+	"lease-window-gone",
+	"lease-region-exceeded",
+	"lease-tool-forbidden",
 ]);
 
-function errorMetadata(
-	payload: Record<string, unknown>,
-	message: string,
-	readOnly: boolean,
-): {
-	readonly code: string;
-	readonly retry: Retry;
-	readonly suggestion: string;
-} {
+const DELIVERIES: ReadonlySet<string> = new Set<FailureDelivery>(["not_sent", "sent", "unknown"]);
+const RETRIES: ReadonlySet<string> = new Set<Retry>(["safe", "unsafe", "never"]);
+
+function isDelivery(value: unknown): value is FailureDelivery {
+	return typeof value === "string" && DELIVERIES.has(value);
+}
+
+function isRetry(value: unknown): value is Retry {
+	return typeof value === "string" && RETRIES.has(value);
+}
+
+/** The typed fields a thrown {@link ToolFailure} carries onto the wire; the envelope reads them back. */
+export function failurePayload(error: unknown): { readonly failure?: ToolFailureFields } {
+	if (!(error instanceof ToolFailure)) return {};
+	return {
+		failure: {
+			code: error.code,
+			delivery: error.delivery,
+			retry: error.retry,
+			hint: error.hint,
+			...(error.evidence === undefined ? {} : { evidence: error.evidence }),
+		},
+	};
+}
+
+function typedFailure(payload: Record<string, unknown>): ErrorMetadata | undefined {
+	const failure = payload["failure"];
+	if (typeof failure !== "object" || failure === null || Array.isArray(failure)) return undefined;
+	const fields = Object.fromEntries(Object.entries(failure));
+	const { code, delivery, retry, hint, evidence } = fields;
+	if (typeof code !== "string" || !isDelivery(delivery) || !isRetry(retry) || typeof hint !== "string") {
+		return undefined;
+	}
+	const evidenceRecord =
+		typeof evidence === "object" && evidence !== null && !Array.isArray(evidence)
+			? Object.fromEntries(Object.entries(evidence))
+			: undefined;
+	return { code, delivery, retry, suggestion: hint, evidence: evidenceRecord };
+}
+
+function errorMetadata(payload: Record<string, unknown>, message: string, readOnly: boolean): ErrorMetadata {
 	const reason = payload["reason"];
 	// Only an explicit false proves nothing was delivered; a missing or "unknown" value does not.
 	const notDispatched = payload["actionDispatched"] === false;
 	const dispatched = payload["actionDispatched"] === true;
+	const reported: FailureDelivery = dispatched ? "sent" : notDispatched ? "not_sent" : "unknown";
 	// A refusal keeps its own code even when input went out first, so its "never" and its
 	// ask-the-user guidance are not replaced by the generic post-dispatch envelope.
 	if (typeof reason === "string" && NEVER_RETRY_REASONS.has(reason)) {
 		return {
 			code: reason.toUpperCase().replaceAll("-", "_"),
 			retry: "never",
+			delivery: reported,
 			suggestion: dispatched
 				? "Input may already have been delivered. Ask the user to resolve the refusal and verify the outcome; do not retry."
 				: "Ask the user to resolve the refusal. Do not retry input automatically.",
@@ -41,68 +93,30 @@ function errorMetadata(
 		return {
 			code: "POST_ACTION_ERROR",
 			retry: "unsafe",
+			delivery: "sent",
 			suggestion: "Input may already have been delivered. Observe and verify the outcome before sending more input.",
 		};
 	}
+	const typed = typedFailure(payload);
+	if (typed !== undefined) return typed;
 	if (
 		reason === "stale-observation-token" ||
 		reason === "observation-replaced" ||
 		reason === "element-not-observed" ||
 		reason === "token-observation-mismatch" ||
-		message.startsWith("STALE_REF:") ||
-		message.includes("observation token is missing, stale") ||
+		// Thrown by core accessibility (an element id that now names another control, or a subtree of an observation
+		// that is gone); that module raises plain errors, so these two are still recognised by their wording.
 		message.includes("not the observed control") ||
 		message.includes("is not part of the current observation")
 	) {
 		return {
 			code: "STALE_REF",
 			retry: "safe",
+			delivery: "not_sent",
 			suggestion: "Observe the app again and use only that snapshot's refs and token.",
 		};
 	}
-	// The session refuses an unassigned call on a worker's app before it runs: nothing was read or sent.
-	if (/^app ".+" is owned by worker ".+"/.test(message)) {
-		return {
-			code: "APP_OWNED_BY_WORKER",
-			retry: "safe",
-			suggestion:
-				"Nothing was sent. Act through run_worker or manage_workers observe for the worker named, or release it first.",
-		};
-	}
-	// App resolution fails before any read or input: the app is closed (or not an app), not unusable. The generic
-	// envelope told agents "delivery status unknown" here, and they gave up on the app instead of opening it.
-	if (message.startsWith("No running app matched")) {
-		return {
-			code: "APP_NOT_RUNNING",
-			retry: "safe",
-			suggestion:
-				"Nothing was sent: no running app matched. Check list_apps, or open it with open_app (an installed app by name or bundle id), then observe it again.",
-		};
-	}
-	// The coordinator refuses these before any read or input, so nothing was sent and asking again is safe.
-	if (/^(?:app|worker) ".+" is already (?:owned|assigned)/.test(message)) {
-		return {
-			code: "WORKER_CONFLICT",
-			retry: "safe",
-			suggestion:
-				"Nothing was sent. Pick another app or worker id, or release the worker that holds it, then retry.",
-		};
-	}
-	const worker = /^worker ".+" is (not assigned|busy)$/.exec(message);
-	if (worker !== null) {
-		return worker[1] === "busy"
-			? {
-					code: "WORKER_BUSY",
-					retry: "safe",
-					suggestion: "Nothing was sent. Wait for the worker's current run to finish, then retry.",
-				}
-			: {
-					code: "WORKER_NOT_ASSIGNED",
-					retry: "safe",
-					suggestion:
-						"Nothing was sent. Check manage_workers status for the worker id, or have the coordinator assign it, then retry.",
-				};
-	}
+	// The MCP SDK words its own argument validation failures; there is no throw site of ours to type.
 	if (
 		message.includes("Invalid arguments") ||
 		message.includes("Invalid params") ||
@@ -111,6 +125,7 @@ function errorMetadata(
 		return {
 			code: "INVALID_ARGUMENT",
 			retry: "never",
+			delivery: "not_sent",
 			suggestion: "Read the tool schema and correct the arguments before calling again.",
 		};
 	}
@@ -118,6 +133,7 @@ function errorMetadata(
 		return {
 			code: reason.toUpperCase().replaceAll("-", "_"),
 			retry: notDispatched ? "safe" : "unsafe",
+			delivery: reported,
 			suggestion: notDispatched
 				? "Observe the target app again and resolve the refusal before retrying."
 				: "Delivery is unconfirmed. Observe and verify the target before retrying.",
@@ -127,11 +143,13 @@ function errorMetadata(
 		? {
 				code: "TOOL_ERROR",
 				retry: "safe",
+				delivery: "not_sent",
 				suggestion: "Nothing was sent: this tool only reads. Correct the arguments or the app state, then retry.",
 			}
 		: {
 				code: "TOOL_ERROR",
 				retry: "unsafe",
+				delivery: "unknown",
 				suggestion: "Observe and verify the target before retrying; the operation's delivery status is unknown.",
 			};
 }
@@ -173,16 +191,19 @@ export function normalizeToolError(result: CallToolResult, readOnly = false): Ca
 		}
 	}
 	if (result.isError !== true && payload["observationStatus"] !== "error") return result;
-	const metadata = errorMetadata(payload, message, readOnly);
+	const { code, retry, delivery, suggestion, evidence } = errorMetadata(payload, message, readOnly);
+	const { failure: _transported, ...legacy } = payload;
 	const content = [...result.content];
 	const text = {
 		type: "text" as const,
 		text: JSON.stringify({
-			...payload,
+			...legacy,
 			ok: false,
 			...(payloadIndex === -1 ? { error: message } : {}),
-			...metadata,
-			disposition: { retry: metadata.retry },
+			code,
+			retry,
+			suggestion,
+			disposition: { retry, delivery, hint: suggestion, ...(evidence === undefined ? {} : { evidence }) },
 		}),
 	};
 	if (payloadIndex === -1) content.push(text);

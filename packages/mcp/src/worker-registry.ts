@@ -1,6 +1,48 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { processStartTime } from "@opencua/core";
+import { ToolFailure } from "@opencua/core";
+
+/** Worker lookups and claims refused before any read or input: nothing was sent, so asking again is safe. */
+export function workerNotAssigned(workerId: string): ToolFailure {
+	return new ToolFailure(`worker "${workerId}" is not assigned`, {
+		code: "WORKER_NOT_ASSIGNED",
+		delivery: "not_sent",
+		retry: "safe",
+		hint: "Nothing was sent. Check manage_workers status for the worker id, or have the coordinator assign it, then retry.",
+		evidence: { worker_id: workerId },
+	});
+}
+
+export function workerBusy(workerId: string): ToolFailure {
+	return new ToolFailure(`worker "${workerId}" is busy`, {
+		code: "WORKER_BUSY",
+		delivery: "not_sent",
+		retry: "safe",
+		hint: "Nothing was sent. Wait for the worker's current run to finish, then retry.",
+		evidence: { worker_id: workerId },
+	});
+}
+
+export function workerConflict(message: string): ToolFailure {
+	return new ToolFailure(message, {
+		code: "WORKER_CONFLICT",
+		delivery: "not_sent",
+		retry: "safe",
+		hint: "Nothing was sent. Pick another app or worker id, or release the worker that holds it, then retry.",
+	});
+}
+
+/** A call outside the owning worker on a worker's app, refused before it runs. */
+export function appOwnedByWorker(message: string): ToolFailure {
+	return new ToolFailure(message, {
+		code: "APP_OWNED_BY_WORKER",
+		delivery: "not_sent",
+		retry: "safe",
+		hint: "Nothing was sent. Act through run_worker or manage_workers observe for the worker named, or release it first.",
+	});
+}
 
 /** One assignment as its assigning process submits it; the registry stamps the lease. */
 export interface SharedWorkerClaim {
@@ -18,6 +60,12 @@ export interface SharedWorkerClaim {
 	readonly ownerPid: number;
 }
 
+/**
+ * Which process holds a pid now: a value that differs for every process that ever holds it, or undefined when none
+ * runs. A pid alone would let a later process that reuses it pass for the one that wrote a claim.
+ */
+export type ProcessIdentity = (pid: number) => string | undefined;
+
 /** One assignment as every opencua-mcp process on this Mac sees it. */
 export interface SharedWorkerEntry extends SharedWorkerClaim {
 	/**
@@ -26,6 +74,11 @@ export interface SharedWorkerEntry extends SharedWorkerClaim {
 	 * opencua wrote.
 	 */
 	readonly lease?: string;
+	/**
+	 * The identity of `ownerPid` when the claim was written: the claim is the owner's only while that process still
+	 * holds the pid. Absent in a file an older opencua wrote, where a running pid is all that can be checked.
+	 */
+	readonly ownerStartedAt?: string;
 	/** The process running this worker right now; absent while it is idle. */
 	readonly busy?: SharedWorkerRun;
 }
@@ -34,6 +87,8 @@ export interface SharedWorkerEntry extends SharedWorkerClaim {
 export interface SharedWorkerRun {
 	readonly pid: number;
 	readonly run: string;
+	/** The identity of `pid` when the run began; absent in a file an older opencua wrote. */
+	readonly startedAt?: string;
 }
 
 /**
@@ -119,7 +174,15 @@ function alive(pid: number): boolean {
 	}
 }
 
-/** The "<pid> <nonce>" token a lock holder wrote, or undefined when the lock has none (yet) or is gone. */
+/** Stands in for a start time on a platform that reports none, so a running process there is told only from none. */
+const UNKNOWN_START = "unknown-start";
+
+/** The kernel start time of the process at `pid`; a pid that runs without one to read is known only to run. */
+function runningProcess(pid: number): string | undefined {
+	return alive(pid) ? (processStartTime(pid) ?? UNKNOWN_START) : undefined;
+}
+
+/** The "<pid> <nonce> <start time>" token a lock holder wrote, or undefined when the lock has none (yet) or is gone. */
 function lockOwner(lock: string): string | undefined {
 	try {
 		return readFileSync(join(lock, "owner"), "utf8");
@@ -136,7 +199,11 @@ function idle({ busy: _busy, ...entry }: SharedWorkerEntry): SharedWorkerEntry {
 function isRun(value: unknown): value is SharedWorkerRun {
 	if (typeof value !== "object" || value === null) return false;
 	const run = value as Record<string, unknown>;
-	return Number.isSafeInteger(run["pid"]) && typeof run["run"] === "string";
+	return (
+		Number.isSafeInteger(run["pid"]) &&
+		typeof run["run"] === "string" &&
+		(run["startedAt"] === undefined || typeof run["startedAt"] === "string")
+	);
 }
 
 function isEntry(value: unknown): value is SharedWorkerEntry {
@@ -150,21 +217,33 @@ function isEntry(value: unknown): value is SharedWorkerEntry {
 		Number.isSafeInteger(entry["ownerPid"]) &&
 		(entry["region"] === undefined || isRegion(entry["region"])) &&
 		(entry["lease"] === undefined || typeof entry["lease"] === "string") &&
+		(entry["ownerStartedAt"] === undefined || typeof entry["ownerStartedAt"] === "string") &&
 		(entry["busy"] === undefined || isRun(entry["busy"]))
 	);
 }
 
 /**
- * `ownAlive` answers whether a process still runs, and `ownerPid` is the process this registry acts for; tests
- * model several opencua processes over one directory by giving each registry its own.
+ * `identify` says which process holds a pid now, and `ownerPid` is the process this registry acts for; tests model
+ * several opencua processes over one directory by giving each registry its own.
  */
 export function fileWorkerRegistry(
 	directory: string,
-	ownAlive: (pid: number) => boolean = alive,
+	identify: ProcessIdentity = runningProcess,
 	ownerPid: number = process.pid,
 ): WorkerRegistry {
 	const file = join(directory, "registry.json");
 	const lock = join(directory, "registry.lock");
+
+	/**
+	 * Whether the process that wrote a record for `pid` still holds that pid. A record without a start time comes
+	 * from an older opencua and is judged by the pid running at all; this process stamps everything it writes, so
+	 * such a record naming its own pid was left by an earlier process that had the pid.
+	 */
+	const stillRuns = (
+		pid: number,
+		startedAt: string | undefined,
+		current: string | undefined = identify(pid),
+	): boolean => current !== undefined && (startedAt === undefined ? pid !== ownerPid : current === startedAt);
 
 	// A held lock is never taken from a live owner.
 	const abandoned = (owner: string | undefined): boolean => {
@@ -176,8 +255,12 @@ export function fileWorkerRegistry(
 				return false;
 			}
 		}
-		const pid = Number(owner.split(" ")[0]);
-		return Number.isSafeInteger(pid) && !ownAlive(pid);
+		const [holder, , ...started] = owner.split(" ");
+		const pid = Number(holder);
+		if (!Number.isSafeInteger(pid)) return false;
+		const current = identify(pid);
+		// A token without a start time is an older opencua's; its holder is judged by the pid running at all.
+		return current === undefined || (started.length > 0 && current !== started.join(" "));
 	};
 
 	// Moves an abandoned lock aside atomically, then confirms it moved the one it judged; a lock someone acquired in
@@ -203,11 +286,13 @@ export function fileWorkerRegistry(
 	// mkdir is atomic, so the directory is the lock, and the token inside it says who holds it.
 	const locked = <T>(work: () => T): T => {
 		mkdirSync(directory, { recursive: true, mode: 0o700 });
-		const token = `${process.pid} ${randomUUID()}`;
+		const nonce = randomUUID();
+		let token = "";
 		const deadline = Date.now() + LOCK_WAIT_MS;
 		for (;;) {
 			try {
 				mkdirSync(lock);
+				token = `${ownerPid} ${nonce} ${identify(ownerPid) ?? UNKNOWN_START}`;
 				writeFileSync(join(lock, "owner"), token, { mode: 0o600 });
 				break;
 			} catch (error: unknown) {
@@ -249,10 +334,21 @@ export function fileWorkerRegistry(
 				`the shared worker registry ${file} does not hold a valid worker list; remove it once no opencua session is running`,
 			);
 		}
-		// A run in a process that exited is over, whatever the file still says.
+		// One answer per pid for the whole read, so every record of a process is judged against the same identity.
+		const identities = new Map<number, string | undefined>();
+		const current = (pid: number): string | undefined => {
+			if (!identities.has(pid)) identities.set(pid, identify(pid));
+			return identities.get(pid);
+		};
+		// A claim or run of a process that exited is over, whatever the file still says, and so is one whose pid
+		// another process holds now.
 		return entries
-			.filter((entry) => ownAlive(entry.ownerPid))
-			.map((entry) => (entry.busy !== undefined && !ownAlive(entry.busy.pid) ? idle(entry) : entry));
+			.filter((entry) => stillRuns(entry.ownerPid, entry.ownerStartedAt, current(entry.ownerPid)))
+			.map((entry) =>
+				entry.busy !== undefined && !stillRuns(entry.busy.pid, entry.busy.startedAt, current(entry.busy.pid))
+					? idle(entry)
+					: entry,
+			);
 	};
 
 	/** The one process in the way of releasing or running `entry`, or undefined when this process may go ahead. */
@@ -291,7 +387,7 @@ export function fileWorkerRegistry(
 								(other.appPid === entry.appPid && !(other.shared === true && entry.shared === true))),
 					);
 					if (held !== undefined) {
-						throw new Error(
+						throw workerConflict(
 							held.worker_id === entry.worker_id
 								? `worker "${entry.worker_id}" is already assigned by another opencua session`
 								: `app "${entry.app}" is already owned by worker "${held.worker_id}" in another opencua session`,
@@ -308,7 +404,14 @@ export function fileWorkerRegistry(
 					}
 				}
 				const claimed = new Set(entries.map((entry) => entry.worker_id));
-				const leased = entries.map((entry) => ({ ...entry, lease: randomUUID() }));
+				const leased = entries.map((entry) => {
+					const ownerStartedAt = identify(entry.ownerPid);
+					return {
+						...entry,
+						lease: randomUUID(),
+						...(ownerStartedAt === undefined ? {} : { ownerStartedAt }),
+					};
+				});
 				write([...current.filter((entry) => !claimed.has(entry.worker_id)), ...leased]);
 				return leased;
 			}),
@@ -328,11 +431,16 @@ export function fileWorkerRegistry(
 				const current = read();
 				const entry = current.find((candidate) => candidate.worker_id === workerId);
 				if (entry === undefined) {
-					throw new Error(`worker "${workerId}" is not assigned`);
+					throw workerNotAssigned(workerId);
 				}
 				const refusal = heldElsewhere(entry, "run");
 				if (refusal !== undefined) throw refusal;
-				const busy: SharedWorkerRun = { pid: ownerPid, run: randomUUID() };
+				const startedAt = identify(ownerPid);
+				const busy: SharedWorkerRun = {
+					pid: ownerPid,
+					run: randomUUID(),
+					...(startedAt === undefined ? {} : { startedAt }),
+				};
 				write(current.map((candidate) => (candidate === entry ? { ...entry, busy } : candidate)));
 				return busy;
 			}),

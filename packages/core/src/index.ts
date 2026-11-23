@@ -74,7 +74,7 @@ export type {
 	PreflightOptions,
 	PreflightResult,
 } from "./computer/guarded-interface.js";
-export type { ComputerInterface, ScreenshotResult, WindowTextRead } from "./computer/interface.js";
+export type { ComputerInterface, ElementHit, ScreenshotResult, WindowTextRead } from "./computer/interface.js";
 export {
 	type TopLevelWindow,
 	type TopLevelWindowOptions,
@@ -167,6 +167,7 @@ export type {
 	HistoryApp,
 	HistoryWindow,
 	HistoryElement,
+	HistoryDocument,
 	HistoryAx,
 	HistoryEvent,
 	HistoryEventKind,
@@ -221,13 +222,29 @@ export {
 	writeHistorySettings,
 } from "./passive-memory/history-control.js";
 export {
+	DEFAULT_RAW_RETENTION_HOURS,
 	type HistoryDeletion,
 	type HistorySegmentSummary,
 	deleteHistorySegments,
 	isHistorySegmentId,
 	listHistorySegments,
 	parseHistoryDuration,
+	readRawRetentionMs,
 } from "./passive-memory/history-management.js";
+export {
+	type HistoryClearResult,
+	type HistoryMemory,
+	type HistoryMemoryGenerator,
+	type HistoryMemorySkill,
+	type HistorySession,
+	type HistorySummarizeOptions,
+	type HistorySummarizeResult,
+	clearHistory,
+	historyMemoriesDir,
+	listHistoryMemories,
+	sessionizeHistory,
+	summarizeHistory,
+} from "./passive-memory/history-memories.js";
 export {
 	SKILL_DESCRIPTIONS_FILE,
 	type SkillDescription,
@@ -235,6 +252,7 @@ export {
 	describeSkillCandidates,
 	parseSkillDescription,
 	readSkillDescriptions,
+	readSkippedSkillCandidates,
 	setSkillDescriptionsEnabled,
 	skillDescriptionPrompt,
 	skillDescriptionsEnabled,
@@ -402,8 +420,10 @@ export {
 } from "./platform/macos-ffi/cursor-motion-config.js";
 export { VMComputer, type VMComputerOptions } from "./platform/vm.js";
 export {
+	type AxRestoreResult,
 	DEFAULT_AX_MESSAGING_TIMEOUT_SECONDS,
 	resolveAxMessagingTimeoutSeconds,
+	restoreAxActivation,
 } from "./platform/macos-ffi/accessibility.js";
 export type {
 	ComputerCapabilities,
@@ -447,6 +467,13 @@ export type {
 export { GuardedPlatformComputer } from "./platform/guarded-platform-computer.js";
 export { denyHostInteraction, HostInteractionDenied } from "./computer/host-interaction-policy.js";
 export {
+	type FailureDelivery,
+	type FailureRetry,
+	type ToolFailureFields,
+	appNotRunning,
+	ToolFailure,
+} from "./computer/tool-failure.js";
+export {
 	type OwnedSurface,
 	boardPageUrl,
 	closeOwnedSurface,
@@ -457,6 +484,20 @@ export {
 	surfaceAudioState,
 	setSessionCursorName,
 } from "./platform/owned-surfaces.js";
+export { processStartTime } from "./platform/macos-ffi/process-info.js";
+export {
+	LEASE_HOLDER_ENV,
+	type LeaseDecision,
+	type LeaseProbes,
+	type LeaseTool,
+	type WindowLease,
+	appendLeaseAudit,
+	leaseHolderFromEnvironment,
+	readLeases,
+	resolveLease,
+	withLease,
+	writeLeases,
+} from "./computer/window-lease.js";
 export { type SurfaceListening, listenToSurface } from "./platform/surface-listen.js";
 export {
 	type ActivityEntry,

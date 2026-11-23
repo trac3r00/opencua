@@ -2,8 +2,12 @@
  * The run_script worker: runs the agent's JavaScript in a vm context inside a worker thread, so the host can
  * terminate a script that never yields. Every action is an RPC to the host, which performs it through the guarded
  * session. Kept self-contained (type-only relative imports) so it also loads as TypeScript source under test.
+ *
+ * The script's realm and this thread's realm never share an object: a value of this realm would hand the script this
+ * realm's Function constructor, and with it `process`. Every value crosses through the membrane at the end of this
+ * file, which copies data and wraps functions, promises and errors in the realm they are going to.
  */
-import { Script, createContext } from "node:vm";
+import { type Context, Script, createContext } from "node:vm";
 import { parentPort } from "node:worker_threads";
 import type {
 	CallError,
@@ -272,24 +276,14 @@ function call(method: CallMethod, target: WorkerTarget | undefined, args: readon
 	});
 }
 
-function formatLogValue(value: unknown): string {
-	if (typeof value === "string") {
-		return value;
-	}
-	try {
-		return JSON.stringify(value) ?? String(value);
-	} catch {
-		return String(value);
-	}
-}
-
-function log(...values: unknown[]): void {
+/** One log line; the membrane formats the script's values in the script's realm and passes the text. */
+function log(text: unknown): void {
 	if (logSent >= MAX_LOG_ENTRIES) {
 		logDropped += 1;
 		return;
 	}
 	logSent += 1;
-	send({ type: "log", text: values.map(formatLogValue).join(" ").slice(0, MAX_LOG_CHARS) });
+	send({ type: "log", text: String(text).slice(0, MAX_LOG_CHARS) });
 }
 
 function sleep(milliseconds: unknown): Promise<void> {
@@ -619,8 +613,393 @@ const apple = Object.freeze({
 		}),
 });
 
-function serializeValue(value: unknown): { readonly value: unknown; readonly valueTruncated: boolean } {
-	const text = value === undefined ? undefined : JSON.stringify(value);
+// --- The membrane between this realm and the script's ---
+
+/** A function or error of this realm and its twin in the script's realm, so each keeps its identity both ways. */
+const scriptTwins = new WeakMap<object, unknown>();
+const hostTwins = new WeakMap<object, unknown>();
+
+/**
+ * What the membrane may do to this realm's values. It runs in the script's realm, where the script can replace any
+ * built-in, so it reaches this realm only through these functions, which the script never sees.
+ */
+const hostKit = Object.freeze({
+	kind: (value: unknown): "function" | "promise" | "error" | "array" | "data" =>
+		typeof value === "function"
+			? "function"
+			: value instanceof Promise
+				? "promise"
+				: value instanceof Error
+					? "error"
+					: Array.isArray(value)
+						? "array"
+						: "data",
+	keys: (value: object): string[] => Object.keys(value),
+	isGetter: (value: object, key: string): boolean => Object.getOwnPropertyDescriptor(value, key)?.get !== undefined,
+	frozen: (value: object): boolean => Object.isFrozen(value),
+	call: (target: (...args: unknown[]) => unknown, args: unknown[]): unknown => Reflect.apply(target, undefined, args),
+	settled: (
+		promise: Promise<unknown>,
+		resolved: (value: unknown) => void,
+		rejected: (reason: unknown) => void,
+	): void => {
+		void promise.then(resolved, rejected);
+	},
+	list: (): unknown[] => [],
+	push: (list: unknown[], value: unknown): void => {
+		list.push(value);
+	},
+	record: (): Record<string, unknown> => ({}),
+	set: (record: Record<string, unknown>, key: string, value: unknown): void => {
+		Object.defineProperty(record, key, { value, writable: true, enumerable: true, configurable: true });
+	},
+	callable:
+		(invoke: (args: unknown[]) => unknown) =>
+		(...args: unknown[]): unknown =>
+			invoke(args),
+	error: (name: string, message: string): Error => {
+		const error = new Error(message);
+		error.name = name;
+		return error;
+	},
+	pair: (hostValue: object, scriptValue: object): void => {
+		scriptTwins.set(hostValue, scriptValue);
+		hostTwins.set(scriptValue, hostValue);
+	},
+	scriptTwin: (hostValue: object): unknown => scriptTwins.get(hostValue),
+	hostTwin: (scriptValue: object): unknown => hostTwins.get(scriptValue),
+});
+
+const scriptApi = Object.freeze({ apple, log, sleep, ...scriptTimers });
+
+/**
+ * The standard globals a script keeps. Whatever else the runtime puts in a new realm is removed before the script
+ * runs: Bun's ShadowRealm evaluates strings in a realm that has `process`, and a later runtime may add more.
+ */
+const SCRIPT_GLOBALS: readonly string[] = [
+	...["globalThis", "undefined", "NaN", "Infinity", "isNaN", "isFinite", "parseInt", "parseFloat", "eval"],
+	...["escape", "unescape", "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent"],
+	...["Object", "Function", "Array", "Number", "Boolean", "String", "Symbol", "BigInt", "Date", "Promise", "RegExp"],
+	...["Error", "AggregateError", "EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError"],
+	...["SuppressedError", "JSON", "Math", "Intl", "Temporal", "Reflect", "Proxy", "Atomics", "Iterator"],
+	...["ArrayBuffer", "SharedArrayBuffer", "DataView", "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array"],
+	...["Uint16Array", "Int32Array", "Uint32Array", "Float16Array", "Float32Array", "Float64Array", "BigInt64Array"],
+	...["BigUint64Array", "Map", "Set", "WeakMap", "WeakSet", "WeakRef", "FinalizationRegistry", "DisposableStack"],
+	"AsyncDisposableStack",
+];
+
+/**
+ * Compiled in the script's realm before the script runs, so everything it creates belongs to that realm. Rules that
+ * keep it sound once the script has replaced built-ins: strict mode (its functions never show up as a caller or in a
+ * stack trace's call sites); built-ins captured up front and never looked up on a prototype later; no iteration
+ * protocol, spread or assignment on a value that holds a host value; and every call into the host inside a try whose
+ * catch converts what was thrown, because a stack overflow inside the host throws the host realm's RangeError.
+ */
+const MEMBRANE_SOURCE = `(function (kit, api, scriptGlobals) {
+	"use strict";
+	const { apply, defineProperty, deleteProperty, getPrototypeOf, ownKeys } = Reflect;
+	const ObjectPrototype = Object.prototype;
+	const objectKeys = Object.keys;
+	const freeze = Object.freeze;
+	const isArray = Array.isArray;
+	const stringify = JSON.stringify;
+	const PromiseCtor = Promise;
+	const promiseThen = Promise.prototype.then;
+	const ErrorCtor = Error;
+	const TypeErrorCtor = TypeError;
+	const StringCtor = String;
+	const global = globalThis;
+	const { kind, keys: hostKeys, isGetter, frozen, call, settled, list, push, record, set, callable, pair } = kit;
+	const { error: hostError, scriptTwin, hostTwin } = kit;
+	const MAX_DEPTH = 64;
+
+	const isObject = (value) => (typeof value === "object" && value !== null) || typeof value === "function";
+	const data = (value) => ({ __proto__: null, value, writable: true, enumerable: true, configurable: true });
+
+	// A host value never has this realm's Object.prototype in its chain, so anything that does is safe to hand over.
+	const isOwn = (value) => {
+		let step = value;
+		for (let depth = 0; depth < MAX_DEPTH && step !== null; depth += 1) {
+			if (step === ObjectPrototype) return true;
+			step = getPrototypeOf(step);
+		}
+		return false;
+	};
+
+	// What a catch block may rethrow to the script: its own value as it is, a host value converted, never a host value.
+	const cross = (thrown) => {
+		if (!isObject(thrown) || isOwn(thrown)) return thrown;
+		try {
+			return fromHost(thrown, 0);
+		} catch (ignored) {
+			return new ErrorCtor("run_script: an error could not cross into the script");
+		}
+	};
+
+	const copyHostKeys = (source, target, depth) => {
+		const names = hostKeys(source);
+		const count = names.length;
+		for (let index = 0; index < count; index += 1) {
+			const name = names[index];
+			if (isGetter(source, name)) {
+				const get = () => {
+					try {
+						return fromHost(source[name], 0);
+					} catch (thrown) {
+						throw cross(thrown);
+					}
+				};
+				defineProperty(target, name, { __proto__: null, get, enumerable: true, configurable: true });
+			} else {
+				defineProperty(target, name, data(fromHost(source[name], depth + 1)));
+			}
+		}
+	};
+
+	const wrapHostFunction = (hostFunction) => {
+		const wrapper = (...args) => {
+			try {
+				const hostArgs = list();
+				for (let index = 0; index < args.length; index += 1) push(hostArgs, toHost(args[index], 0));
+				return fromHost(call(hostFunction, hostArgs), 0);
+			} catch (thrown) {
+				throw cross(thrown);
+			}
+		};
+		pair(hostFunction, wrapper);
+		return wrapper;
+	};
+
+	const wrapHostPromise = (hostPromise) =>
+		new PromiseCtor((resolve, reject) => {
+			try {
+				settled(
+					hostPromise,
+					(value) => {
+						let own;
+						try {
+							own = fromHost(value, 0);
+						} catch (thrown) {
+							reject(cross(thrown));
+							return;
+						}
+						resolve(own);
+					},
+					(reason) => {
+						reject(cross(reason));
+					},
+				);
+			} catch (thrown) {
+				reject(cross(thrown));
+			}
+		});
+
+	// The script catches an Error of its own realm carrying the host error's fields (kind, payload, refused).
+	const wrapHostError = (hostFailure, depth) => {
+		const message = hostFailure.message;
+		const wrapper = new ErrorCtor(typeof message === "string" ? message : "");
+		copyHostKeys(hostFailure, wrapper, depth);
+		const name = hostFailure.name;
+		if (typeof name === "string" && wrapper.name !== name) {
+			defineProperty(wrapper, "name", { __proto__: null, value: name, writable: true, configurable: true });
+		}
+		pair(hostFailure, wrapper);
+		return wrapper;
+	};
+
+	const fromHost = (value, depth) => {
+		if (!isObject(value)) return value;
+		const twin = scriptTwin(value);
+		if (twin !== undefined) return twin;
+		if (depth > MAX_DEPTH) throw new TypeErrorCtor("run_script: a value from the host nests too deeply");
+		const what = kind(value);
+		if (what === "function") return wrapHostFunction(value);
+		if (what === "promise") return wrapHostPromise(value);
+		if (what === "error") return wrapHostError(value, depth);
+		if (what === "array") {
+			const items = [];
+			const count = value.length;
+			for (let index = 0; index < count; index += 1) {
+				defineProperty(items, index, data(fromHost(value[index], depth + 1)));
+			}
+			return items;
+		}
+		const copy = {};
+		copyHostKeys(value, copy, depth);
+		return frozen(value) ? freeze(copy) : copy;
+	};
+
+	const callScript = (scriptFunction, hostArgs) => {
+		const args = [];
+		const count = hostArgs.length;
+		for (let index = 0; index < count; index += 1) defineProperty(args, index, data(fromHost(hostArgs[index], 0)));
+		let result;
+		try {
+			result = apply(scriptFunction, undefined, args);
+		} catch (thrown) {
+			throw toHost(thrown, 0);
+		}
+		return toHost(result, 0);
+	};
+
+	// Data is copied by its own enumerable keys; a function or error the host gave out goes back as the original.
+	const toHost = (value, depth) => {
+		if (!isObject(value)) return value;
+		const twin = hostTwin(value);
+		if (twin !== undefined) return twin;
+		if (depth > MAX_DEPTH) throw new TypeErrorCtor("run_script: a value nests too deeply or contains itself");
+		if (typeof value === "function") {
+			const hostFunction = callable((hostArgs) => callScript(value, hostArgs));
+			pair(hostFunction, value);
+			return hostFunction;
+		}
+		if (value instanceof ErrorCtor) {
+			const name = value.name;
+			const message = value.message;
+			const failure = hostError(typeof name === "string" ? name : "Error", typeof message === "string" ? message : "");
+			pair(failure, value);
+			return failure;
+		}
+		if (isArray(value)) {
+			const items = list();
+			const count = value.length;
+			for (let index = 0; index < count; index += 1) push(items, toHost(value[index], depth + 1));
+			return items;
+		}
+		const copy = record();
+		const names = objectKeys(value);
+		for (let index = 0; index < names.length; index += 1) set(copy, names[index], toHost(value[names[index]], depth + 1));
+		return copy;
+	};
+
+	const allowed = { __proto__: null };
+	for (let index = 0; index < scriptGlobals.length; index += 1) allowed[scriptGlobals[index]] = true;
+	const present = ownKeys(global);
+	for (let index = 0; index < present.length; index += 1) {
+		const name = present[index];
+		if (typeof name !== "string" || allowed[name] === true) continue;
+		if (!deleteProperty(global, name)) throw new ErrorCtor("run_script: cannot remove the global " + name);
+	}
+
+	const format = (value) => {
+		if (typeof value === "string") return value;
+		try {
+			const text = stringify(value);
+			return text === undefined ? StringCtor(value) : text;
+		} catch (ignored) {
+			return StringCtor(value);
+		}
+	};
+	const hostLog = api.log;
+	const log = (...values) => {
+		let line = "";
+		for (let index = 0; index < values.length; index += 1) line += (index === 0 ? "" : " ") + format(values[index]);
+		try {
+			hostLog(line);
+		} catch (thrown) {
+			throw cross(thrown);
+		}
+	};
+	defineProperty(global, "apple", data(fromHost(api.apple, 0)));
+	defineProperty(global, "log", data(log));
+	defineProperty(global, "console", data({ log, info: log, warn: log, error: log }));
+	defineProperty(global, "sleep", data(fromHost(api.sleep, 0)));
+	defineProperty(global, "setTimeout", data(fromHost(api.setTimeout, 0)));
+	defineProperty(global, "clearTimeout", data(fromHost(api.clearTimeout, 0)));
+
+	// The script's promise is settled through the captured then: awaiting it from the host would call the script's
+	// Promise.prototype.then with the host's resolving functions.
+	const settle = (pending, done, failed) => {
+		apply(promiseThen, pending, [
+			(value) => {
+				let text;
+				try {
+					text = value === undefined ? undefined : stringify(value);
+				} catch (thrown) {
+					fail(thrown, failed);
+					return;
+				}
+				try {
+					done(text);
+				} catch (ignored) {}
+			},
+			(reason) => fail(reason, failed),
+		]);
+	};
+	const fail = (reason, failed) => {
+		try {
+			let failure;
+			try {
+				failure = toHost(reason, 0);
+			} catch (ignored) {
+				failure = hostError("Error", "the script failed with a value that could not be read");
+			}
+			failed(failure);
+		} catch (ignored) {}
+	};
+
+	const rejectsInScriptRealm = (pending, report) => {
+		const answer = (own) => {
+			try {
+				report(own);
+			} catch (ignored) {}
+		};
+		apply(promiseThen, pending, [
+			() => answer(false),
+			(reason) => {
+				let own = false;
+				try {
+					own = !isObject(reason) || isOwn(reason);
+				} catch (ignored) {}
+				answer(own);
+			},
+		]);
+	};
+
+	return freeze({ __proto__: null, settle, rejectsInScriptRealm, error: (message) => new ErrorCtor(message) });
+})`;
+
+/** The membrane's entry points; they are functions of the script's realm, so the host only ever calls them. */
+interface Membrane {
+	readonly settle: (
+		pending: unknown,
+		done: (text: string | undefined) => void,
+		failed: (error: unknown) => void,
+	) => void;
+	readonly rejectsInScriptRealm: (pending: unknown, report: (own: boolean) => void) => void;
+	readonly error: (message: string) => unknown;
+}
+
+function isMembrane(value: unknown): value is Membrane {
+	return ["settle", "rejectsInScriptRealm", "error"].every((key) => typeof pick(value, key) === "function");
+}
+
+const membraneScript = new Script(MEMBRANE_SOURCE, { filename: "run_script_membrane.js" });
+
+function installMembrane(context: Context): Membrane {
+	const install: unknown = membraneScript.runInContext(context);
+	if (typeof install !== "function") {
+		throw new Error("the run_script membrane did not compile to a function");
+	}
+	const membrane: unknown = install(hostKit, scriptApi, SCRIPT_GLOBALS);
+	if (!isMembrane(membrane)) {
+		throw new Error("the run_script membrane did not start");
+	}
+	return membrane;
+}
+
+/**
+ * Whether a refused `import()` rejects with the script realm's error. Node only calls the refusing callback under
+ * --experimental-vm-modules (the host starts this worker with it); without it Node rejects with its own realm's error.
+ */
+function importRefusalStaysInScriptRealm(context: Context, membrane: Membrane, refuse: () => never): Promise<boolean> {
+	const probe = new Script('import("run_script:probe")', { importModuleDynamically: refuse });
+	return new Promise<boolean>((resolve) => {
+		membrane.rejectsInScriptRealm(probe.runInContext(context), resolve);
+	});
+}
+
+function serializeValue(text: string | undefined): { readonly value: unknown; readonly valueTruncated: boolean } {
 	if (text === undefined) {
 		return { value: null, valueTruncated: false };
 	}
@@ -629,27 +1008,45 @@ function serializeValue(value: unknown): { readonly value: unknown; readonly val
 		: { value: text.slice(0, MAX_VALUE_CHARS), valueTruncated: true };
 }
 
+function failure(error: unknown): ScriptOutcome {
+	if (error instanceof ScriptActionError) {
+		return { ok: false, kind: "action-failed", error: error.message, payload: error.payload };
+	}
+	return { ok: false, kind: "script-error", error: errorMessage(error) };
+}
+
 async function execute(code: string): Promise<ScriptOutcome> {
+	// The context object has no prototype: an ordinary object's inherited `constructor` would be a global of the
+	// script, and it is this realm's Object.
+	const context = createContext(Object.create(null), { codeGeneration: { strings: false, wasm: false } });
+	const membrane = installMembrane(context);
+	const refuseImport = (): never => {
+		throw membrane.error("run_script has no dynamic import(); use the apple API");
+	};
 	let script: Script;
 	try {
-		script = new Script(`(async function () {\n${code}\n})()`, { filename: "run_script.js", lineOffset: -1 });
+		script = new Script(`(async function () {\n${code}\n})()`, {
+			filename: "run_script.js",
+			lineOffset: -1,
+			importModuleDynamically: refuseImport,
+		});
 	} catch (error: unknown) {
 		return { ok: false, kind: "syntax-error", error: errorMessage(error) };
 	}
-	const context = createContext(
-		{ apple, log, console: { log, info: log, warn: log, error: log }, sleep, ...scriptTimers },
-		{ codeGeneration: { strings: false, wasm: false } },
-	);
-	try {
-		const pending: unknown = script.runInContext(context);
-		const value: unknown = await Promise.resolve(pending);
-		return { ok: true, ...serializeValue(value) };
-	} catch (error: unknown) {
-		if (error instanceof ScriptActionError) {
-			return { ok: false, kind: "action-failed", error: error.message, payload: error.payload };
-		}
-		return { ok: false, kind: "script-error", error: errorMessage(error) };
+	if (/\bimport\b/.test(code) && !(await importRefusalStaysInScriptRealm(context, membrane, refuseImport))) {
+		return {
+			ok: false,
+			kind: "script-error",
+			error: "This runtime cannot contain a dynamic import(), so a script that uses the word `import` is not run. Remove it, or start the server on a runtime whose workers accept --experimental-vm-modules.",
+		};
 	}
+	return await new Promise<ScriptOutcome>((resolve) => {
+		membrane.settle(
+			script.runInContext(context),
+			(text) => resolve({ ok: true, ...serializeValue(text) }),
+			(error) => resolve(failure(error)),
+		);
+	});
 }
 
 port.on("message", (message: HostMessage) => {

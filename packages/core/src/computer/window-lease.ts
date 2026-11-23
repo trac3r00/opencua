@@ -1,14 +1,30 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { trustedStateFile } from "../platform/state-file.js";
 import type { Rect } from "../types/index.js";
 
 /**
- * A person's grant that lets one agent holder drive one window of one of their own apps, for a bounded time and a
- * bounded set of tools. Leases are written only by the person (CLI with a presence proof); nothing an agent sends
- * can create or widen one. See docs/plans/2026-11-08-window-lease-contract.md.
+ * A person's grant that lets one agent holder send input to one window of one of their apps, for a bounded time and
+ * a bounded set of tools. Leases are opt-in: a server acts under them only when it is started with
+ * OPENCUA_LEASE_HOLDER, and without it host control is unrestricted as before. `opencua lease grant` writes them and
+ * no MCP tool does, so nothing an agent sends through the server can create or widen one. The file is private to
+ * the person's account and no more: a process running as the person, such as an agent with a shell, can write it,
+ * so a lease scopes a cooperating agent and is not a sandbox. See docs/plans/2026-11-08-window-lease-contract.md.
  */
-export const LEASE_TOOLS = ["click", "drag", "scroll", "key", "type", "set_value", "capture"] as const;
+export const LEASE_TOOLS = [
+	"click",
+	"drag",
+	"scroll",
+	"key",
+	"type",
+	"set_value",
+	/** AppleScript to the app's scripting objects; it reaches the whole app, not only the leased window. */
+	"script",
+	/** Shell commands through Terminal.app, which run in a window of their own. */
+	"terminal",
+	"capture",
+] as const;
 export type LeaseTool = (typeof LEASE_TOOLS)[number];
 
 export interface WindowLease {
@@ -17,7 +33,7 @@ export interface WindowLease {
 	readonly target: {
 		readonly bundleId: string;
 		readonly pid: number;
-		/** `ps -o lstart=` at grant time, so a later process that reuses the pid holds no lease. */
+		/** The process's kernel start time at grant time, so a later process that reuses the pid holds no lease. */
 		readonly startedAt: string;
 		readonly windowId: number;
 		/** Window-local points, top-left origin; absent means the whole window. */
@@ -46,14 +62,35 @@ export type LeaseRefusalCode =
 	| "lease-wait-timeout"
 	| "input-lock-busy";
 
-export class LeaseRefusal extends Error {
-	constructor(
-		readonly code: LeaseRefusalCode,
-		detail: string,
-	) {
-		super(`${code}: ${detail}; only the person can grant a lease (opencua lease grant)`);
-		this.name = "LeaseRefusal";
+/** The server environment variable that names the holder and, by being set, turns window leases on. */
+export const LEASE_HOLDER_ENV = "OPENCUA_LEASE_HOLDER";
+const MAX_HOLDER_CHARS = 128;
+
+/** A holder name as a lease and the environment spell it: trimmed, at most 128 characters, no control characters. */
+export function parseLeaseHolder(value: string): string | undefined {
+	const holder = value.trim();
+	const printable = [...holder].every((character) => {
+		const code = character.codePointAt(0) ?? 0;
+		return code > 0x1f && code !== 0x7f;
+	});
+	return holder.length > 0 && holder.length <= MAX_HOLDER_CHARS && printable ? holder : undefined;
+}
+
+/**
+ * The holder this server acts as, or undefined when leases are off (the variable unset or blank), which is the
+ * default. A value that is set but is not a holder name throws: the person asked for leases, and starting without
+ * them would quietly give the agent every window.
+ */
+export function leaseHolderFromEnvironment(env: NodeJS.ProcessEnv = process.env): string | undefined {
+	const value = env[LEASE_HOLDER_ENV];
+	if (value === undefined || value.trim() === "") return undefined;
+	const holder = parseLeaseHolder(value);
+	if (holder === undefined) {
+		throw new Error(
+			`${LEASE_HOLDER_ENV} must be a name of at most ${MAX_HOLDER_CHARS} characters without control characters`,
+		);
 	}
+	return holder;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -177,18 +214,17 @@ let cached: { readonly path: string; readonly stamp: string; readonly leases: re
 
 /**
  * The leases on disk, re-read whenever the file's inode, size, mtime or ctime changes (ctime catches a chmod that
- * makes it unreadable). A missing or unreadable file means none.
+ * makes it unreadable). A missing or unreadable file means none, and so does one that is not this user's alone to
+ * write (see trustedStateFile).
  */
 export function readLeases(stateDir: string): readonly WindowLease[] {
 	const path = leasePath(stateDir);
-	let stamp: string;
-	try {
-		const stat = statSync(path);
-		stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-	} catch {
+	const stat = trustedStateFile(path);
+	if (stat === undefined) {
 		cached = undefined;
 		return [];
 	}
+	const stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
 	if (cached?.path !== path || cached.stamp !== stamp) {
 		let text: string;
 		try {
@@ -219,7 +255,7 @@ export function writeLeases(stateDir: string, leases: readonly WindowLease[]): v
 
 export interface LeaseProbes {
 	readonly now: number;
-	/** Current `ps -o lstart=` of a pid, undefined when it is gone. */
+	/** The kernel start time of the process at a pid now, undefined when it is gone. */
 	readonly startTime: (pid: number) => string | undefined;
 	/** The pid that owns a window now, undefined when the window is gone. */
 	readonly windowOwner: (windowId: number) => number | undefined;
@@ -257,6 +293,78 @@ export function findLiveLease(
 			lease.target.windowId === target.windowId &&
 			leaseLiveness(lease, probes).live,
 	);
+}
+
+export type LeaseDecision =
+	| { readonly lease: WindowLease }
+	| {
+			readonly code:
+				| "lease-required"
+				| "lease-expired"
+				| "lease-window-gone"
+				| "lease-region-exceeded"
+				| "lease-tool-forbidden";
+			readonly detail: string;
+	  };
+
+/**
+ * Whether `holder` may use `tool` on this exact window of this exact process now, and why not when it may not.
+ * With no tool named, any tool's lease on the window will do. With no window named, a lease on any window of the
+ * process will do: that is for the routes that reach a whole app (a script, a Terminal command) rather than a window. A lease confined to a region never stands in for the
+ * whole window: input is not confined to regions yet, so such a lease allows nothing rather than everything.
+ */
+export function resolveLease(
+	leases: readonly WindowLease[],
+	holder: string,
+	target: { readonly pid: number; readonly windowId?: number },
+	tool: LeaseTool | undefined,
+	probes: LeaseProbes,
+): LeaseDecision {
+	const granted = leases.filter(
+		(lease) =>
+			lease.holder === holder &&
+			lease.target.pid === target.pid &&
+			(target.windowId === undefined || lease.target.windowId === target.windowId),
+	);
+	if (granted.length === 0) {
+		return {
+			code: "lease-required",
+			detail: `"${holder}" holds no lease on ${target.windowId === undefined ? "any window" : `window ${target.windowId}`} of process ${target.pid}`,
+		};
+	}
+	const live: WindowLease[] = [];
+	let lapsed: LeaseDecision | undefined;
+	for (const lease of granted) {
+		const liveness = leaseLiveness(lease, probes);
+		if (liveness.live) {
+			live.push(lease);
+			continue;
+		}
+		lapsed ??= {
+			code: liveness.code,
+			detail:
+				liveness.code === "lease-expired"
+					? `lease ${lease.id} expired at ${lease.expiresAt}`
+					: `lease ${lease.id} was granted for a window or process that is gone`,
+		};
+	}
+	if (live.length === 0 && lapsed !== undefined) return lapsed;
+	const whole = live.filter((lease) => lease.target.region === undefined);
+	const [any] = whole;
+	if (any === undefined) {
+		return {
+			code: "lease-region-exceeded",
+			detail: `lease ${live.map((lease) => lease.id).join(", ")} covers only a region of the window, and regions are not enforced yet`,
+		};
+	}
+	const allowed = tool === undefined ? any : whole.find((lease) => lease.tools.includes(tool));
+	if (allowed === undefined) {
+		return {
+			code: "lease-tool-forbidden",
+			detail: `lease ${whole.map((lease) => lease.id).join(", ")} does not allow ${tool}`,
+		};
+	}
+	return { lease: allowed };
 }
 
 const activeLease = new AsyncLocalStorage<WindowLease>();

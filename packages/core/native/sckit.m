@@ -21,6 +21,7 @@
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
+#import <libproc.h>
 #import <limits.h>
 #import <math.h>
 #import <os/lock.h>
@@ -36,6 +37,8 @@
 #define SCK_ERR_ENCODE_FAILED -4
 #define SCK_ERR_INVALID_ARGS -5
 #define SCK_ERR_TIMEOUT -6
+// sckit_capture_window's *outLen when the window belongs to a masked app: nothing was captured, on purpose.
+#define SCK_ERR_MASKED -7
 
 #define SCK_WINDOW_FORMAT_PNG 0
 #define SCK_WINDOW_FORMAT_JPEG 1
@@ -52,6 +55,102 @@ static CFStringRef kSckJpegUTI = CFSTR("public.jpeg");
 
 static SCContentFilter *cachedFilter = nil;
 static CGDirectDisplayID cachedFilterDisplayID = 0;
+// The owners of the on-screen windows when cachedFilter was built. A filter excludes the apps it was given, so an
+// app that starts later (a password prompt appears, the HUD launches) needs a new filter: a changed set rebuilds it.
+static NSArray<NSNumber *> *cachedFilterOwnerPids = nil;
+
+// Password managers and system authentication prompts. Their windows are left out of every capture (masked); they
+// are never blocked. Mirrors MASKED_CAPTURE_BUNDLE_IDS and MASKED_CAPTURE_OWNER_NAMES in
+// src/platform/capture-mask.ts; capture-mask.test.ts keeps the lists equal.
+static NSString *const kSckMaskedBundleIds[] = {
+	@"com.1password.1password",
+	@"com.agilebits.onepassword7",
+	@"com.bitwarden.desktop",
+	@"com.apple.keychainaccess",
+	@"com.apple.Passwords",
+	@"com.lastpass.LastPass",
+	@"com.dashlane.dashlanephonefinal",
+	@"com.apple.SecurityAgent",
+};
+static NSString *const kSckMaskedOwnerNames[] = {
+	@"SecurityAgent",
+	@"coreautha",
+};
+// OpenCUA's own on-screen helpers, by executable name: the buddy HUD (status pill and lasso marks) and the agent
+// cursor overlay. NSWindowSharingNone does not keep a window out of ScreenCaptureKit on current macOS, so display
+// captures exclude them explicitly.
+static NSString *const kSckOwnOverlayExecutables[] = {
+	@"buddy-hud",
+	@"cursor-overlay",
+};
+
+static BOOL nameListContains(NSString *const *names, size_t count, NSString *name, BOOL ignoringCase) {
+	if (name.length == 0) {
+		return NO;
+	}
+	for (size_t index = 0; index < count; index += 1) {
+		BOOL same = ignoringCase ? [names[index] caseInsensitiveCompare:name] == NSOrderedSame
+			: [names[index] isEqualToString:name];
+		if (same) {
+			return YES;
+		}
+	}
+	return NO;
+}
+
+static NSString *executableNameOfPid(pid_t pid) {
+	char path[PROC_PIDPATHINFO_MAXSIZE];
+	if (pid <= 0 || proc_pidpath(pid, path, sizeof(path)) <= 0) {
+		return nil;
+	}
+	return [NSString stringWithUTF8String:path].lastPathComponent;
+}
+
+static BOOL isMaskedApplication(SCRunningApplication *application) {
+	if (application == nil) {
+		return NO;
+	}
+	size_t bundleCount = sizeof(kSckMaskedBundleIds) / sizeof(kSckMaskedBundleIds[0]);
+	size_t ownerCount = sizeof(kSckMaskedOwnerNames) / sizeof(kSckMaskedOwnerNames[0]);
+	return nameListContains(kSckMaskedBundleIds, bundleCount, application.bundleIdentifier, YES) ||
+		nameListContains(kSckMaskedOwnerNames, ownerCount, application.applicationName, NO) ||
+		nameListContains(kSckMaskedOwnerNames, ownerCount, executableNameOfPid(application.processID), NO);
+}
+
+static BOOL isOwnOverlayApplication(SCRunningApplication *application) {
+	size_t count = sizeof(kSckOwnOverlayExecutables) / sizeof(kSckOwnOverlayExecutables[0]);
+	return application != nil &&
+		nameListContains(kSckOwnOverlayExecutables, count, executableNameOfPid(application.processID), NO);
+}
+
+// Apps whose windows a display capture leaves out: masked apps and OpenCUA's own overlays.
+static NSArray<SCRunningApplication *> *excludedApplications(SCShareableContent *content) {
+	NSMutableArray<SCRunningApplication *> *excluded = [NSMutableArray array];
+	for (SCRunningApplication *application in content.applications) {
+		if (isMaskedApplication(application) || isOwnOverlayApplication(application)) {
+			[excluded addObject:application];
+		}
+	}
+	return excluded;
+}
+
+// The owners of the windows on screen now, sorted; cheap enough to read before every display capture.
+static NSArray<NSNumber *> *onScreenWindowOwnerPids(void) {
+	CFArrayRef infoRef = CGWindowListCopyWindowInfo(
+		kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+	if (infoRef == NULL) {
+		return @[];
+	}
+	NSArray<NSDictionary *> *info = CFBridgingRelease(infoRef);
+	NSMutableSet<NSNumber *> *owners = [NSMutableSet set];
+	for (NSDictionary *entry in info) {
+		NSNumber *ownerPID = entry[(id)kCGWindowOwnerPID];
+		if (ownerPID != nil) {
+			[owners addObject:ownerPID];
+		}
+	}
+	return [owners.allObjects sortedArrayUsingSelector:@selector(compare:)];
+}
 
 // ScreenCaptureKit completes some requests only while the process's main run loop is serviced. AppKit apps and
 // Bun service it; Node's main thread runs libuv and never does, so there every other SCShareableContent request
@@ -98,13 +197,16 @@ static SCContentFilter *resolveMainDisplayFilter(int *errorOut) {
 
 	dispatch_sync(filterCacheQueue(), ^{
 		CGDirectDisplayID mainID = CGMainDisplayID();
-		if (cachedFilter != nil && cachedFilterDisplayID == mainID) {
+		NSArray<NSNumber *> *ownerPids = onScreenWindowOwnerPids();
+		if (cachedFilter != nil && cachedFilterDisplayID == mainID &&
+			[cachedFilterOwnerPids isEqualToArray:ownerPids]) {
 			resolved = cachedFilter;
 			return;
 		}
 
 		dispatch_semaphore_t shareableDone = dispatch_semaphore_create(0);
 		__block SCDisplay *targetDisplay = nil;
+		__block NSArray<SCRunningApplication *> *excluded = @[];
 
 		[SCShareableContent
 			getShareableContentExcludingDesktopWindows:NO
@@ -120,6 +222,7 @@ static SCContentFilter *resolveMainDisplayFilter(int *errorOut) {
 					if (targetDisplay == nil) {
 						targetDisplay = content.displays.firstObject;
 					}
+					excluded = excludedApplications(content);
 				}
 				dispatch_semaphore_signal(shareableDone);
 			}];
@@ -137,8 +240,10 @@ static SCContentFilter *resolveMainDisplayFilter(int *errorOut) {
 
 		cachedFilter = [[SCContentFilter alloc]
 			initWithDisplay:targetDisplay
-			excludingWindows:@[]];
+			excludingApplications:excluded
+			exceptingWindows:@[]];
 		cachedFilterDisplayID = mainID;
+		cachedFilterOwnerPids = ownerPids;
 		resolved = cachedFilter;
 	});
 
@@ -287,6 +392,7 @@ static int captureMainDisplayPng(
 
 @interface SCKWindowCaptureResult : NSObject
 @property(nonatomic, strong) NSData *data;
+@property(nonatomic) BOOL masked;
 @end
 @implementation SCKWindowCaptureResult
 @end
@@ -438,7 +544,8 @@ static SCKWindowCapturePlan *buildWindowPlan(
 	int32_t maxWidth,
 	int32_t maxHeight,
 	SCKWindowIdentity *expectedIdentity,
-	NSTimeInterval startedAt) {
+	NSTimeInterval startedAt,
+	BOOL *maskedOut) {
 	__block SCShareableContent *shareableContent = nil;
 	dispatch_semaphore_t done = dispatch_semaphore_create(0);
 	[SCShareableContent
@@ -463,6 +570,11 @@ static SCKWindowCapturePlan *buildWindowPlan(
 		}
 	}
 	if (targetWindow == nil || targetWindow.owningApplication == nil) {
+		return nil;
+	}
+	// A window capture holds only its own window, so a masked app's window is masked by not capturing it at all.
+	if (isMaskedApplication(targetWindow.owningApplication)) {
+		*maskedOut = YES;
 		return nil;
 	}
 	SCKWindowIdentity *shareableIdentity = [[SCKWindowIdentity alloc] init];
@@ -535,7 +647,8 @@ static NSData *captureWindowData(
 	int32_t maxHeight,
 	int32_t format,
 	int32_t quality,
-	NSTimeInterval startedAt) {
+	NSTimeInterval startedAt,
+	BOOL *maskedOut) {
 	SCKWindowIdentity *identity = currentWindowIdentity(windowID);
 	if (identity == nil) {
 		return nil;
@@ -544,7 +657,7 @@ static NSData *captureWindowData(
 		windowID, maxWidth, maxHeight, identity);
 	if (plan == nil) {
 		plan = buildWindowPlan(
-			windowID, maxWidth, maxHeight, identity, startedAt);
+			windowID, maxWidth, maxHeight, identity, startedAt, maskedOut);
 		if (plan == nil) {
 			evictWindowPlan(windowID);
 			return nil;
@@ -621,14 +734,20 @@ static uint8_t *captureWindow(
 	dispatch_semaphore_t done = dispatch_semaphore_create(0);
 	dispatch_async(windowWorkerQueue(), ^{
 		@autoreleasepool {
+			BOOL masked = NO;
 			result.data = captureWindowData(
-				windowId, maxWidth, maxHeight, format, quality, startedAt);
+				windowId, maxWidth, maxHeight, format, quality, startedAt, &masked);
+			result.masked = masked;
 			releaseWindowCaptureGate(windowId);
 			dispatch_semaphore_signal(done);
 		}
 	});
 
 	if (waitServicingMainRunLoop(done, dispatch_time(remainingDeadline(startedAt), SCK_WINDOW_GATE_GRACE_NANOSECONDS)) != 0) {
+		return NULL;
+	}
+	if (result.masked) {
+		*outLen = SCK_ERR_MASKED;
 		return NULL;
 	}
 	NSData *data = result.data;
@@ -756,6 +875,7 @@ void sck_invalidate_cache(void) {
 	dispatch_sync(filterCacheQueue(), ^{
 		cachedFilter = nil;
 		cachedFilterDisplayID = 0;
+		cachedFilterOwnerPids = nil;
 	});
 	dispatch_sync(windowCacheQueue(), ^{
 		[windowPlanCache removeAllObjects];

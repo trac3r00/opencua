@@ -150,3 +150,18 @@ describe("#given the user's own desktop (no isolated session) #when input is att
 		expect(inner.calls).toEqual([]);
 	});
 });
+
+describe("#given a backend that takes input #when the guard refuses input (the host MCP default) #then capabilities say so", () => {
+	it("reports supportsInput false without input allowed and true with it", () => {
+		const refusing = new GuardedPlatformComputer(fakeInner([]).computer);
+		const allowing = new GuardedPlatformComputer(fakeInner([]).computer, { inputAllowed: true });
+
+		expect(refusing.capabilities).toEqual({
+			supportsScreenshot: true,
+			supportsInput: false,
+			supportsAccessibility: true,
+			supportsClipboard: false,
+		});
+		expect(allowing.capabilities.supportsInput).toBe(true);
+	});
+});

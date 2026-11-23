@@ -1,5 +1,7 @@
+import { maskedCaptureWindows } from "./capture-mask.js";
 import { windowTitlesForPid } from "./macos-ffi/accessibility.js";
 import { type ManagedDisplaySpaces, managedDisplaySpaces, spacesForWindows } from "./macos-ffi/sls-spaces.js";
+import { findRunningApplication } from "./macos-ffi/workspace.js";
 import { openWindowsForTargeting } from "./macos-open-windows.js";
 
 export interface TopLevelWindow {
@@ -12,6 +14,17 @@ export interface TopLevelWindow {
 	readonly space?: WindowSpace;
 	/** A browser's private (incognito) window; set only for apps listed in privacyFor. */
 	readonly private?: true;
+	/** A password manager's or authentication prompt's window: there, but every capture masks it. */
+	readonly masked?: true;
+}
+
+/** Mark the windows whose captures are masked, so a listing says they are there. */
+export function markMaskedWindows(
+	windows: readonly TopLevelWindow[],
+	bundleIdOf: (pid: number) => string | undefined,
+): readonly TopLevelWindow[] {
+	const masked = new Set(maskedCaptureWindows(windows, bundleIdOf));
+	return windows.map((window) => (masked.has(window) ? { ...window, masked: true } : window));
 }
 
 /**
@@ -98,8 +111,10 @@ export async function listTopLevelWindows(options: TopLevelWindowOptions = {}): 
 	}
 	const filled =
 		options.titlesFor === undefined ? summaries : fillWindowTitles(summaries, options.titlesFor, windowTitlesForPid);
-	const titled =
-		options.privacyFor === undefined ? filled : markPrivateWindows(filled, options.privacyFor, windowTitlesForPid);
+	const titled = markMaskedWindows(
+		options.privacyFor === undefined ? filled : markPrivateWindows(filled, options.privacyFor, windowTitlesForPid),
+		(pid) => findRunningApplication(pid)?.bundleId,
+	);
 	return options.withSpaces === true
 		? placeOnSpaces(titled, spacesForWindows(titled.map((window) => window.id)), managedDisplaySpaces())
 		: titled;

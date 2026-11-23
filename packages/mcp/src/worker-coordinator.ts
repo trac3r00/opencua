@@ -20,7 +20,14 @@ import { notificationsEnabled, postNotification } from "./notify.js";
 import { createRunStepDriver } from "./step-actions.js";
 import type { ToolResult } from "./tool-result.js";
 import type { RunStep } from "./tool-schemas.js";
-import { type SharedWorkerRun, WorkerLeaseRefusal, type WorkerRegistry } from "./worker-registry.js";
+import {
+	type SharedWorkerRun,
+	WorkerLeaseRefusal,
+	type WorkerRegistry,
+	workerBusy,
+	workerConflict,
+	workerNotAssigned,
+} from "./worker-registry.js";
 
 export type WorkerAssignmentInput = {
 	readonly worker_id: string;
@@ -369,7 +376,7 @@ export class WorkerCoordinator {
 		);
 		for (const { assignment, pid } of resolved) {
 			if (workerIds.has(assignment.worker_id) || this.workers.has(workerKey(sessionId, assignment.worker_id))) {
-				throw new Error(`worker "${assignment.worker_id}" is already assigned in session "${sessionId}"`);
+				throw workerConflict(`worker "${assignment.worker_id}" is already assigned in session "${sessionId}"`);
 			}
 			const region = assignment.region;
 			if (region !== undefined) {
@@ -405,7 +412,7 @@ export class WorkerCoordinator {
 				!this.sharedApp(pid) &&
 				(pids.has(pid) || [...this.workers.values()].some((worker) => worker.pid === pid))
 			) {
-				throw new Error(`app "${assignment.app}" is already owned`);
+				throw workerConflict(`app "${assignment.app}" is already owned`);
 			}
 			workerIds.add(assignment.worker_id);
 			pids.add(pid);
@@ -517,10 +524,10 @@ export class WorkerCoordinator {
 		this.assertOpen();
 		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
-			throw new Error(`worker "${workerId}" is not assigned`);
+			throw workerNotAssigned(workerId);
 		}
 		if (worker.busy) {
-			throw new Error(`worker "${workerId}" is busy`);
+			throw workerBusy(workerId);
 		}
 		if (worker.control === "stopped") {
 			throw new WorkerControlRefusal(workerId, worker.control);
@@ -572,10 +579,10 @@ export class WorkerCoordinator {
 		this.assertOpen();
 		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
-			throw new Error(`worker "${workerId}" is not assigned`);
+			throw workerNotAssigned(workerId);
 		}
 		if (worker.busy) {
-			throw new Error(`worker "${workerId}" is busy`);
+			throw workerBusy(workerId);
 		}
 		this.forget(worker);
 	}
@@ -646,10 +653,10 @@ export class WorkerCoordinator {
 		this.assertOpen();
 		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
-			throw new Error(`worker "${workerId}" is not assigned`);
+			throw workerNotAssigned(workerId);
 		}
 		if (worker.busy) {
-			throw new Error(`worker "${workerId}" is busy`);
+			throw workerBusy(workerId);
 		}
 		if (token !== worker.assignment.observation_token) {
 			throw new Error(`observation token does not belong to worker "${workerId}"`);
@@ -955,7 +962,7 @@ export class WorkerCoordinator {
 		this.assertOpen();
 		const worker = this.lookup(workerId, sessionId);
 		if (worker === undefined) {
-			throw new Error(`worker "${workerId}" is not assigned`);
+			throw workerNotAssigned(workerId);
 		}
 		return worker;
 	}

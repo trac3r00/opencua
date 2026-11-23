@@ -8,6 +8,7 @@ import {
 	listTopLevelWindows,
 } from "@opencua/core";
 import type { GuardedComputerInterface, InputDelivery, WindowProbe } from "@opencua/core";
+import { windowLeasesFromEnvironment, withWindowLeases } from "./lease-gate.js";
 
 export function allowedBundleIdsFromEnvironment(value: string | undefined): readonly string[] | undefined {
 	return value
@@ -35,7 +36,12 @@ export function deliveryFromProcessEnvironment(): InputDelivery {
 	return deliveryFromEnvironment(process.env["OPENCUA_DELIVERY"]);
 }
 
+/** The host computer, as it is unless OPENCUA_LEASE_HOLDER turns window leases on for this server. */
 export function createNativeComputer(platform: NodeJS.Platform = process.platform): GuardedComputerInterface {
+	return withWindowLeases(hostComputer(platform), windowLeasesFromEnvironment());
+}
+
+function hostComputer(platform: NodeJS.Platform): GuardedComputerInterface {
 	const appApproval = new AppApprovalStore(allowedBundleIdsFromProcessEnvironment());
 	// Windows and Linux host backends take no input, so an explicit attended request is a
 	// configuration error here too, not a per-action refusal later.

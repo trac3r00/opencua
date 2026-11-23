@@ -3,6 +3,7 @@ import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/proto
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { CallToolResult, ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { resolveSnapshotRefs, withSnapshotRefs } from "./snapshot-refs.js";
+import { failurePayload } from "./tool-errors.js";
 import type { ToolResult } from "./tool-result.js";
 
 const MAX_SAMPLES = 512;
@@ -315,6 +316,7 @@ export function installToolTiming(server: McpServer, usage: ToolUsageRegistry): 
 										message.trim().length === 0
 											? "tool failed without error details; observe the app before retrying"
 											: message,
+									...failurePayload(error),
 								}),
 							},
 						],

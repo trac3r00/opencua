@@ -13,6 +13,7 @@ import {
 	listWindows,
 	probeHostCapabilities,
 	readHidModifierFlags,
+	restoreAxActivation,
 	setSessionCursorName,
 	spawnOpenLauncher,
 	startNativeForegroundKeeper,
@@ -42,6 +43,7 @@ import { createHistorySource } from "./history-source.js";
 import { registerHistoryTools } from "./history-tools.js";
 import { detectHost, spawnGuidance } from "./host-detection.js";
 import { registerHumanTools } from "./human-tools.js";
+import { appLeaseGate, windowLeasesFromEnvironment } from "./lease-gate.js";
 import {
 	allowedBundleIdsFromProcessEnvironment,
 	createNativeComputer,
@@ -183,11 +185,18 @@ export function createMcpServer(
 	if (loadRules !== undefined) {
 		session.useAppRules((app) => rulesForApp(loadRules(), app));
 	}
+	// The routes that reach apps without the computer (scripts, Terminal, Dock menus) take the same window leases the
+	// native computer does; with no holder there is no gate and they act as they always have.
+	const appLeases = appLeaseGate(
+		options?.windowLeases ?? (computer === undefined ? windowLeasesFromEnvironment() : undefined),
+	);
+	const leases = appLeases === undefined ? {} : { leases: appLeases };
 	const dockSession = new DockGuardSession(options?.dockSource, {
 		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
 		delivery: resolvedComputer.delivery ?? "background",
 		probeHost: options?.dockHostProbe ?? probeHostCapabilities,
 		...(stopGate === undefined ? {} : { stopSwitch: stopGate }),
+		...leases,
 	});
 	const terminalSession = new TerminalGuardSession({
 		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
@@ -196,12 +205,14 @@ export function createMcpServer(
 		...(options?.terminalDispatch === undefined ? {} : { dispatch: options.terminalDispatch }),
 		...(options?.terminalRead === undefined ? {} : { readText: options.terminalRead }),
 		...(stopGate === undefined ? {} : { stopSwitch: stopGate }),
+		...leases,
 	});
 	const appleScriptSession = new AppleScriptGuardSession({
 		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
 		delivery: resolvedComputer.delivery ?? "background",
 		...(options?.osascriptRunner === undefined ? {} : { runner: options.osascriptRunner }),
 		...(stopGate === undefined ? {} : { stopSwitch: stopGate }),
+		...leases,
 	});
 	const extrasSession = new ExtrasGuardSession(options?.extrasSource, {
 		allowedBundleIds: allowedBundleIdsFromProcessEnvironment(),
@@ -466,6 +477,8 @@ function shutdownGraceMilliseconds(value: string | undefined): number {
 export async function main(): Promise<void> {
 	const server = createMcpServer();
 	const shutdown = gracefulShutdown(server, shutdownGraceMilliseconds(process.env["OPENCUA_SHUTDOWN_GRACE_MS"]));
+	// Accessibility flags this server turned on in Electron/Chromium apps go back to what the apps had.
+	process.once("exit", () => restoreAxActivation());
 	let disconnectCleanup: Promise<void> | undefined;
 	// The supervisor ends this child's input and signals it at once when its client leaves: a clean-up already under
 	// way finishes (bounded) before the exit.

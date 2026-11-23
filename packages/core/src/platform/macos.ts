@@ -11,8 +11,9 @@ import type { InputObservation, PreflightOptions, PreflightResult } from "../com
 import { setAttendedHostDelivery } from "../computer/host-interaction-policy.js";
 import { assertElementInInputRegion, assertFocusInInputRegion } from "../computer/input-region.js";
 import { currentInputScope } from "../computer/input-scope.js";
-import type { ComputerInterface, ScreenshotResult, WindowTextRead } from "../computer/interface.js";
+import type { ComputerInterface, ElementHit, ScreenshotResult, WindowTextRead } from "../computer/interface.js";
 import { assertScreenUnlocked } from "../computer/lock-guard.js";
+import { appNotRunning } from "../computer/tool-failure.js";
 import { type ScreenshotViewport, resolveWindowScreenshotSize, screenRectToScreenshot } from "../computer/viewport.js";
 import type { AppApprovalStore } from "../permission/app-approval.js";
 import { blockedUrl, browserUrlScript, isBrowserBundle } from "../permission/url-blocklist.js";
@@ -28,6 +29,7 @@ import type {
 	SelectTextOptions,
 } from "../types/index.js";
 import { type RunningAppInfo, collectAppUsage, findRunningApp, getRunningMacOSApps } from "./app-list.js";
+import { CaptureMaskedError } from "./capture-mask.js";
 import { CursorKeyedObservations } from "./cursor-observations.js";
 import { execFileStdout, execFileStdoutBuffer } from "./exec-util.js";
 import { HostComputer, type HostComputerOptions } from "./host.js";
@@ -59,6 +61,7 @@ import {
 	windowTitlesForPid,
 } from "./macos-ffi/accessibility.js";
 import type { AccessibilityTreeOptions } from "./macos-ffi/accessibility.js";
+import { elementHitAtPoint } from "./macos-ffi/ax-hit-test.js";
 import { createAxEventWaiter, waitForAxQuiet } from "./macos-ffi/ax-observer.js";
 import { cursorBackgroundCuesEnabled } from "./macos-ffi/cursor-background-cues.js";
 import {
@@ -72,6 +75,7 @@ import { isScreenLocked } from "./macos-ffi/lock-screen.js";
 import { readClipboard, writeClipboard } from "./macos-ffi/pasteboard.js";
 import { NOOP_DISPLAY_SLEEP } from "./macos-ffi/power.js";
 import {
+	assertWindowCaptureNotMasked,
 	captureDisplayImage,
 	captureDisplayRegionImage,
 	captureWindowImageAsync,
@@ -922,9 +926,11 @@ export class MacOSHostComputer extends HostComputer {
 			...(ocrText !== undefined ? { ocrText } : {}),
 			...(screenshotUnavailable !== undefined
 				? { screenshotUnavailable }
-				: captured.captureFailed !== undefined
-					? { screenshotUnavailable: "window-capture-failed" as const }
-					: {}),
+				: captured.masked === true
+					? { screenshotUnavailable: "capture-masked" as const, masked: true as const }
+					: captured.captureFailed !== undefined
+						? { screenshotUnavailable: "window-capture-failed" as const }
+						: {}),
 			...(systemPrompts.length > 0 ? { systemPrompts } : {}),
 		};
 		if (targetWindow === undefined) {
@@ -1078,6 +1084,9 @@ export class MacOSHostComputer extends HostComputer {
 		try {
 			return { screenshot: await image, tree };
 		} catch (error) {
+			if (error instanceof CaptureMaskedError) {
+				return { screenshot: undefined, tree, masked: true };
+			}
 			// ScreenCaptureKit refuses a window for a moment while it is resized or re-ordered; a capture that failed twice
 			// costs the observation its image, not its elements and token.
 			if (error instanceof Error && error.message.startsWith("window capture failed (transient)")) {
@@ -1236,6 +1245,10 @@ export class MacOSHostComputer extends HostComputer {
 
 	async isWebElement(targetPid: number, elementIndex: number): Promise<boolean> {
 		return isWebElementByIndex(targetPid, elementIndex);
+	}
+
+	async elementHitAt(targetPid: number, elementIndex: number, point: Point): Promise<ElementHit> {
+		return elementHitAtPoint(targetPid, elementIndex, point);
 	}
 
 	aimPointer(targetPid: number, point: Point): void {
@@ -1666,6 +1679,9 @@ async function captureWindowScreenshot(
 		parseImageDimensions(captured.data);
 		return captured.data;
 	} catch (error) {
+		if (error instanceof CaptureMaskedError) {
+			throw error;
+		}
 		if (classifyCaptureFailure(error) !== "transient") {
 			return await captureWindowScreenshotViaCli(targetSize, windowId, format, quality);
 		}
@@ -1686,6 +1702,7 @@ async function captureWindowScreenshotViaCli(
 	format: "png" | "jpeg",
 	quality: number,
 ): Promise<Buffer> {
+	assertWindowCaptureNotMasked(windowId);
 	const captureCommand = `screencapture -x -o -l ${windowId} -t png "$tmp"`;
 	const resizeCommand =
 		format === "jpeg"
@@ -1908,6 +1925,8 @@ interface CapturedObservation {
 	readonly tree: ReturnType<typeof extractAccessibilityTree> | undefined;
 	/** Set when the window image failed transiently (twice): the observation keeps its elements and token. */
 	readonly captureFailed?: string;
+	/** Set when the window belongs to a masked app: no image, on purpose; the elements and token stay. */
+	readonly masked?: true;
 }
 
 /**
@@ -1930,7 +1949,7 @@ async function resolveObservedApp(targetPid: number | undefined): Promise<Runnin
 	releaseSnapshotsForExitedPids(stillRunning);
 	const app = await findRunningApp(targetPid);
 	if (app === undefined) {
-		throw new Error(`No running app matched pid ${targetPid}`);
+		throw appNotRunning(`No running app matched pid ${targetPid}`);
 	}
 	return app;
 }
@@ -1939,7 +1958,7 @@ function resolveTargetApp(apps: readonly RunningAppInfo[], targetPid: number | u
 	if (targetPid !== undefined) {
 		const app = apps.find((candidate) => candidate.pid === targetPid);
 		if (app === undefined) {
-			throw new Error(`No running app matched pid ${targetPid}`);
+			throw appNotRunning(`No running app matched pid ${targetPid}`);
 		}
 		return app;
 	}

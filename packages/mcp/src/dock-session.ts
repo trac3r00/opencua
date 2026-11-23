@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DockAction, DockSnapshot, DockSource, HostCapabilities, StopStatusSource } from "@opencua/core";
 import { createNativeDockSource, describeUserStop } from "@opencua/core";
+import type { AppLeaseGate } from "./lease-gate.js";
 import type { ToolResult } from "./tool-result.js";
 import { refusalResult, textResult } from "./tool-result.js";
 
@@ -20,6 +21,12 @@ export interface DockGuardOptions {
 	readonly stopSwitch?: StopStatusSource;
 	readonly now?: () => number;
 	readonly ttlMs?: number;
+	/**
+	 * Window leases are on: pressing an item of an app's Dock menu (Quit, Hide, New Window, Options) acts on that app,
+	 * so it needs the holder's `click` lease on it. Pressing a Dock item launches or brings forward its app, as open_app
+	 * does, and opening or closing a Dock menu is the Dock's own UI; neither sends input to a window, so neither needs one.
+	 */
+	readonly leases?: AppLeaseGate;
 }
 
 export class DockGuardSession {
@@ -29,6 +36,8 @@ export class DockGuardSession {
 	private readonly ttlMs: number;
 	private tail: Promise<void> = Promise.resolve();
 	private stopped = false;
+	/** The app whose Dock menu this session opened last and is still open, so its menu items act on it. */
+	private menuApp: string | undefined;
 
 	constructor(
 		source: DockSource | undefined,
@@ -85,9 +94,26 @@ export class DockGuardSession {
 
 			const refusal = this.policyRefusal(true);
 			if (refusal !== undefined) return refusal;
+			const leases = this.options.leases;
+			if (leases !== undefined && element.role === "AXMenuItem" && action === "AXPress") {
+				const leaseRefusal =
+					this.menuApp === undefined
+						? leases.refuseUnattributed(
+								"click",
+								"this Dock menu was not opened by this session (AXShowMenu on an app's Dock item), so the app its items act on is not known",
+							)
+						: leases.refuse(this.menuApp, "click");
+				if (leaseRefusal !== undefined) return refusalResult(leaseRefusal.reason, leaseRefusal.message);
+			}
 			try {
 				if (this.now() - entry.issuedAt >= this.ttlMs) return refusalResult("dock-token-expired");
 				await this.source.act(entry.snapshot, elementId, action);
+				// Opening an app's Dock menu names the app its items act on; any other press or a cancel closes the menu.
+				if (action === "AXShowMenu") {
+					if (element.role === "AXDockItem") this.menuApp = element.label ?? undefined;
+				} else {
+					this.menuApp = undefined;
+				}
 			} catch (error) {
 				return {
 					...textResult(
@@ -172,6 +198,7 @@ export class DockGuardSession {
 
 	close(): void {
 		this.stopped = true;
+		this.menuApp = undefined;
 		this.invalidate();
 	}
 

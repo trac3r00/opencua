@@ -1,6 +1,6 @@
 ---
 name: opencua
-description: "Operate an explicitly authorized desktop app (macOS, Windows, Linux) or a real iPhone through iPhone Mirroring with the OpenCUA MCP server, in the background without taking the user's mouse, keyboard focus or screen. Observe, act on observed element ids with the returned token, verify. Also turns repeated local history into skill suggestions."
+description: "Operate an explicitly authorized desktop app (macOS, Windows, Linux) with the OpenCUA MCP server in the background, without taking the user's mouse, keyboard focus or screen, or a real iPhone through iPhone Mirroring (observing it in the background; phone input needs attended delivery). Observe, act on observed element ids with the returned token, verify. Also turns repeated local history into skill suggestions."
 ---
 
 # OpenCUA

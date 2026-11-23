@@ -5,7 +5,9 @@
  * opened) another app, and for a while afterwards puts that app back if a touched app took its place. Only a switch
  * the person made themselves is left alone: a mouse press or the Command key just before the touched app came
  * forward (a click on it or its Dock icon, Command-Tab). Typing, or clicking inside their own app, is not a switch;
- * a person typing in their app while another takes the front is exactly the case the keeper exists for.
+ * a person typing in their app while another takes the front is exactly the case the keeper exists for. A press
+ * counts as a switch unless the pointer is over the person's own app, so a click in their app is told from one on
+ * the touched app.
  */
 export interface ForegroundKeeperDeps {
 	frontmostPid(): number | undefined;
@@ -13,6 +15,8 @@ export interface ForegroundKeeperDeps {
 	secondsSinceMouseDown(): number;
 	/** Whether the physical Command key is down right now. */
 	commandHeld(): boolean;
+	/** The app owning the topmost normal window under the physical pointer; undefined when unknown. */
+	pidUnderPointer(): number | undefined;
 	/** Bring `pid` back to the front; false when it was not done. */
 	restore(pid: number): Promise<boolean>;
 	now(): number;
@@ -101,10 +105,9 @@ export class ForegroundKeeper {
 			return undefined;
 		}
 		const switchWindow = now - this.lastOtherFrontAt + SWITCH_SLACK_MILLISECONDS;
-		if (
-			this.deps.secondsSinceMouseDown() * 1000 < switchWindow ||
-			this.lastCommandAt >= this.lastOtherFrontAt - SWITCH_SLACK_MILLISECONDS
-		) {
+		const pressedOutsidePersonApp =
+			this.deps.secondsSinceMouseDown() * 1000 < switchWindow && this.deps.pidUnderPointer() !== watch.personPid;
+		if (pressedOutsidePersonApp || this.lastCommandAt >= this.lastOtherFrontAt - SWITCH_SLACK_MILLISECONDS) {
 			this.stop();
 			return undefined;
 		}

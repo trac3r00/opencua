@@ -36,8 +36,11 @@ Accessibility API, ScreenCaptureKit and CoreGraphics on macOS, UI Automation on 
 the app-oriented computer-use vocabulary models already know (`list_apps`, `get_app_state`, `click`, `type_text`,
 `press_keys`, `scroll`, `drag`).
 
-On macOS, OpenCUA acts only on surfaces the agent owns and on isolated guests. It never uses your mouse, keyboard,
-screen, clipboard or Spaces, and it refuses to capture or send input to your own apps. Agents can drive:
+On macOS, OpenCUA drives the apps you name in the background by default: input goes to each app's own process and
+the agent shows its own virtual cursor, while your real pointer, keyboard focus, front app and Spaces stay yours (no
+global event tap, no cursor warp, no window raise). Attended mode (`OPENCUA_DELIVERY=attended`) is the opt-in that
+takes the foreground. Captures mask the windows of password managers and authentication prompts. Besides your own
+apps, agents can drive:
 
 - **OpenCUA surfaces:** web pages opened by the MCP `surface` tool in an OpenCUA window that stays behind yours and
   is never focused. Several workers can share one, each with a named cursor and an optional region. Worker regions must not overlap.
@@ -169,20 +172,20 @@ phone. Both skills explain the one-cursor-per-subagent workflow and the non-disr
 For a question-driven install an AI can run end to end, see the
 [AI setup guide](skills/cua-browser/README.md).
 
-`cua-history` is an opt-in, private, local record of recent desktop activity for answering "what
-was I just doing?". `opencua history start` installs an always-on native menu-bar watcher (a
-launchd login item) that records foreground app, window title, keystrokes, and clicks into
-10-minute segments under the state directory, with per-app observation rules, pause/resume, and
-a 6-hour retention window; keystroke/click capture needs Input Monitoring and window titles need
-Accessibility, granted to the **same "opencua-mcp" entry** in System Settings (the watcher is signed
-with OpenCUA's identifier, so there is no separate recorder to approve). With
-`OPENCUA_HISTORY=1` the MCP server exposes the `cua-history` tools that read and control that
-watcher. Native capture cannot classify URLs or private browser windows, so the default
-privacy policy blocks it rather than ignoring exclusions. See [native recording limits and
-history-to-skill workflows](docs/history-skills.md) before enabling it. Capture is local;
-explicitly consented generation sends selected, redacted evidence to the configured model.
-Retention cleanup runs while the watcher is running, including when paused; stopped watchers
-cannot expire files.
+`cua-history` is an opt-in, local computer history modeled on Codex's: ask your agent "what was I
+doing?" or "find that document again". `opencua history start` installs a recorder (a launchd login
+item behind OpenCUA's single menu bar icon, whose menu also holds Buddy settings). It records
+interaction events and accessibility text: the app, window, URL or document, the clicked or typed-into
+element, and typed text as one run per field. It takes no screenshots and records no audio. Activity
+sessions become Markdown memories under `cua-history/memories/YYYY-MM-DD/`, listed by
+`opencua history timeline`. Raw events, including typed text, stay on this Mac and are deleted
+after 48 hours; memories stay until you delete them; `opencua history clear --last 10m|1h|1d`
+removes a recent window. With `OPENCUA_HISTORY=1` the MCP server adds `cua_history_timeline`,
+`cua_history_read_memory`, and `cua_history_suggest_skills`. Suggestions cover repeated multi-step
+work with a real action, never app switching. Nothing recorded goes to a model unless the
+model-sharing switch (`opencua history descriptions on|off`, on by default) is on. Input capture needs Input
+Monitoring and titles need Accessibility, both under the same **opencua-mcp** entry. See
+[computer history, memories and skill suggestions](docs/history-skills.md) before enabling it.
 
 <p align="center">
   <img src="./docs/assets/doctor.svg" alt="OpenCUA doctor output: every check reports ok, ending in 'Ready: OpenCUA is installed and holds its permissions.'" width="760" />

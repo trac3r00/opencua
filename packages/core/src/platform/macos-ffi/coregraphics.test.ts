@@ -293,6 +293,29 @@ describe("#given CoreGraphics koffi bindings", () => {
 		});
 	});
 
+	describe("#when posting one targeted scroll event to a window", () => {
+		it("#then it is delivered exactly once, through the per-pid SkyLight post only", async () => {
+			const { postScrollEvent } = await import("./coregraphics.js");
+
+			postScrollEvent({
+				deltaX: 0,
+				deltaY: -3,
+				targetPid: 4321,
+				targetWindow: { id: 99, bounds: { x: 80, y: 170, width: 400, height: 300 } },
+				position: { x: 200, y: 300 },
+			});
+
+			const scrollEvent = koffiMock.coreGraphicsFunctions.CGEventCreateScrollWheelEvent.mock.results[0]?.value;
+			expect(skyLightMock.postSkyLightEventToPid).toHaveBeenCalledTimes(1);
+			expect(skyLightMock.postSkyLightEventToPid).toHaveBeenCalledWith(4321, scrollEvent);
+			expect(skyLightMock.postCoreGraphicsEventToWindowOwner).not.toHaveBeenCalled();
+			expect(skyLightMock.postAuthenticatedSkyLightEventToPid).not.toHaveBeenCalled();
+			expect(koffiMock.coreGraphicsFunctions.CGEventPostToPid).not.toHaveBeenCalled();
+			expect(koffiMock.coreGraphicsFunctions.CGEventPost).not.toHaveBeenCalled();
+			expect(skyLightMock.setSkyLightWindowLocation).toHaveBeenCalledWith(scrollEvent, { x: 120, y: 130 });
+		});
+	});
+
 	describe("#when posting a targeted mouse event with held modifiers", () => {
 		it("#then the flags are in the NSEvent behind it and on the CGEvent", async () => {
 			const { createNSEventBackedMouseEvent } = await import("./appkit.js");

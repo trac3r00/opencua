@@ -53,6 +53,7 @@ const accessibilityMock = vi.hoisted(() => ({
 	typeIntoFocusedAXElement: vi.fn(),
 }));
 const screenshotMock = vi.hoisted(() => ({
+	assertWindowCaptureNotMasked: vi.fn(),
 	captureDisplayImage: vi.fn(),
 	getMainDisplayId: vi.fn(() => 1),
 	captureWindowImage: vi.fn<() => { readonly data: Buffer }>(),

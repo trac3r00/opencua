@@ -71,8 +71,10 @@ export class GuardedPlatformComputer implements GuardedComputerInterface {
 		if (!this.inputAllowed) denyHostInteraction("host-window");
 	}
 
+	/** The backend's capabilities, except that input is only claimed when this guard lets input through. */
 	get capabilities(): ComputerCapabilities {
-		return this.inner.capabilities;
+		const capabilities = this.inner.capabilities;
+		return { ...capabilities, supportsInput: capabilities.supportsInput && this.inputAllowed };
 	}
 
 	get delivery(): InputDelivery {

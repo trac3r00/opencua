@@ -54,6 +54,7 @@ const accessibilityMock = vi.hoisted(() => ({
 }));
 
 const screenshotMock = vi.hoisted(() => ({
+	assertWindowCaptureNotMasked: vi.fn(),
 	captureDisplayImage: vi.fn(),
 	getMainDisplayId: vi.fn(() => 1),
 	captureWindowImage: vi.fn(),

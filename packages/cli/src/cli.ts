@@ -26,6 +26,7 @@ import { deliveryFromEnv } from "./host-computer.js";
 import { registerHudCommands } from "./hud-commands.js";
 import { registerIosCommands } from "./ios.js";
 import { resolveLayout } from "./layout.js";
+import { registerLeaseCommands } from "./lease-commands.js";
 import { registerLifecycleCommands, resolveCursorMotion } from "./lifecycle-commands.js";
 import {
 	type ReadCommandHost,
@@ -492,6 +493,7 @@ registerHistoryCommands(program, { isJsonOutput });
 registerLifecycleCommands(program, { isJsonOutput });
 registerUtmCommands(program, { isJsonOutput });
 registerHudCommands(program, { isJsonOutput });
+registerLeaseCommands(program, { isJsonOutput });
 registerSkillsCommands(program);
 registerBuddyCommands(program, {
 	isJsonOutput,

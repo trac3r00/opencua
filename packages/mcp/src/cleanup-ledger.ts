@@ -59,8 +59,9 @@ export class CleanupLedger {
 
 	/**
 	 * Put moved windows back, then quit the launched apps, except those named in `keep` (by name, bundle id or pid)
-	 * and the app the person has in front (they are using it). Everything handled is forgotten; kept apps stay
-	 * recorded, so a later clean-up can still close them.
+	 * and the app the person has in front (they are using it). Everything handled is forgotten, and so is everything
+	 * named in `keep`: the person asked for it to stay, so no later clean-up (the one on disconnect included) undoes
+	 * that. Only the app kept because it was in front stays recorded, so a later clean-up can still close it.
 	 */
 	async cleanUp(deps: CleanupDeps, keep: readonly string[] = []): Promise<CleanupReport> {
 		const kept: { app: string; reason: string }[] = [];
@@ -73,10 +74,10 @@ export class CleanupLedger {
 		for (const [key, window] of [...this.moved.entries()]) {
 			const launched = this.launched.get(window.pid);
 			const app = launched?.name ?? deps.nameOf(window.pid);
+			this.moved.delete(key);
 			if (keeps(window, app, launched?.bundleId)) {
 				continue;
 			}
-			this.moved.delete(key);
 			if (launched !== undefined || !deps.isRunning(window.pid)) {
 				// A window of an app about to quit, or already gone, has nothing to restore.
 				continue;
@@ -95,6 +96,7 @@ export class CleanupLedger {
 				continue;
 			}
 			if (keeps(app, app.name, app.bundleId)) {
+				this.launched.delete(app.pid);
 				kept.push({ app: app.name, reason: "kept" });
 				continue;
 			}

@@ -48,6 +48,7 @@ import {
 	type StepFind,
 	findByScrolling,
 } from "./scroll-find.js";
+import { staleRef } from "./snapshot-refs.js";
 import {
 	type ActionDispatch,
 	type ElementFormat,
@@ -87,6 +88,7 @@ import {
 } from "./tool-result.js";
 import type { RunStep } from "./tool-schemas.js";
 import { windowRef } from "./window-refs.js";
+import { appOwnedByWorker } from "./worker-registry.js";
 
 const VERIFY_POLL_INTERVAL_MILLISECONDS = 150;
 /** How long the vision lane waits for the refresher's next frame before a live capture. */
@@ -528,6 +530,7 @@ export class GuardedSession {
 						app: window.ownerName,
 						title: window.title,
 						...(window.private === true ? { private: true } : {}),
+						...(window.masked === true ? { masked: true } : {}),
 						bounds: window.bounds,
 						...(window.space === undefined
 							? {}
@@ -2328,7 +2331,7 @@ export class GuardedSession {
 		);
 		if (!preflight.ok) {
 			this.resolvedAppPids.delete(appKey(app));
-			throw new InputRefusal(preflight.reason);
+			throw new InputRefusal(preflight.reason, preflight.detail);
 		}
 		this.assertOpen();
 		return { pid: targetPid, observation: active.observation, elements: active.elements };
@@ -2827,7 +2830,7 @@ export class GuardedSession {
 	private consume(token: string): LiveToken {
 		const live = this.tokens.get(token);
 		if (live === undefined) {
-			throw new Error("observation token is missing, stale, or already consumed");
+			throw staleRef("observation token is missing, stale, or already consumed");
 		}
 		this.tokens.delete(token);
 		if (this.tokenByPid.get(live.key) === token) {
@@ -2851,7 +2854,7 @@ export class GuardedSession {
 				this.assertOpen();
 				const owned = pid === undefined ? undefined : this.appOwnership(pid);
 				if (owned !== undefined) {
-					throw new Error(owned);
+					throw appOwnedByWorker(owned);
 				}
 				return await operation();
 			})

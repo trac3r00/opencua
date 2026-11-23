@@ -5,6 +5,7 @@ import {
 	type TopLevelWindow,
 	fillWindowTitles,
 	isPrivateBrowserTitle,
+	markMaskedWindows,
 	markPrivateWindows,
 	placeOnSpaces,
 } from "./macos-top-level-windows.js";
@@ -114,5 +115,17 @@ describe("placeOnSpaces #given windows spread over two displays' Spaces", () => 
 			{ spaceIds: [7], current: true, display: "side-uuid" },
 			undefined,
 		]);
+	});
+});
+
+describe("markMaskedWindows #given a password manager window among the listed ones", () => {
+	it("#when the windows are listed #then the password manager's window is marked masked and kept", () => {
+		const listed = [window(1, 10, "Vault"), window(2, 20, "Docs")];
+
+		const marked = markMaskedWindows(listed, (pid) =>
+			pid === 10 ? "com.1password.1password" : "com.apple.TextEdit",
+		);
+
+		expect(marked).toEqual([{ ...window(1, 10, "Vault"), masked: true }, window(2, 20, "Docs")]);
 	});
 });

@@ -1,5 +1,6 @@
 import type { Rect } from "../types/index.js";
 import type { ComputerInterface } from "./interface.js";
+import type { LeaseRefusalCode } from "./window-lease.js";
 
 export interface InputObservation {
 	readonly generation: number;
@@ -24,11 +25,14 @@ type PreflightRefusalReason =
 	| "window-missing"
 	| "window-changed"
 	| "window-bounds-changed"
-	| "observation-replaced";
+	| "observation-replaced"
+	| LeaseRefusalCode;
 
 interface PreflightRefusal {
 	readonly ok: false;
 	readonly reason: PreflightRefusalReason;
+	/** What was refused and how it is lifted, when the reason alone does not say (a window lease names its grant). */
+	readonly detail?: string;
 }
 
 export type PreflightResult = { readonly ok: true } | PreflightRefusal;

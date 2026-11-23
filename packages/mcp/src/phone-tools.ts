@@ -22,7 +22,7 @@ import {
 const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, destructiveHint: false } as const;
 const MUTATION_ANNOTATIONS = { readOnlyHint: false, destructiveHint: true } as const;
 const TOKEN =
-	"Requires the one-use observation_token from ios_observe or the previous mutation result. On the shared host iPhone Mirroring input is refused (isolated-session-required), because the Mirroring window is part of the human desktop.";
+	"Requires the one-use observation_token from ios_observe or the previous mutation result. Phone input needs attended delivery (OPENCUA_DELIVERY=attended): under background delivery, the default, it is refused with HOST_INTERACTION_FORBIDDEN and nothing is sent, while observing the phone still works.";
 
 export function registerPhoneTools(server: McpServer, guard: PhoneGuardSession, source: PhoneToolSource): void {
 	server.registerTool(
@@ -38,7 +38,7 @@ export function registerPhoneTools(server: McpServer, guard: PhoneGuardSession, 
 	server.registerTool(
 		"ios_find_text",
 		{
-			description: `Find OCR text, scrolling autonomously within a bounded page/time budget; returns matches, scroll count, verification and fresh authority, never taps. Stops after two unchanged screens. max_scrolls defaults to 8 (max 30); timeout_ms bounds starting further scrolls. Background scrolling still requires borrow_pointer: true. Use max_scrolls: 0 for visible text only. ${TOKEN}`,
+			description: `Find OCR text, scrolling autonomously within a bounded page/time budget; returns matches, scroll count, verification and fresh authority, never taps. Stops after two unchanged screens. max_scrolls defaults to 8 (max 30); timeout_ms bounds starting further scrolls. Its scrolls are phone input; max_scrolls: 0 reads the visible text only, which works in the background. ${TOKEN}`,
 			inputSchema: iosFindTextSchema,
 			annotations: { readOnlyHint: false, destructiveHint: false },
 		},
@@ -123,7 +123,7 @@ export function registerPhoneTools(server: McpServer, guard: PhoneGuardSession, 
 	server.registerTool(
 		"ios_scroll",
 		{
-			description: `Scroll content: direction is what you want to see (down reveals content further down), not finger direction. macOS routes wheel events by pointer location, so a scroll has to move the person's real pointer onto the phone and back: under background delivery it is refused unless you pass borrow_pointer: true (use ios_swipe for pages and carousels, which leaves the pointer alone). ${TOKEN}`,
+			description: `Scroll content: direction is what you want to see (down reveals content further down), not finger direction. macOS routes wheel events by pointer location, so a scroll has to move the person's real pointer onto the phone and back. ${TOKEN}`,
 			inputSchema: iosScrollSchema,
 			annotations: MUTATION_ANNOTATIONS,
 		},

@@ -8,6 +8,7 @@ export type ToolsetProfile = "full" | "lean";
 import type { DockSource, HostCapabilities, HotFrameSource } from "@opencua/core";
 import type { OsascriptRunner } from "./applescript-session.js";
 import type { ExtrasSource } from "./extras-session.js";
+import type { WindowLeaseOptions } from "./lease-gate.js";
 import type { RulesProfile } from "./rules-profile.js";
 import type { TerminalCommandSource, TerminalTextReader } from "./terminal-session.js";
 
@@ -31,6 +32,11 @@ export interface McpServerOptions {
 	readonly hotFramesSource?: HotFrameSource;
 	/** Per-app rules; defaults to the rules profile file for the native host and to none otherwise. */
 	readonly rulesProfile?: () => RulesProfile;
+	/**
+	 * Window leases for the script, Terminal and Dock routes; defaults to OPENCUA_LEASE_HOLDER for the native host and
+	 * to none for an injected computer, which carries its own gate (withWindowLeases).
+	 */
+	readonly windowLeases?: WindowLeaseOptions;
 }
 
 export interface ResolvedServerOptions {

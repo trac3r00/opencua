@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InputObservation } from "@opencua/core";
 import { CursorKeyedObservations } from "../../core/src/platform/cursor-observations.js";
-import { registerOwnedSurface } from "../../core/src/platform/owned-surfaces.js";
+import { registerOwnedSurface, setSurfaceBinaryForTesting } from "../../core/src/platform/owned-surfaces.js";
 import { GuardedSession } from "./guarded-session.js";
 import { Deferred, FakeGuardedComputer } from "./protocol-test-harness.js";
 import type { RunStep } from "./tool-schemas.js";
@@ -47,10 +47,12 @@ beforeEach(() => {
 	stateDir = realpathSync(mkdtempSync(join(tmpdir(), "opencua-shared-surface-")));
 	previousStateDir = process.env["OPENCUA_STATE_DIR"];
 	process.env["OPENCUA_STATE_DIR"] = stateDir;
+	setSurfaceBinaryForTesting(process.execPath);
 	registerOwnedSurface({ pid: process.pid, title: "shared canvas", url: "http://127.0.0.1/" });
 });
 
 afterEach(() => {
+	setSurfaceBinaryForTesting(undefined);
 	if (previousStateDir === undefined) Reflect.deleteProperty(process.env, "OPENCUA_STATE_DIR");
 	else process.env["OPENCUA_STATE_DIR"] = previousStateDir;
 	rmSync(stateDir, { recursive: true, force: true });

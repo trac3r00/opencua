@@ -171,4 +171,28 @@ describe("#given CoreGraphics keyboard event routing", () => {
 			koffiMock.keyboardEvent,
 		);
 	});
+
+	it("#when Korean and CJK text is typed in the background #then each code point goes as a unicode string on key code 0, with no input-source lookup", async () => {
+		const { postUnicodeText } = await import("./coregraphics.js");
+		const targetWindow = { id: 99, bounds: { x: 80, y: 170, width: 400, height: 300 } };
+
+		postUnicodeText("한글漢𠀀", 4321, targetWindow);
+
+		expect(koffiMock.coreGraphicsFunctions.CGEventKeyboardSetUnicodeString.mock.calls).toEqual([
+			[koffiMock.keyboardEvent, 1, "한"],
+			[koffiMock.keyboardEvent, 1, "글"],
+			[koffiMock.keyboardEvent, 1, "漢"],
+			[koffiMock.keyboardEvent, 2, "𠀀"],
+		]);
+		const created: readonly unknown[] = koffiMock.coreGraphicsFunctions.CGEventCreateKeyboardEvent.mock.calls;
+		expect(created).toEqual(
+			Array.from({ length: 4 }, () => [
+				[koffiMock.sourceReference, 0, true],
+				[koffiMock.sourceReference, 0, false],
+			]).flat(),
+		);
+		expect(koffiMock.module.load.mock.calls.map(([path]) => path)).not.toContainEqual(
+			expect.stringMatching(/Carbon|HIToolbox/),
+		);
+	});
 });

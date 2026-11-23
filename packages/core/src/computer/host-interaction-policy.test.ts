@@ -177,44 +177,35 @@ describe("#given attended delivery #when the focus, HID and pointer wrappers run
 	});
 });
 
-describe("#given host resources outside background app control #when their native default is used #then nothing native is touched", () => {
-	it.each([{ module: "../terminal-session", name: "createTerminalSession", args: [], method: "runCommand" }])(
-		"refuses the native default for $name",
-		async (testCase) => {
-			const { module, name, args } = testCase;
-			const exports: Record<string, unknown> = {};
-			let nativeCalls = 0;
-			runInNewContext(
-				compileWrapper(module, name),
-				{
-					exports,
-					denyHostInteraction,
-					spawn: () => nativeCalls++,
-					connect: () => nativeCalls++,
-					cursorOverlaySocketPath: () => "/synthetic/host-overlay.sock",
-					nativeAccess: {
-						find: () => nativeCalls++,
-						run: () => nativeCalls++,
-					},
+describe("#given the person's Terminal #when the native terminal session runs a command #then it reaches the native seam", () => {
+	// Host control is allowed by default (owner decision 2026-11-08): approval and window leases gate it, not a refusal.
+	it("dispatches through the native access instead of refusing", async () => {
+		const exports: Record<string, unknown> = {};
+		const scripts: string[] = [];
+		runInNewContext(compileWrapper("../terminal-session", "createTerminalSession"), {
+			exports,
+			denyHostInteraction,
+			TERMINAL_BUNDLE_ID: "com.apple.Terminal",
+			escapeAppleScriptString: (value: string) => JSON.stringify(value),
+			isAutomationDenied: () => false,
+			TerminalNotRunningError: Error,
+			TerminalAutomationPermissionError: Error,
+			nativeAccess: {
+				find: () => ({ pid: 1, bundleId: "com.apple.Terminal" }),
+				run: async (script: string) => {
+					scripts.push(script);
+					return 9;
 				},
-				{ timeout: 5_000 },
-			);
-			const dispatch = exportedFunction(exports, name);
-			await expect(
-				Promise.resolve().then(() => {
-					const result: unknown = dispatch(...args);
-					if ("method" in testCase && testCase.method !== undefined) {
-						if (typeof result !== "object" || result === null) throw new Error("Missing resource");
-						const method: unknown = Reflect.get(result, testCase.method);
-						if (typeof method !== "function") throw new Error("Missing resource method");
-						return Reflect.apply(method, result, []);
-					}
-					return result;
-				}),
-			).rejects.toBeInstanceOf(HostInteractionDenied);
-			expect(nativeCalls).toBe(0);
-		},
-	);
+			},
+		});
+		const session = exportedFunction(exports, "createTerminalSession")();
+		if (typeof session !== "object" || session === null) throw new Error("Missing resource");
+		const runCommand: unknown = Reflect.get(session, "runCommand");
+		if (typeof runCommand !== "function") throw new Error("Missing resource method");
+
+		await expect(Reflect.apply(runCommand, session, [{ command: "echo hi" }])).resolves.toBe(9);
+		expect(scripts[0]).toContain("do script");
+	});
 });
 
 describe("#given host app resources #when their native default is used #then it reaches the native seam", () => {

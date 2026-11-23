@@ -1213,8 +1213,18 @@ const WORKER_URL = ((): URL => {
 /** A runaway script exhausts its own heap, not the server's. */
 const WORKER_HEAP_MB = 256;
 
+/**
+ * Node calls a vm script's dynamic-import callback only under this flag; without it a script's `import()` rejects with
+ * an error of the worker's own realm, which the script must never hold. Bun needs no flag and ignores this one.
+ */
+const WORKER_EXEC_ARGV = ["--experimental-vm-modules"];
+
 function spawnWorker(): Worker {
-	const worker = new Worker(WORKER_URL, { stdout: true, resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
+	const worker = new Worker(WORKER_URL, {
+		stdout: true,
+		execArgv: WORKER_EXEC_ARGV,
+		resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB },
+	});
 	worker.unref();
 	return worker;
 }

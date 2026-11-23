@@ -1,5 +1,6 @@
 import {
 	AX_PRESS_ACTION,
+	ToolFailure,
 	clickPoint,
 	normalizeModifiers,
 	parseElementIndex,
@@ -59,6 +60,7 @@ export async function click(
 			// a Delete button instead of opening its context menu). Without AXShowMenu, aim the pointer at its centre.
 			const gesture = button === "left" ? "click with modifiers" : `${button}-click`;
 			const centre = await elementCentre(computer, targetPid, index, gesture);
+			await assertPointReachesElement(computer, targetPid, index, centre);
 			return await clickScreenPoint(computer, targetPid, centre, button, pressCount, modifiers);
 		}
 		if (
@@ -67,6 +69,7 @@ export async function click(
 			(await computer.isWebElement(targetPid, index))
 		) {
 			const centre = await elementCentre(computer, targetPid, index, "click");
+			await assertPointReachesElement(computer, targetPid, index, centre);
 			// A background browser spends a click into a page that lacks keyboard focus on focusing it.
 			await computer.focusWebPage?.(targetPid, index);
 			return await clickScreenPoint(computer, targetPid, centre, button, pressCount, modifiers, false);
@@ -75,6 +78,7 @@ export async function click(
 			await pressElement(computer, targetPid, index);
 		} catch (error: unknown) {
 			const centre = await unsupportedPressFallbackPoint(computer, targetPid, index, error);
+			await assertPointReachesElement(computer, targetPid, index, centre);
 			const dispatch = await clickScreenPoint(computer, targetPid, centre, button, pressCount, modifiers);
 			return { ...dispatch, fallback: { from: "accessibility", reason: errorMessage(error) } };
 		}
@@ -120,6 +124,42 @@ async function elementFrame(
 		throw new Error(`cannot ${gesture}: element ${index} has no on-screen frame to aim the pointer at`);
 	}
 	return frame;
+}
+
+/**
+ * A background click on an observed element is sent to a point; when the app shows something else of its own there
+ * (a sheet, popover or overlay over the element), the click would land on that instead, so it is refused before
+ * anything is sent. Attended clicks and coordinate clicks, which name no element, are not checked.
+ */
+async function assertPointReachesElement(
+	computer: ComputerInterface,
+	targetPid: number,
+	index: number,
+	point: Point,
+): Promise<void> {
+	if (computer.delivery === "attended" || computer.elementHitAt === undefined) return;
+	const reached = await computer.elementHitAt(targetPid, index, point);
+	if (reached.hit !== "covered") return;
+	const label = reached.label === undefined ? "" : ` "${reached.label}"`;
+	const within = reached.within === undefined ? "" : ` in an ${reached.within}`;
+	throw new ToolFailure(
+		`element ${index} is covered at (${Math.round(point.x)}, ${Math.round(point.y)}) by ${reached.role}${label}${within}; nothing was clicked`,
+		{
+			code: "TARGET_COVERED",
+			delivery: "not_sent",
+			retry: "safe",
+			hint: "Nothing was sent. Something in the app covers the target (a sheet, popover or overlay): dismiss it or act on it first, then observe the app again and use the fresh element id.",
+			evidence: {
+				element: index,
+				point,
+				covering: {
+					role: reached.role,
+					...(reached.label === undefined ? {} : { label: reached.label }),
+					...(reached.within === undefined ? {} : { within: reached.within }),
+				},
+			},
+		},
+	);
 }
 
 /** Accessibility refusals of the press itself (not identity or safety refusals) can fall back to a click. */
@@ -262,6 +302,7 @@ export async function clickResolvedTarget(
 	const centreScreen = webElementRoute
 		? await elementCentre(computer, targetPid, target.elementIndex, "click")
 		: observedPointToScreen(observation, centre);
+	await assertPointReachesElement(computer, targetPid, target.elementIndex, centreScreen);
 	if (webElementRoute) {
 		// A background browser spends a click into a page that lacks keyboard focus on focusing it.
 		await computer.focusWebPage?.(targetPid, target.elementIndex);
