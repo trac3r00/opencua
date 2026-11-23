@@ -55,6 +55,7 @@ const workspaceClass = requireClass("NSWorkspace");
 const activationPolicySelector = requireSelector("activationPolicy");
 const activateWithOptionsSelector = requireSelector("activateWithOptions:");
 const unhideSelector = requireSelector("unhide");
+const terminateSelector = requireSelector("terminate");
 const allocSelector = requireSelector("alloc");
 const bundleIdentifierSelector = requireSelector("bundleIdentifier");
 const bundleUrlSelector = requireSelector("bundleURL");
@@ -124,6 +125,24 @@ export function unhideApplication(pid: number): boolean {
 			pid,
 		);
 		return application === null ? false : msgBool(application, unhideSelector);
+	});
+}
+
+/**
+ * Ask an app to quit the way Quit in its menu does: it saves or asks about unsaved work itself, so nothing is lost,
+ * and it may decline. False when the app is not running or refused the request.
+ */
+export function terminateApplication(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid <= 0) {
+		return false;
+	}
+	return withAutoreleasePool(() => {
+		const application = msgPointerProcessIdentifier(
+			runningApplicationClass,
+			runningApplicationWithProcessIdentifierSelector,
+			pid,
+		);
+		return application === null ? false : msgBool(application, terminateSelector);
 	});
 }
 

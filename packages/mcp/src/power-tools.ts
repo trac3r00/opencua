@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { invokeMenu, readClipboard, setWindowFrame, writeClipboard } from "@opencua/core";
 import type { GuardedComputerInterface, InputObservation, Rect } from "@opencua/core";
 import { z } from "zod/v4";
+import { cleanupLedger } from "./cleanup-ledger.js";
 import type { GuardedSession } from "./guarded-session.js";
 import { type StepDispatch, type ToolResult, textResult } from "./tool-result.js";
 import type { RunStep } from "./tool-schemas.js";
@@ -216,6 +217,7 @@ async function setFrame(
 	observation: InputObservation,
 	requested: Rect,
 ): Promise<Awaited<ReturnType<typeof setWindowFrame>>> {
+	cleanupLedger.noteFrameChange({ pid, windowId: observation.windowId, original: observation.windowBounds });
 	return await (computer.setWindowFrame?.(pid, observation.windowId, requested) ??
 		setWindowFrame(pid, observation.windowId, requested));
 }

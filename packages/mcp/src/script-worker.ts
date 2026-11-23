@@ -533,6 +533,13 @@ const apple = Object.freeze({
 	},
 	steps: stepBuilders,
 	arrange,
+	cleanUp: (options?: unknown) => {
+		const keep = pick(options, "keep");
+		if (keep !== undefined && (!Array.isArray(keep) || !keep.every((entry) => typeof entry === "string"))) {
+			throw invalid("apple.cleanUp({keep}) takes app names, bundle ids or pids as strings");
+		}
+		return call("cleanUp", undefined, [keep ?? []]);
+	},
 	dock: () =>
 		Object.freeze({
 			observe: () => call("dockObserve", undefined, []),

@@ -31,6 +31,7 @@ import { defaultActivityFeed } from "@opencua/core/light";
 import { resolveStateDir } from "@opencua/core/stop";
 import { AppleScriptGuardSession } from "./applescript-session.js";
 import { registerCapabilityTools, registerSkillResources } from "./capability-tools.js";
+import { cleanupLedger, nativeCleanupDeps } from "./cleanup-ledger.js";
 import { registerDecisionTools } from "./decision-tools.js";
 import { elementQueryFromInput, registerDesktopMutationTools } from "./desktop-mutation-tools.js";
 import { DockGuardSession } from "./dock-session.js";
@@ -54,7 +55,6 @@ import { registerPowerTools } from "./power-tools.js";
 import { rulesForApp, rulesProfileLoader, rulesProfilePath } from "./rules-profile.js";
 import { registerScriptTools } from "./script-tools.js";
 import { SERVER_INFO } from "./server-info.js";
-import { SUPERVISED_CHILD_FLAG } from "./supervisor.js";
 import { registerSurfaceTools } from "./surface-tools.js";
 import { TerminalGuardSession } from "./terminal-session.js";
 import { activityReporter, agentLabel, installToolActivity } from "./tool-activity.js";
@@ -441,6 +441,20 @@ function browserToolsEnabled(): boolean {
 	return existsSync(join(resolveStateDir(), "browser-connection.json"));
 }
 
+const DISCONNECT_CLEANUP_BUDGET_MS = 4_000;
+
+async function cleanUpOnDisconnect(): Promise<void> {
+	const value = process.env["OPENCUA_CLEANUP"]?.trim().toLowerCase();
+	if (value === "off" || value === "0" || value === "false" || cleanupLedger.empty) return;
+	await Promise.race([
+		cleanupLedger.cleanUp(nativeCleanupDeps).then(
+			(report) => process.stderr.write(`[opencua] cleaned up on disconnect: ${JSON.stringify(report)}\n`),
+			(error: unknown) => process.stderr.write(`[opencua] clean-up on disconnect failed: ${String(error)}\n`),
+		),
+		new Promise((resolve) => setTimeout(resolve, DISCONNECT_CLEANUP_BUDGET_MS).unref()),
+	]);
+}
+
 /** How long a terminating server lets the calls in flight finish; override with OPENCUA_SHUTDOWN_GRACE_MS. */
 const DEFAULT_SHUTDOWN_GRACE_MS = 5_000;
 
@@ -452,11 +466,16 @@ function shutdownGraceMilliseconds(value: string | undefined): number {
 export async function main(): Promise<void> {
 	const server = createMcpServer();
 	const shutdown = gracefulShutdown(server, shutdownGraceMilliseconds(process.env["OPENCUA_SHUTDOWN_GRACE_MS"]));
-	exitOnTerminationSignals(shutdown);
-	if (process.argv.includes(SUPERVISED_CHILD_FLAG)) {
-		// The supervisor owns the client connection; when it goes away this child must not linger.
-		process.stdin.once("end", () => void shutdown(0));
-	}
+	let disconnectCleanup: Promise<void> | undefined;
+	// The supervisor ends this child's input and signals it at once when its client leaves: a clean-up already under
+	// way finishes (bounded) before the exit.
+	exitOnTerminationSignals((code) => (disconnectCleanup ?? Promise.resolve()).finally(() => shutdown(code)));
+	// The client is gone (its input closed): put back what this server opened or moved, then go. A restart signal from
+	// the supervisor does not get here, so a server restarted mid-task never closes the agent's apps under it.
+	process.stdin.once("end", () => {
+		disconnectCleanup = cleanUpOnDisconnect();
+		void disconnectCleanup.finally(() => shutdown(0));
+	});
 	await server.connect(new StdioServerTransport());
 }
 

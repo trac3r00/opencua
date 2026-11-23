@@ -2,13 +2,14 @@ import { afterEach, describe, expect, it } from "bun:test";
 import type { Rect } from "@opencua/core";
 import { createHarness, jsonPayload } from "./protocol-client-harness.js";
 import { FakeGuardedComputer } from "./protocol-test-harness.js";
-import { setVisibleFramesSourceForTesting } from "./script-tools.js";
+import { setCleanupDepsForTesting, setVisibleFramesSourceForTesting } from "./script-tools.js";
 import { keySequenceEntries } from "./tool-schemas.js";
 
 let closeHarness: (() => Promise<void>) | undefined;
 
 afterEach(async () => {
 	setVisibleFramesSourceForTesting(undefined);
+	setCleanupDepsForTesting(undefined);
 	if (closeHarness !== undefined) {
 		await closeHarness();
 		closeHarness = undefined;
@@ -187,6 +188,40 @@ describe("run_script #given two app handles #when apple.arrange puts them side b
 		expect(payload["ok"]).toBe(false);
 		expect(String(payload["error"])).toContain("cannot bring Other here");
 		expect(frames).toEqual([]);
+	});
+
+	it("#when the script calls apple.cleanUp after arranging #then each window gets its own frame back", async () => {
+		const frames: { readonly pid: number; readonly frame: Rect }[] = [];
+		const restored: { readonly pid: number; readonly frame: Rect }[] = [];
+		const computer = Object.assign(new FakeGuardedComputer(), {
+			setWindowFrame: async (pid: number, _windowId: number, frame: Rect) => {
+				frames.push({ pid, frame });
+				return { requested: frame, applied: frame, verified: true, attempts: 1 };
+			},
+		});
+		setVisibleFramesSourceForTesting(() => [
+			{ frame: { x: 0, y: 0, width: 2560, height: 1440 }, visible: { x: 0, y: 31, width: 2560, height: 1345 } },
+		]);
+		setCleanupDepsForTesting({
+			nameOf: (pid) => `pid ${pid}`,
+			frontmostPid: () => undefined,
+			isRunning: () => true,
+			quit: () => true,
+			setFrame: async (pid, _windowId, frame) => {
+				restored.push({ pid, frame });
+				return true;
+			},
+		});
+
+		const { payload } = await runScript(
+			`await apple.arrange([apple.app("Finder"), apple.app("Other")]); return await apple.cleanUp();`,
+			computer,
+		);
+
+		expect(payload).toMatchObject({ ok: true });
+		expect(frames).toHaveLength(2);
+		expect(restored.map((entry) => entry.pid).sort()).toEqual([1234, 5678]);
+		expect(restored.every((entry) => entry.frame.width !== 1280)).toBe(true);
 	});
 
 	it("refuses anything that is not an app handle", async () => {

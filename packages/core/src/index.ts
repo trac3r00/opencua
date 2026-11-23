@@ -88,7 +88,8 @@ export {
 } from "./platform/macos-top-level-windows.js";
 export { type ListedWindow, listWindows } from "./platform/macos-ffi/window-list.js";
 export { type TypingRhythm, typingRhythm } from "./platform/typing-rhythm.js";
-export { unhideApplication } from "./platform/macos-ffi/workspace.js";
+export { getRunningApplications, terminateApplication, unhideApplication } from "./platform/macos-ffi/workspace.js";
+export { frontProcessPid } from "./platform/macos-ffi/skylight.js";
 export {
 	ForegroundKeeper,
 	type ForegroundKeeperDeps,

@@ -13,6 +13,7 @@ import {
 import type { DockAction, DockSnapshot, ElementQuery, GuardedComputerInterface, TopLevelWindow } from "@opencua/core";
 import { z } from "zod/v4";
 import type { AppleScriptGuardSession } from "./applescript-session.js";
+import { type CleanupDeps, cleanupLedger, nativeCleanupDeps } from "./cleanup-ledger.js";
 import type { DockGuardSession } from "./dock-session.js";
 import type { ExtrasGuardSession } from "./extras-session.js";
 import type { GuardedSession, RunPace, RunStepDriver, VerifyCheckRequest, VerifyRequest } from "./guarded-session.js";
@@ -78,6 +79,12 @@ function observeOptions(options: unknown): unknown {
 }
 
 let visibleFramesSource: () => readonly ScreenFrames[] | undefined = visibleScreenFrames;
+let cleanupDepsSource: () => CleanupDeps = () => nativeCleanupDeps;
+
+/** Test seam for what cleanUp quits and restores through; production uses the macOS host. */
+export function setCleanupDepsForTesting(deps: CleanupDeps | undefined): void {
+	cleanupDepsSource = () => deps ?? nativeCleanupDeps;
+}
 
 /** Test seam for the screens' usable frames; production asks AppKit. */
 export function setVisibleFramesSourceForTesting(
@@ -102,9 +109,9 @@ app.hands({chunks:[{keyboard:[steps],pointer:[steps],vision:{}}...]},{expect}) r
 Find options: scrollWithin,maxPages,vision,direction. OCR needs Screen Recording and finds click targets, not AX values.
 const dock=apple.dock(); await dock.observe(); dock.click/showMenu/cancel(target). Dock actions need explicit approval and attended delivery.
 apple.terminal(): run/read; approval required. apple.osascript(source,{language,args,timeoutMs}): AppleScript/JXA; screen-taking statements refused.
-apple.arrange([a,b]) tiles windows; then use Promise.all.
+apple.arrange([a,b]) tiles windows; then use Promise.all. apple.cleanUp({keep}) when done.
 apple.spaces(): active()/displays() read-only; apple.menubar(): observe(), press(observedId), guarded.
-Refusals throw ScriptActionError; read_only forbids mutations. Timeout/cancellation stop input. Attended actions serialize; background apps overlap. Returns {ok,value,log,actions}.`;
+Refusals throw ScriptActionError; read_only forbids mutations. Timeout stops input. Background apps overlap. Returns {ok,value,log,actions}.`;
 
 class ScriptActionError extends Error {
 	readonly kind: string;
@@ -469,6 +476,14 @@ class ScriptRun {
 		} catch (error: unknown) {
 			return { activeSpaceId: undefined, reason: errorMessage(error) };
 		}
+	}
+
+	async cleanUp(keep: unknown): Promise<unknown> {
+		if (this.options.readOnly) {
+			throw this.refuseDock("read-only", "run_script is read_only: cleanUp was not run");
+		}
+		const names = Array.isArray(keep) ? keep.filter((entry): entry is string => typeof entry === "string") : [];
+		return await cleanupLedger.cleanUp(cleanupDepsSource(), names);
 	}
 
 	visibleFrames(): readonly ScreenFrames[] {
@@ -1253,6 +1268,8 @@ async function perform(
 			return run.spacesDisplays();
 		case "visibleFrames":
 			return run.visibleFrames();
+		case "cleanUp":
+			return await run.cleanUp(first);
 		case "menubarObserve":
 			return await run.menubarObserve();
 		case "menubarPress":

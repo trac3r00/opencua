@@ -36,6 +36,7 @@ import type {
 	TopLevelWindow,
 	WindowProbe,
 } from "@opencua/core";
+import { cleanupLedger } from "./cleanup-ledger.js";
 import { latestDecisionFrame } from "./decision-frame.js";
 import { settleDeferredOutcome } from "./deferred-settle.js";
 import type { ResolvedTargetClick } from "./mutation-actions.js";
@@ -822,6 +823,9 @@ export class GuardedSession {
 					launcher,
 					...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
 				});
+				if (result.launched && launcher.background === true) {
+					cleanupLedger.noteLaunched({ pid: result.pid, name: result.name, bundleId: result.bundleId });
+				}
 				return openAppResult({ opened: true, ...result }, undefined);
 			} catch (error: unknown) {
 				return openAppResult(
