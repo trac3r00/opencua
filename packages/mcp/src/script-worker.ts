@@ -551,7 +551,15 @@ function makeBrowserHandle(options: unknown): Readonly<Record<string, unknown>> 
 		inspect: (action: unknown, extra?: unknown) => send("bsk_inspect", { ...record(extra), action, scope }),
 		page: (action: unknown, extra?: unknown) => send("bsk_page", { ...record(extra), action, scope }),
 		tabs: (action: unknown, extra?: unknown) =>
-			send("bsk_tabs", defined({ ...record(extra), action, caller_scope: scope, context })),
+			send(
+				"bsk_tabs",
+				defined({
+					...record(extra),
+					action,
+					caller_scope: scope,
+					context: action === "close" ? context : undefined,
+				}),
+			),
 		help: (prompt: unknown, extra?: unknown) =>
 			send("bsk_assist", { ...record(extra), action: "request_help", prompt, scope }),
 		call: (tool: unknown, args?: unknown) => send(String(tool), { scope, ...record(args) }),
