@@ -274,6 +274,24 @@ describe("background worker ownership", () => {
 		expect(worker.stats().inputs).toBe(2);
 	});
 
+	it("#given a click that loads a new page #when only a wait follows #then the run completes on the new page", async () => {
+		const worker = await harness({ navigateAfterClick: true });
+		await worker.dispatch({ command: "open", url: "https://example.com" });
+		await expect(
+			worker.dispatch({
+				command: "run",
+				id: "submit-then-wait",
+				tabId: 100,
+				revision: "document1",
+				limits: { maxChars: 6000, maxElements: 80, fullPage: false },
+				steps: [
+					{ action: "click", ref: 1 },
+					{ action: "wait", text: "Done", timeoutMs: 1000 },
+				],
+			}),
+		).resolves.toMatchObject({ completedSteps: 2, navigated: true });
+	});
+
 	it("#given one document #when running a batch #then completes both grounded clicks", async () => {
 		const worker = await harness();
 		await worker.dispatch({ command: "open", url: "https://example.com" });
@@ -626,6 +644,7 @@ const pairingSchema = z.object({
 	socket: z.function({ input: z.tuple([z.number()]), output: z.promise(z.number()) }),
 	fire: z.function({ input: z.tuple([z.number(), z.string(), z.unknown()]), output: z.void() }),
 	sent: z.function({ input: z.tuple([z.number()]), output: z.array(z.unknown()) }),
+	reloads: z.function({ input: z.tuple([]), output: z.number() }),
 });
 
 const STALE_TOKEN = "a".repeat(64);
@@ -641,6 +660,8 @@ async function pairingHarness() {
 		const waiters = [];
 		const changeListeners = [];
 		let nativeCalls = 0;
+		let reloads = 0;
+		const sessionStore = {};
 		const event = { addListener() {}, removeListener() {} };
 		class WebSocket {
 			static CONNECTING = 0;
@@ -665,13 +686,18 @@ async function pairingHarness() {
 						for (const listener of changeListeners) listener(changes, 'local');
 					},
 				},
-				session: { set: async () => {}, remove: async () => {} },
+				session: {
+					get: async (key) => (key in sessionStore ? { [key]: sessionStore[key] } : {}),
+					set: async (value) => { Object.assign(sessionStore, value); },
+					remove: async () => {},
+				},
 				onChanged: { addListener(listener) { changeListeners.push(listener); } },
 			},
 			action: { setBadgeText: async () => {}, setTitle: async () => {} },
 			runtime: {
 				sendNativeMessage: async () => { nativeCalls++; return { port: 47953, token: '${FRESH_TOKEN}' }; },
 				onMessage: event,
+				reload: () => { reloads++; },
 			},
 			alarms: { create() {}, onAlarm: event },
 			windows: { onRemoved: event, onFocusChanged: event, onBoundsChanged: event },
@@ -691,13 +717,34 @@ async function pairingHarness() {
 				for (const listener of ws.listeners[type] ?? []) listener(value);
 			},
 			sent: (index) => sockets[index].sent,
+			reloads: () => reloads,
 		})
 	`);
-	const value: unknown = script.runInNewContext({ setTimeout, clearTimeout, setInterval, clearInterval, URL });
+	const value: unknown = script.runInNewContext({
+		setTimeout,
+		clearTimeout,
+		setInterval: () => 0,
+		clearInterval: () => undefined,
+		URL,
+	});
 	return pairingSchema.parse(value);
 }
 
 describe("background worker pairing", () => {
+	it("#given the daemon's build #when a later pairing names another build #then the extension reloads itself once", async () => {
+		const worker = await pairingHarness();
+		await worker.socket(0);
+		worker.fire(0, "open", {});
+		worker.fire(0, "message", { data: JSON.stringify({ ready: true, build: "build-a" }) });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		worker.fire(0, "message", { data: JSON.stringify({ ready: true, build: "build-a" }) });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(worker.reloads()).toBe(0);
+		worker.fire(0, "message", { data: JSON.stringify({ ready: true, build: "build-b" }) });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(worker.reloads()).toBe(1);
+	});
+
 	it("#given a stored token the daemon no longer accepts #when it refuses the pairing #then refetches the token from the native host and reconnects with it", async () => {
 		const worker = await pairingHarness();
 		await worker.socket(0);

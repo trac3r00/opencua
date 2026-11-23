@@ -68,6 +68,17 @@ describe("BrowserBridge", () => {
 		expect(bridge.connected).toBe(false);
 	});
 
+	it("#given a daemon build id #when the extension pairs #then the ready message names the build", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		bridge.buildId = "build-a";
+		bridges.push(bridge);
+		const socket = await connect(await bridge.listen(0));
+		clients.push(socket);
+		socket.send(JSON.stringify({ token: "secret" }));
+		const [raw] = await once(socket, "message");
+		expect(JSON.parse(raw.toString())).toEqual({ ready: true, build: "build-a" });
+	});
+
 	it("#given an authenticated extension #when requesting #then pairs and replies over the wire", async () => {
 		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
 		bridges.push(bridge);

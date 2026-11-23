@@ -1,5 +1,7 @@
 const DEFAULT_PORT = 47953;
 const MAX_MESSAGE = 4_000_000;
+const NAVIGATION_READ_BUDGET_MS = 10_000;
+const NAVIGATION_RETRY_MS = 100;
 const CHECKPOINT_TIMEOUT_MS = 10_000;
 import { pageRuntime } from "./page-runtime.js";
 
@@ -111,6 +113,7 @@ async function connect() {
 		}
 		if (!isRecord(message)) return;
 		if (message.ready === true) {
+			if (typeof message.build === "string") void reloadIfBuildChanged(message.build);
 			ready = true;
 			stopped = pausedByUser;
 			void chrome.storage.session.set({
@@ -157,6 +160,20 @@ async function connect() {
 		}
 	});
 	ws.addEventListener("error", () => ws.close());
+}
+
+/**
+ * Chromium keeps running an unpacked extension's old code after its files change, until it is reloaded. The daemon
+ * names its build (which covers these files) at each pairing: the first one seen is this load's, and a different one
+ * later means the files changed under it, so it reloads itself.
+ */
+async function reloadIfBuildChanged(build) {
+	const { loadedBuild } = await chrome.storage.session.get("loadedBuild");
+	if (loadedBuild === undefined) {
+		await chrome.storage.session.set({ loadedBuild: build });
+	} else if (loadedBuild !== build) {
+		chrome.runtime.reload();
+	}
 }
 
 function isRecord(value) {
@@ -544,8 +561,34 @@ async function evaluate(state, method, args = {}) {
 	return result.result?.value;
 }
 
+/** CDP's answers when the page an evaluation aimed at was replaced by a navigation mid-call. */
+function navigationError(error) {
+	return /navigated or closed|Cannot find context|Execution context was destroyed|context with specified id/i.test(
+		String(error?.message ?? error),
+	);
+}
+
+/**
+ * A read (wait, verify, observe) that a navigation interrupted is asked again of the new document, within the
+ * budget: a click that submits a form replaces the page, and the read that follows is how the agent confirms it.
+ */
+async function evaluateRead(state, method, args = {}, budgetMs = NAVIGATION_READ_BUDGET_MS) {
+	const deadline = Date.now() + budgetMs;
+	for (;;) {
+		try {
+			return await evaluate(state, method, args);
+		} catch (error) {
+			if (!navigationError(error) || Date.now() >= deadline) throw error;
+			state.contextId = undefined;
+			state.frameId = undefined;
+			state.revision = undefined;
+			await new Promise((resolve) => setTimeout(resolve, NAVIGATION_RETRY_MS));
+		}
+	}
+}
+
 async function observe(state, limits) {
-	const result = await evaluate(state, "observe", { limits });
+	const result = await evaluateRead(state, "observe", { limits });
 	if (!isRecord(result) || typeof result.revision !== "string") throw new Error("Invalid page observation");
 	state.revision = result.revision;
 	return result;
@@ -611,11 +654,16 @@ async function runSteps(state, command) {
 	if (initialRevision !== command.revision) throw new Error("Stale observation revision");
 	const contextGeneration = state.contextGeneration;
 	let completedSteps = 0;
+	// Set once a step replaced the document (a submit, a link): later element steps would act on refs of the old
+	// page, so only waits, which read the new page, may follow.
+	let navigated = false;
 	for (let index = 0; index < command.steps.length; index++) {
 		if (stopped || state.cancelled) throw new Error("Actions stopped");
 		const step = command.steps[index];
+		if (navigated && step.action !== "wait")
+			throw new Error("Document changed during batch; observe before continuing");
 		if (step.action === "wait") {
-			const waited = await evaluate(state, "wait", {
+			const waited = await evaluateRead(state, "wait", {
 				text: step.text,
 				selector: step.selector,
 				timeoutMs: step.timeoutMs,
@@ -673,7 +721,10 @@ async function runSteps(state, command) {
 					try {
 						await mouse(state, "mousePressed", target.x, target.y);
 					} finally {
-						await mouse(state, "mouseReleased", target.x, target.y);
+						await mouse(state, "mouseReleased", target.x, target.y).catch((error) => {
+							if (!navigationError(error)) throw error;
+							navigated = true;
+						});
 					}
 				} else {
 					const focus = await evaluate(state, "focus", {
@@ -690,13 +741,18 @@ async function runSteps(state, command) {
 		}
 		completedSteps++;
 		if (state.contextId === undefined || state.frameId === undefined || state.contextGeneration !== contextGeneration)
-			throw new Error("Document changed during batch; observe before continuing");
+			navigated = true;
 	}
 	const verification = command.expect
-		? await evaluate(state, "verify", { text: command.expect.text, timeoutMs: command.expect.timeoutMs })
+		? await evaluateRead(state, "verify", { text: command.expect.text, timeoutMs: command.expect.timeoutMs })
 		: null;
 	const observation = await observe(state, command.limits);
-	return { observation, verified: verification === null ? null : verification?.ok === true, completedSteps };
+	return {
+		observation,
+		verified: verification === null ? null : verification?.ok === true,
+		completedSteps,
+		...(navigated ? { navigated: true } : {}),
+	};
 }
 
 async function mouse(state, type, x, y) {

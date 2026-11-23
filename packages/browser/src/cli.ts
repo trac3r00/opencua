@@ -25,10 +25,16 @@ async function serve(): Promise<void> {
 		import("./controller.js"),
 	]);
 	const distDirectory = dirname(fileURLToPath(import.meta.url));
-	const buildDirectories = [distDirectory, resolve(distDirectory, "../../core/dist")].filter(existsSync);
+	// The extension's files count too: the daemon restarts on a change, and tells the extension, which reloads.
+	const buildDirectories = [
+		distDirectory,
+		resolve(distDirectory, "../../core/dist"),
+		resolve(distDirectory, "../extension"),
+	].filter(existsSync);
 	const buildId = await readBuildId(buildDirectories);
 	const token = await connectionToken();
 	const bridge = new BrowserBridge(new StopSwitch(), 15000, token);
+	bridge.buildId = buildId;
 	const controller = new BrowserController(bridge, buildId);
 	bridge.setRpcHandler((input, signal) => controller.dispatch(input, signal));
 	const configuredPort = process.env["OPENCUA_BROWSER_PORT"];

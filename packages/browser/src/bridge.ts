@@ -41,6 +41,8 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 	private socket: WebSocket | undefined;
 	private stopped = false;
 	private everConnected = false;
+	/** Sent with every pairing, so an extension loaded from older files reloads itself. */
+	buildId: string | undefined;
 	/** Set once a reconnect wait ran out, so later calls fail fast until the extension is back. */
 	private reconnectWaitSpent = false;
 	/** How long a call waits for a dropped extension to reconnect: its reconnect alarm fires every 30 s. */
@@ -231,7 +233,7 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 				this.reason = undefined;
 				this.handoff = undefined;
 				this.epoch++;
-				ws.send(JSON.stringify({ ready: true }));
+				ws.send(JSON.stringify({ ready: true, ...(this.buildId === undefined ? {} : { build: this.buildId }) }));
 				this.everConnected = true;
 				this.reconnectWaitSpent = false;
 				this.emit("connected");
