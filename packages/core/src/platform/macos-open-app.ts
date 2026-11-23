@@ -46,6 +46,11 @@ export interface OpenApplicationResult {
 	readonly reopened?: boolean;
 	/** True when a background launch made the launched app visible behind the person's app. */
 	readonly revealed?: boolean;
+	/**
+	 * Whether the launched app showed a window before the call returned. False means it is still starting (or opens
+	 * no window by itself, as a browser restoring no session may not): observing it now finds nothing to act on.
+	 */
+	readonly windowReady?: boolean;
 	readonly name: string;
 	readonly bundleId: string;
 	readonly pid: number;
@@ -224,6 +229,13 @@ export async function openApplication(
 			const restored = await restoreIfStolen(appeared.pid);
 			// Only an app this call launched is revealed: one the person hid themselves stays hidden.
 			const revealed = launcher.background === true ? launcher.reveal?.(appeared.pid) : undefined;
+			// A process appears well before its first window (Chrome took seconds on a busy Mac), and an observation in
+			// between fails, so the launch waits for a window within the same deadline.
+			let windowReady = launcher.hasWindows?.(appeared.pid);
+			while (windowReady === false && Date.now() < deadline) {
+				await delayMilliseconds(pollIntervalMs);
+				windowReady = launcher.hasWindows?.(appeared.pid);
+			}
 			return {
 				name: appeared.name,
 				bundleId: appeared.bundleId,
@@ -232,6 +244,7 @@ export async function openApplication(
 				activated: false,
 				...(restored === undefined ? {} : { frontmostRestored: restored }),
 				...(revealed === undefined ? {} : { revealed }),
+				...(windowReady === undefined ? {} : { windowReady }),
 			};
 		}
 		if (Date.now() >= deadline) {

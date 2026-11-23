@@ -362,3 +362,43 @@ describe("#given a Chromium browser #when launched in the background #then cover
 		expect(openArguments("Google Chrome", false)).toEqual(["-a", "Google Chrome"]);
 	});
 });
+
+describe("#given a background launch whose first window comes later #when opened #then the call waits for it", () => {
+	it("returns once the app shows a window, saying so", async () => {
+		const lister = new FakeLister();
+		lister.onCall = (call) => {
+			if (call >= 2) {
+				lister.apps = [app("Google Chrome", "com.google.Chrome", 4321)];
+			}
+		};
+		let checks = 0;
+		const launcher: AppOpenLauncher = {
+			...recordingLauncher().launcher,
+			background: true,
+			hasWindows: () => {
+				checks += 1;
+				return checks >= 3;
+			},
+		};
+
+		const result = await openApplication(lister, "Google Chrome", { launcher, timeoutMs: 1_000, pollIntervalMs: 1 });
+
+		expect(result.windowReady).toBe(true);
+		expect(checks).toBe(3);
+	});
+
+	it("reports windowReady false when no window comes before the deadline", async () => {
+		const lister = new FakeLister();
+		lister.apps = [];
+		lister.onCall = (call) => {
+			if (call >= 2) {
+				lister.apps = [app("Google Chrome", "com.google.Chrome", 4321)];
+			}
+		};
+		const launcher: AppOpenLauncher = { ...recordingLauncher().launcher, background: true, hasWindows: () => false };
+
+		const result = await openApplication(lister, "Google Chrome", { launcher, timeoutMs: 30, pollIntervalMs: 1 });
+
+		expect(result.windowReady).toBe(false);
+	});
+});
