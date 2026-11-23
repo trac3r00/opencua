@@ -3,6 +3,7 @@ import type { Rect } from "@opencua/core";
 import { createHarness, jsonPayload } from "./protocol-client-harness.js";
 import { FakeGuardedComputer } from "./protocol-test-harness.js";
 import { setVisibleFramesSourceForTesting } from "./script-tools.js";
+import { keySequenceEntries } from "./tool-schemas.js";
 
 let closeHarness: (() => Promise<void>) | undefined;
 
@@ -86,6 +87,37 @@ describe("run_script #given the shapes agents write #when a script uses them #th
 
 		expect(payload).toMatchObject({ ok: true, value: "done" });
 		expect(computer.effects).toContainEqual(expect.objectContaining({ kind: "click" }));
+	});
+});
+
+describe("press_keys #given a shortcut written as a list #when it runs #then it is one chord, not a lone modifier and a typed letter", () => {
+	it.each([
+		[["cmd", "a"], ["cmd+a"]],
+		[["cmd", "shift", "z"], ["cmd+shift+z"]],
+		[
+			["cmd", "a", "return"],
+			["cmd+a", "return"],
+		],
+		[[{ key: "cmd" }, { key: "s", hold_seconds: 0.1 }], [{ key: "cmd+s", hold_seconds: 0.1 }]],
+		[["shift"], ["shift"]],
+		[
+			["a", "cmd"],
+			["a", "cmd"],
+		],
+	])("%j -> %j", (keys, expected) => {
+		expect(keySequenceEntries(keys)).toEqual(expected);
+	});
+
+	it("#when run_script presses ['cmd', 'a'] #then exactly one key event reaches the app", async () => {
+		const { payload, computer } = await runScript(`
+			const finder = apple.app("Finder");
+			await finder.observe();
+			await finder.press(["cmd", "a"]);
+			return "pressed";
+		`);
+
+		expect(payload).toMatchObject({ ok: true, value: "pressed" });
+		expect(computer.effects.filter((effect) => effect.kind === "key")).toEqual([{ kind: "key", key: "a" }]);
 	});
 });
 

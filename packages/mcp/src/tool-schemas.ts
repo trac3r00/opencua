@@ -359,9 +359,50 @@ const keySequenceEntrySchema = z.union([
 /** A sequence of combos, or one combo ("cmd+shift+a"), the way agents most often write it. */
 const keySequenceSchema = z.union([z.string().min(1), z.array(keySequenceEntrySchema).min(1)]);
 
-/** The combos a keys argument names, in order. */
-export function keySequenceEntries<Entry>(keys: string | readonly Entry[]): readonly (string | Entry)[] {
-	return typeof keys === "string" ? [keys] : keys;
+const MODIFIER_NAMES: ReadonlySet<string> = new Set([
+	"cmd",
+	"command",
+	"meta",
+	"super",
+	"alt",
+	"opt",
+	"option",
+	"ctrl",
+	"control",
+	"shift",
+]);
+
+function onlyModifiers(combo: string): boolean {
+	return combo.split("+").every((part) => MODIFIER_NAMES.has(part.trim().toLowerCase()));
+}
+
+/**
+ * The combos a keys argument names, in order. Agents write a shortcut as a list (["cmd", "a"]) as often as a combo
+ * ("cmd+a"), and pressing Command alone and then a plain "a" would type the letter into the document, so modifiers
+ * listed on their own are held for the key that follows them. Modifiers with no key after them are pressed alone.
+ */
+export function keySequenceEntries<Entry extends { readonly key: string }>(
+	keys: string | readonly (string | Entry)[],
+): readonly (string | Entry)[] {
+	if (typeof keys === "string") {
+		return [keys];
+	}
+	const entries: (string | Entry)[] = [];
+	let held: string[] = [];
+	for (const entry of keys) {
+		const combo = typeof entry === "string" ? entry : entry.key;
+		if (onlyModifiers(combo)) {
+			held.push(combo);
+			continue;
+		}
+		const prefix = held.length === 0 ? "" : `${held.join("+")}+`;
+		entries.push(
+			prefix === "" ? entry : typeof entry === "string" ? prefix + entry : { ...entry, key: prefix + combo },
+		);
+		held = [];
+	}
+	entries.push(...held);
+	return entries;
 }
 
 const pressKeysFields = {
