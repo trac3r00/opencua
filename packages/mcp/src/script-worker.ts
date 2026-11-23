@@ -525,12 +525,14 @@ function makeBrowserHandle(options: unknown): Readonly<Record<string, unknown>> 
 	const scope = typeof scopeOption === "string" && scopeOption !== "" ? scopeOption : "opencua";
 	let context: string | undefined;
 	let observation: string | undefined;
-	const remember = (result: unknown): unknown => {
+	const remember = (answer: unknown): unknown => {
+		// bsk answers with the result object and, beside it, the page text; the ids live in the object.
+		const result = Array.isArray(answer) ? (answer.find(isRecord) ?? answer[0]) : answer;
 		const nextContext = pick(result, "context_id") ?? pick(pick(result, "post"), "context_id");
 		const nextObservation = pick(result, "observation_id") ?? pick(pick(result, "post"), "observation_id");
 		if (typeof nextContext === "string") context = nextContext;
 		if (typeof nextObservation === "string") observation = nextObservation;
-		return result;
+		return answer;
 	};
 	const send = async (tool: string, args: Record<string, unknown>): Promise<unknown> =>
 		remember(await call("browser", undefined, [tool, args]));

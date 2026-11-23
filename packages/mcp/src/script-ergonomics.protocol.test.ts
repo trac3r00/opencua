@@ -245,12 +245,7 @@ describe("run_script #given OpenCUA Browser #when a script drives a page through
 			async call(tool, args) {
 				calls.push({ tool, args });
 				if (tool === "bsk_session")
-					return {
-						session_id: "s1",
-						context_id: "ctx-1",
-						observation_id: "obs-1",
-						observation: { text: "textbox Name [ref=@e3]" },
-					};
+					return [{ session_id: "s1", context_id: "ctx-1", observation_id: "obs-1" }, "textbox Name [ref=@e3]"];
 				if (tool === "bsk_plan") return { completed: 2, post: { context_id: "ctx-2", observation_id: "obs-2" } };
 				return { fields: { title: "Thanks, Ada" } };
 			},
@@ -260,7 +255,7 @@ describe("run_script #given OpenCUA Browser #when a script drives a page through
 		const { payload } = await runScript(`
 			const b = apple.browser();
 			const page = await b.open("https://example.test/form");
-			const ref = page.observation.text.match(/@e\\d+/)[0];
+			const ref = page[1].match(/@e\\d+/)[0];
 			await b.plan([{ action: "fill", ref, value: "Ada" }, { action: "click", ref: "@e4" }]);
 			const read = await b.read([{ key: "title", read: "text", selector: "h1" }]);
 			return read.fields.title;
