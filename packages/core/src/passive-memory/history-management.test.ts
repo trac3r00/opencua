@@ -3,7 +3,16 @@ import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { historyPaths } from "./history-control.js";
-import { deleteHistorySegments, listHistorySegments, parseHistoryDuration } from "./history-management.js";
+import {
+	DEFAULT_RAW_RETENTION_HOURS,
+	deleteExpiredHistorySegments,
+	deleteHistorySegments,
+	historySegmentIds,
+	listHistorySegments,
+	parseHistoryDuration,
+	readHistorySegmentEvents,
+	readRawRetentionMs,
+} from "./history-management.js";
 
 let stateDir: string;
 let outside: string;
@@ -117,6 +126,89 @@ describe("#given recorded segments #when some are deleted #then only the selecte
 		expect(deleted).toHaveLength(3);
 		expect(await remaining()).toEqual(["2026-11-04T11-40-00Z", "2026-11-04T11-50-00Z", "not-a-segment"]);
 		expect(await readdir(outside)).toEqual(["kept"]);
+	});
+});
+
+describe("#given segments past the retention #when expired ones are deleted #then only summarized segments go", () => {
+	const HOUR = 3_600_000;
+	// The 12:00 segment's window ends at 12:10, so at 14:10 it is exactly two hours past.
+	const now = Date.parse("2026-11-04T14:10:00Z");
+
+	it("deletes a summarized segment whose window ended a full retention ago, and keeps a later one", async () => {
+		const deleted = deleteExpiredHistorySegments(historyPaths(stateDir), {
+			now,
+			retentionMs: 2 * HOUR,
+			summarized: new Set(["2026-11-04T12-00-00Z", "2026-11-04T12-10-00Z"]),
+		});
+
+		expect(deleted).toEqual(["2026-11-04T12-00-00Z"]);
+		expect(await remaining()).toContain("2026-11-04T12-10-00Z");
+	});
+
+	it("keeps every old segment that is not summarized, however old", async () => {
+		const deleted = deleteExpiredHistorySegments(historyPaths(stateDir), {
+			now: now + 1000 * HOUR,
+			retentionMs: 2 * HOUR,
+			summarized: new Set(["2026-11-04T12-20-00Z"]),
+		});
+
+		expect(deleted).toEqual(["2026-11-04T12-20-00Z"]);
+		expect(historySegmentIds(historyPaths(stateDir))).toEqual(["2026-11-04T12-00-00Z", "2026-11-04T12-10-00Z"]);
+	});
+
+	it("never deletes the linked or stray entries, even when they are named as summarized", async () => {
+		deleteExpiredHistorySegments(historyPaths(stateDir), {
+			now: now + 1000 * HOUR,
+			retentionMs: HOUR,
+			summarized: new Set(["2026-11-04T11-50-00Z", "2026-11-04T11-40-00Z", "not-a-segment"]),
+		});
+
+		expect(await remaining()).toEqual(expect.arrayContaining(["2026-11-04T11-40-00Z", "2026-11-04T11-50-00Z"]));
+		expect(await readdir(outside)).toEqual(["kept"]);
+	});
+
+	it.each([0, -1, Number.NaN])("rejects a retention of %p before deleting anything", async (retentionMs) => {
+		expect(() =>
+			deleteExpiredHistorySegments(historyPaths(stateDir), { now, retentionMs, summarized: new Set() }),
+		).toThrow(/positive duration/);
+		expect(historySegmentIds(historyPaths(stateDir))).toHaveLength(3);
+	});
+});
+
+describe("#given history settings #when the raw retention is read #then rawRetentionHours wins only as a positive number", () => {
+	it("defaults to 48 hours without settings", () => {
+		expect(DEFAULT_RAW_RETENTION_HOURS).toBe(48);
+		expect(readRawRetentionMs(historyPaths(stateDir))).toBe(48 * 3_600_000);
+	});
+
+	it.each([
+		[{ rawRetentionHours: 12 }, 12],
+		[{ rawRetentionHours: 0.5 }, 0.5],
+		[{ rawRetentionHours: 0 }, 48],
+		[{ rawRetentionHours: -3 }, 48],
+		[{ rawRetentionHours: "12" }, 48],
+		[{ defaultApplicationBehavior: "observe" }, 48],
+	])("reads %j as %d hours", async (settings, hours) => {
+		await writeFile(historyPaths(stateDir).settingsPath, JSON.stringify(settings));
+
+		expect(readRawRetentionMs(historyPaths(stateDir))).toBe(hours * 3_600_000);
+	});
+
+	it("falls back to the default when settings.json is not JSON", async () => {
+		await writeFile(historyPaths(stateDir).settingsPath, "{ broken");
+
+		expect(readRawRetentionMs(historyPaths(stateDir))).toBe(48 * 3_600_000);
+	});
+});
+
+describe("#given a segment's events file #when its events are read #then a torn line is left out", () => {
+	it("returns the parsed events in order and nothing for a segment without a file", async () => {
+		const paths = historyPaths(stateDir);
+		await writeFile(join(paths.segmentsDir, "2026-11-04T12-10-00Z", "events.jsonl"), '{"id":1}\n\n{"id":2}\n{"id":3');
+		await rm(join(paths.segmentsDir, "2026-11-04T12-20-00Z", "events.jsonl"));
+
+		expect(readHistorySegmentEvents(paths, "2026-11-04T12-10-00Z")).toEqual([{ id: 1 }, { id: 2 }]);
+		expect(readHistorySegmentEvents(paths, "2026-11-04T12-20-00Z")).toEqual([]);
 	});
 });
 

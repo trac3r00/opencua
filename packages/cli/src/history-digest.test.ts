@@ -3,10 +3,20 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	type HistoryMemory,
+	SKILL_DESCRIPTIONS_FILE,
+	historyPaths,
+	listHistoryMemories,
+	setSkillDescriptionsEnabled,
+} from "@opencua/core/light";
+import {
 	digestLatestHistory,
+	formatTimeline,
 	historyAutomationEnabled,
 	listHistoryDigests,
 	setHistoryAutomation,
+	summarizeHistoryNow,
+	timelineDays,
 } from "./history-digest.js";
 
 const roots: string[] = [];
@@ -42,6 +52,169 @@ function writeSegment(root: string, id = segmentId, endedAt = "2026-10-29T04:10:
 
 afterEach(() => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe("#given a workflow repeated in a session #when history is summarized now #then its memory names the suggested skill", () => {
+	const mail = { name: "Mail", bundleIdentifier: "com.apple.mail", processIdentifier: 100 };
+	const now = Date.parse("2026-11-01T11:00:00Z");
+	const segments = ["2026-11-01T10-00-00Z", "2026-11-01T10-10-00Z"];
+
+	/** Mail composed twice, six minutes apart, in two segments: one session and one repeated workflow. */
+	function composedTwice(): ReturnType<typeof historyPaths> {
+		const paths = historyPaths(tempRoot());
+		for (const [index, id] of segments.entries()) {
+			const base = { timestamp: `2026-11-01T10:${index === 0 ? "05" : "11"}:00Z`, app: mail };
+			const events = [
+				{ ...base, kind: "mouse.click", mouse: {}, element: { role: "AXButton", title: "New Message" } },
+				{
+					...base,
+					kind: "keyboard.text_input",
+					keyboard: { text: `private-to-${index}` },
+					element: { role: "AXTextField", title: "To" },
+				},
+				{
+					...base,
+					kind: "keyboard.text_input",
+					keyboard: { text: `private-subject-${index}` },
+					element: { role: "AXTextField", title: "Subject" },
+				},
+				{ ...base, kind: "keyboard.shortcut", keyboard: { keyEquivalent: "d", modifiers: ["command", "shift"] } },
+			];
+			mkdirSync(join(paths.segmentsDir, id), { recursive: true });
+			writeFileSync(
+				join(paths.segmentsDir, id, "events.jsonl"),
+				events.map((event) => `${JSON.stringify(event)}\n`).join(""),
+			);
+		}
+		return paths;
+	}
+
+	function agent(): { readonly prompts: string[]; generate(prompt: string): Promise<string> } {
+		const prompts: string[] = [];
+		return {
+			prompts,
+			async generate(prompt) {
+				prompts.push(prompt);
+				return JSON.stringify({
+					title: "Sent two messages",
+					summary: "Composed and sent mail twice.",
+					nextSteps: [],
+				});
+			},
+		};
+	}
+
+	it("asks the agent with the switch on and titles the skill by its proposed name until it is described", async () => {
+		const paths = composedTwice();
+		const owner = agent();
+
+		const result = await summarizeHistoryNow(paths, { generate: owner.generate, now, timeZone: "UTC" });
+
+		const [memory] = listHistoryMemories(paths);
+		expect(result).toMatchObject({ created: ["2026-11-01/1005-sent-two-messages.md"], summarizer: "agent" });
+		expect(owner.prompts).toHaveLength(1);
+		expect(owner.prompts[0]).not.toContain("private-");
+		expect(memory).toMatchObject({ title: "Sent two messages", segments, apps: ["Mail"] });
+		expect(memory?.suggestedSkill).toEqual({ id: expect.stringMatching(/^[0-9a-f]{12}$/), title: "mail-workflow" });
+	});
+
+	it("uses the title the owner already sees for a described suggestion, and drops one a model rejected", async () => {
+		const described = composedTwice();
+		await summarizeHistoryNow(described, { useAgent: false, now, timeZone: "UTC" });
+		const id = listHistoryMemories(described)[0]?.suggestedSkill?.id ?? "";
+		const description = {
+			name: "send-mail",
+			title: "Compose and send a message",
+			summary: "Sends mail.",
+			whenToUse: "x",
+		};
+
+		const titled = composedTwice();
+		writeFileSync(
+			join(titled.root, SKILL_DESCRIPTIONS_FILE),
+			JSON.stringify({ descriptions: { [id]: description } }),
+		);
+		await summarizeHistoryNow(titled, { useAgent: false, now, timeZone: "UTC" });
+		const rejected = composedTwice();
+		writeFileSync(join(rejected.root, SKILL_DESCRIPTIONS_FILE), JSON.stringify({ descriptions: {}, skipped: [id] }));
+		await summarizeHistoryNow(rejected, { useAgent: false, now, timeZone: "UTC" });
+
+		expect(id).toMatch(/^[0-9a-f]{12}$/);
+		expect(listHistoryMemories(titled)[0]?.suggestedSkill).toEqual({ id, title: description.title });
+		expect(listHistoryMemories(rejected)).toHaveLength(1);
+		expect(listHistoryMemories(rejected)[0]?.suggestedSkill).toBeUndefined();
+	});
+
+	it.each([
+		["the switch is off", { off: true, useAgent: true }],
+		["the caller asks for no model", { off: false, useAgent: false }],
+	])("never calls the agent when %s", async (_case, { off, useAgent }) => {
+		const paths = composedTwice();
+		if (off) await setSkillDescriptionsEnabled(paths.root, false);
+		const owner = agent();
+
+		const result = await summarizeHistoryNow(paths, { generate: owner.generate, useAgent, now, timeZone: "UTC" });
+
+		expect(owner.prompts).toEqual([]);
+		expect(result).toMatchObject({ created: ["2026-11-01/1005-mail.md"], summarizer: "local" });
+	});
+
+	it("writes nothing when the run is already stopped, so a slow agent cannot hold up the caller", async () => {
+		const paths = composedTwice();
+		const owner = agent();
+		const stopped = new AbortController();
+		stopped.abort();
+
+		const result = await summarizeHistoryNow(paths, {
+			generate: owner.generate,
+			signal: stopped.signal,
+			now,
+			timeZone: "UTC",
+		});
+
+		expect(result).toMatchObject({ created: [], deferred: 1 });
+		expect(owner.prompts).toEqual([]);
+	});
+});
+
+describe("#given memories #when the timeline is formatted #then they are grouped by day in the order given", () => {
+	const memory = (day: string, time: string, extra: Partial<HistoryMemory> = {}): HistoryMemory => ({
+		day,
+		time,
+		file: `${day}/${time.replace(":", "")}-work.md`,
+		path: `/memories/${day}/${time.replace(":", "")}-work.md`,
+		title: `Work at ${time}`,
+		apps: ["Xcode"],
+		segments: [],
+		...extra,
+	});
+
+	it("groups consecutive memories of one day and shows how long each took when both ends are known", () => {
+		const memories = [
+			memory("2026-11-21", "01:31", { start: "2026-11-20T16:31:00Z", end: "2026-11-20T18:18:00Z" }),
+			memory("2026-11-20", "19:01", { start: "2026-11-20T10:01:00Z", apps: [] }),
+			memory("2026-11-20", "09:00", { suggestedSkill: { id: "abc123def456", title: "File the report" } }),
+		];
+
+		expect(timelineDays(memories).map((group) => [group.day, group.memories.map((entry) => entry.time)])).toEqual([
+			["2026-11-21", ["01:31"]],
+			["2026-11-20", ["19:01", "09:00"]],
+		]);
+		expect(formatTimeline(memories).split("\n")).toEqual([
+			"2026-11-21",
+			"  01:31  Work at 01:31  [Xcode]  1h 47m",
+			"2026-11-20",
+			"  19:01  Work at 19:01",
+			"  09:00  Work at 09:00  [Xcode]",
+			"         suggested skill: File the report (abc123def456)",
+			"",
+		]);
+	});
+
+	it("says which day has no memories instead of printing an empty list", () => {
+		expect(formatTimeline([], "2026-11-19")).toContain("2026-11-19");
+		expect(formatTimeline([]).trim().length).toBeGreaterThan(0);
+	});
 });
 
 describe("#given history automation #when checking consent #then only explicit settings enable it", () => {

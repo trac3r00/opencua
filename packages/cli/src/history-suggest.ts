@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { lstat, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { type HistorySkillDetection, type SkillDescription, describeHistoryStep } from "@opencua/core/light";
+import {
+	type HistorySkillDetection,
+	type SkillDescription,
+	describeHistoryStep,
+	readSkippedSkillCandidates,
+	suggestHistorySkills,
+} from "@opencua/core/light";
 
 /** Model-written descriptions by candidate id; a candidate without one shows its raw steps. */
 export type SkillDescriptions = Readonly<Record<string, SkillDescription>>;
@@ -12,6 +18,23 @@ export interface MenuSuggestion {
 	readonly id: string;
 	readonly title: string;
 	readonly prompt: string;
+}
+
+/** The detection without the candidates a model already judged to be mere navigation. */
+export function withoutSkippedCandidates(
+	detection: HistorySkillDetection,
+	skipped: ReadonlySet<string>,
+): HistorySkillDetection {
+	return { ...detection, candidates: detection.candidates.filter((candidate) => !skipped.has(candidate.id)) };
+}
+
+/** Repeated workflows in recent history worth suggesting, at most `limit`, without the ones recorded as skipped. */
+export async function suggestedHistorySkills(historyRoot: string, limit: number): Promise<HistorySkillDetection> {
+	const skipped = await readSkippedSkillCandidates(historyRoot);
+	// Skipped candidates would otherwise use up the limit and leave fewer suggestions than asked for.
+	const detection = await suggestHistorySkills(historyRoot, { limit: limit + skipped.size });
+	const kept = withoutSkippedCandidates(detection, skipped);
+	return { ...kept, candidates: kept.candidates.slice(0, limit) };
 }
 
 export function agentPromptFor(

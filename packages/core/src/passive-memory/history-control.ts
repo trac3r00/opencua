@@ -120,5 +120,8 @@ export function writeHistorySettings(
 	fs: HistoryControlFs = nodeHistoryControlFs,
 ): void {
 	fs.ensureDir(paths.root);
-	fs.writeText(paths.settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+	// Keys these settings do not model (rawRetentionHours) belong to other readers and are kept.
+	const kept = parse(fs.readText(paths.settingsPath))?.["rawRetentionHours"];
+	const document = kept === undefined ? settings : { ...settings, rawRetentionHours: kept };
+	fs.writeText(paths.settingsPath, `${JSON.stringify(document, null, 2)}\n`);
 }

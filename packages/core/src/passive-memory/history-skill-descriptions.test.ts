@@ -8,6 +8,7 @@ import {
 	describeSkillCandidates,
 	parseSkillDescription,
 	readSkillDescriptions,
+	readSkippedSkillCandidates,
 	setSkillDescriptionsEnabled,
 	skillDescriptionPrompt,
 	skillDescriptionsEnabled,
@@ -31,11 +32,13 @@ function candidate(id: string): HistorySkillCandidate {
 		occurrences: 3,
 		apps: ["Notes", "Safari"],
 		steps: [
-			{ app: "Safari", action: "switch", detail: "invoice #" },
-			{ app: "Safari", action: "shortcut", detail: "c" },
-			{ app: "Notes", action: "shortcut", detail: "v" },
+			{ app: "Safari", action: "open", detail: "billing.example.com/invoices" },
+			{ app: "Safari", action: "shortcut", detail: "cmd+c" },
+			{ app: "Notes", action: "type", role: "text field", detail: "amount" },
+			{ app: "Notes", action: "shortcut", detail: "cmd+s" },
 		],
-		segmentIds: ["s"],
+		parameters: [{ step: 3, app: "Notes", field: "amount", samples: 3, distinctValues: 3, varies: true }],
+		segmentIds: ["s", "t"],
 		lastSeenAt: "",
 	};
 }
@@ -90,6 +93,32 @@ describe("#given suggested candidates #when they are described #then each is ask
 		expect(await describeSkillCandidates(root, [candidate("x9"), candidate("y8")], generate)).toEqual({});
 		expect(await readSkillDescriptions(root)).toEqual({});
 		await expect(readFile(join(root, SKILL_DESCRIPTIONS_FILE))).rejects.toThrow();
+	});
+
+	it("caches a skip verdict for mere navigation and never shows or asks for that candidate again", async () => {
+		const prompts: string[] = [];
+		const generate = async (prompt: string) => {
+			prompts.push(prompt);
+			return prompt.includes("reload") ? 'Skipping: {"skip": true, "reason": "only app switching"}' : answer;
+		};
+		const navigation: HistorySkillCandidate = {
+			...candidate("a1"),
+			steps: [
+				{ app: "Brave Browser", action: "press", role: "button", detail: "reload" },
+				{ app: "Herdr", action: "shortcut", detail: "cmd+r" },
+				{ app: "Brave Browser", action: "press", role: "button", detail: "back" },
+			],
+			parameters: [],
+		};
+
+		const first = await describeSkillCandidates(root, [navigation, candidate("b2")], generate);
+		const second = await describeSkillCandidates(root, [navigation, candidate("b2")], generate);
+
+		expect(Object.keys(first)).toEqual(["b2"]);
+		expect(second).toEqual(first);
+		expect(prompts).toHaveLength(2);
+		expect([...(await readSkippedSkillCandidates(root))]).toEqual(["a1"]);
+		expect(Object.keys(await readSkillDescriptions(root))).toEqual(["b2"]);
 	});
 
 	it("puts every step into the prompt the way history describes it", () => {

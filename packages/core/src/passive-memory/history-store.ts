@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { type HistoryEvent, encodeHistoryEvent } from "./history-events.js";
 
 export const SEGMENT_WINDOW_MS = 10 * 60 * 1000;
-export const DEFAULT_RETENTION_MS = 6 * 60 * 60 * 1000;
+/** Raw events are kept 48 hours, as Codex Computer History keeps its event files; memories stay until deleted. */
+export const DEFAULT_RETENTION_MS = 48 * 60 * 60 * 1000;
 
 export interface HistoryFs {
 	ensureDir(path: string): Promise<void>;

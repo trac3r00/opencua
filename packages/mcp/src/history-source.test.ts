@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { historyPaths, writeHistoryState } from "@opencua/core";
-import { createHistorySource } from "./history-source.js";
+import { DEFAULT_RETENTION_MS, historyPaths, writeHistoryState } from "@opencua/core";
+import { MAX_MEMORY_BYTES, createHistorySource } from "./history-source.js";
 
 const dirs: string[] = [];
 
@@ -26,7 +26,8 @@ describe("#given no watcher state #when status is read #then it reports stopped 
 		const status = await source.status();
 		expect(status.state).toBe("stopped");
 		expect(status.eventStreamRootPath).toBe(join(stateDir, "cua-history"));
-		expect(status.retentionHours).toBe(6);
+		expect(status.memoriesPath).toBe(join(stateDir, "cua-history", "memories"));
+		expect(status.retentionHours).toBe(DEFAULT_RETENTION_MS / 3_600_000);
 		expect(status.currentSegmentId).toBeUndefined();
 	});
 });
@@ -65,14 +66,23 @@ describe("#given recorded segments on disk #when skills are suggested and saved 
 	it("detects a repeat across segment files, saves once, and refuses to overwrite", async () => {
 		const stateDir = tempStateDir();
 		const segments = join(historyPaths(stateDir).root, "segments");
-		const line = (app: string, title: string) =>
+		// A Mail send with typed recipient and subject: real work, not navigation.
+		const mail = { name: "Mail", bundleIdentifier: "com.apple.mail" };
+		const typed = (field: string, text: string) =>
 			JSON.stringify({
-				kind: "window.changed",
+				kind: "keyboard.text_input",
 				timestamp: "2026-11-01T10:00:00Z",
-				app: { name: app },
-				window: { title },
+				app: mail,
+				keyboard: { text },
+				element: { role: "AXTextField", title: field },
 			});
-		const flow = [line("Safari", "Invoice"), line("Notes", "Ledger"), line("Mail", "Draft")];
+		const send = JSON.stringify({
+			kind: "keyboard.shortcut",
+			timestamp: "2026-11-01T10:00:00Z",
+			app: mail,
+			keyboard: { keyEquivalent: "d", modifiers: ["command", "shift"] },
+		});
+		const flow = [typed("To", "ann@x.io"), typed("Subject", "Invoice"), send];
 		for (const id of ["2026-11-01T10-00-00Z", "2026-11-01T10-10-00Z"]) {
 			mkdirSync(join(segments, id), { recursive: true });
 			writeFileSync(join(segments, id, "events.jsonl"), `${[...flow, "{not json"].join("\n")}\n`);
@@ -100,5 +110,157 @@ describe("#given recorded segments on disk #when skills are suggested and saved 
 		symlinkSync(outside, join(segment, "events.jsonl"));
 		const detection = await createHistorySource({ stateDir }).suggestSkills({ limit: 5 });
 		expect(detection.scannedSegments).toBe(0);
+	});
+});
+
+function writeMemory(stateDir: string, path: string, text: string): string {
+	const file = join(historyPaths(stateDir).root, "memories", path);
+	mkdirSync(join(file, ".."), { recursive: true });
+	writeFileSync(file, text);
+	return file;
+}
+
+const memory = (title: string, body: string) =>
+	[
+		"---",
+		`title: "${title}"`,
+		"start: 2026-11-23T09:30:00Z",
+		"end: 2026-11-23T10:10:00Z",
+		"apps: [Safari, 'Notes']",
+		"segments:",
+		"  - 2026-11-23T09-30-00Z",
+		"  - 2026-11-23T09-40-00Z",
+		"---",
+		"",
+		body,
+	].join("\n");
+
+describe("#given no memories folder #when the timeline is read #then it is empty", () => {
+	it("returns no entries and nothing skipped", async () => {
+		const stateDir = tempStateDir();
+		const timeline = await createHistorySource({ stateDir }).timeline({ limit: 20 });
+		expect(timeline).toEqual({ memoriesPath: join(stateDir, "cua-history", "memories"), entries: [], skipped: 0 });
+	});
+});
+
+describe("#given memories over several days #when the timeline is read #then entries come newest first with front matter and summary", () => {
+	it("orders by day then time, parses lists, and takes the first non-heading paragraph", async () => {
+		const stateDir = tempStateDir();
+		writeMemory(stateDir, "2026-11-22/1700-old.md", memory("Old", "Earlier work."));
+		writeMemory(
+			stateDir,
+			"2026-11-23/0930-invoices.md",
+			memory("Invoices", "# Invoices\n\nPaid two\ninvoices.\n\nMore."),
+		);
+		writeMemory(
+			stateDir,
+			"2026-11-23/1415-ledger.md",
+			"---\ntitle: Ledger\napps:\n  - Numbers\nsuggestedSkill:\n  name: ledger-entry\n  why: repeated\n---\nTotals.",
+		);
+		const source = createHistorySource({ stateDir });
+
+		const timeline = await source.timeline({ limit: 20 });
+
+		expect(timeline.entries.map((entry) => entry.path)).toEqual([
+			"2026-11-23/1415-ledger.md",
+			"2026-11-23/0930-invoices.md",
+			"2026-11-22/1700-old.md",
+		]);
+		expect(timeline.entries[0]).toEqual({
+			path: "2026-11-23/1415-ledger.md",
+			title: "Ledger",
+			apps: ["Numbers"],
+			segments: [],
+			suggestedSkill: { name: "ledger-entry", why: "repeated" },
+			summary: "Totals.",
+		});
+		expect(timeline.entries[1]).toEqual({
+			path: "2026-11-23/0930-invoices.md",
+			title: "Invoices",
+			start: "2026-11-23T09:30:00Z",
+			end: "2026-11-23T10:10:00Z",
+			apps: ["Safari", "Notes"],
+			segments: ["2026-11-23T09-30-00Z", "2026-11-23T09-40-00Z"],
+			summary: "Paid two invoices.",
+		});
+	});
+
+	it("honours the limit and the day filter", async () => {
+		const stateDir = tempStateDir();
+		writeMemory(stateDir, "2026-11-22/1700-old.md", memory("Old", "Earlier."));
+		writeMemory(stateDir, "2026-11-23/0930-a.md", memory("A", "a"));
+		writeMemory(stateDir, "2026-11-23/1000-b.md", memory("B", "b"));
+		const source = createHistorySource({ stateDir });
+
+		expect((await source.timeline({ limit: 1 })).entries.map((entry) => entry.title)).toEqual(["B"]);
+		expect((await source.timeline({ day: "2026-11-22", limit: 20 })).entries.map((entry) => entry.title)).toEqual([
+			"Old",
+		]);
+		expect((await source.timeline({ day: "2026-01-01", limit: 20 })).entries).toEqual([]);
+	});
+
+	it("skips a file without front matter and never follows a symlinked memory", async () => {
+		const stateDir = tempStateDir();
+		writeMemory(stateDir, "2026-11-23/0900-plain.md", "No front matter here.");
+		const outside = join(stateDir, "outside.md");
+		writeFileSync(outside, memory("Outside", "secret"));
+		mkdirSync(join(historyPaths(stateDir).root, "memories", "2026-11-23"), { recursive: true });
+		symlinkSync(outside, join(historyPaths(stateDir).root, "memories", "2026-11-23", "1000-link.md"));
+
+		const timeline = await createHistorySource({ stateDir }).timeline({ limit: 20 });
+
+		expect(timeline.entries).toEqual([]);
+		expect(timeline.skipped).toBe(1);
+	});
+});
+
+describe("#given a memory path #when the memory is read #then only files inside the memories folder are returned", () => {
+	it("returns the whole Markdown file", async () => {
+		const stateDir = tempStateDir();
+		const text = memory("Invoices", "Paid.");
+		writeMemory(stateDir, "2026-11-23/0930-invoices.md", text);
+
+		const read = await createHistorySource({ stateDir }).readMemory("2026-11-23/0930-invoices.md");
+
+		expect(read).toEqual({
+			path: "2026-11-23/0930-invoices.md",
+			bytes: Buffer.byteLength(text),
+			truncated: false,
+			text,
+		});
+	});
+
+	it.each([
+		"../settings.json",
+		"2026-11-23/../../state.json",
+		"/etc/passwd",
+		"2026-11-23/sub/0930-x.md",
+		"2026-11-23\\0930-x.md",
+		"2026-11-23/notes.txt",
+	])("refuses the path %s before reading anything", async (path) => {
+		const source = createHistorySource({ stateDir: tempStateDir() });
+		await expect(source.readMemory(path)).rejects.toThrow("is not a memory path");
+	});
+
+	it("refuses a missing memory, a missing folder and a symlinked file", async () => {
+		const stateDir = tempStateDir();
+		const source = createHistorySource({ stateDir });
+		await expect(source.readMemory("2026-11-23/0930-none.md")).rejects.toThrow("No memory");
+		const outside = join(stateDir, "outside.md");
+		writeFileSync(outside, "secret");
+		mkdirSync(join(historyPaths(stateDir).root, "memories", "2026-11-23"), { recursive: true });
+		symlinkSync(outside, join(historyPaths(stateDir).root, "memories", "2026-11-23", "0930-link.md"));
+		await expect(source.readMemory("2026-11-23/0930-link.md")).rejects.toThrow("No memory");
+	});
+
+	it("caps an oversized memory and says it was truncated", async () => {
+		const stateDir = tempStateDir();
+		writeMemory(stateDir, "2026-11-23/0930-big.md", "x".repeat(MAX_MEMORY_BYTES + 100));
+
+		const read = await createHistorySource({ stateDir }).readMemory("2026-11-23/0930-big.md");
+
+		expect(read.truncated).toBe(true);
+		expect(read.bytes).toBe(MAX_MEMORY_BYTES + 100);
+		expect(read.text.length).toBe(MAX_MEMORY_BYTES);
 	});
 });

@@ -72,6 +72,8 @@ export const HISTORY_TOOL_NAMES = [
 	"cua_history_resume",
 	"cua_history_suggest_skills",
 	"cua_history_save_skill",
+	"cua_history_timeline",
+	"cua_history_read_memory",
 ] as const;
 
 /** Every tool this server can ever register, including opt-in tools. */

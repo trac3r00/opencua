@@ -2,9 +2,19 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Foundation/Foundation.h>
 #import <fcntl.h>
+#import <spawn.h>
 #import <sys/file.h>
+#import <sys/wait.h>
 
 extern Boolean IsSecureEventInputEnabled(void);
+extern char **environ;
+extern int responsibility_spawnattrs_setdisclaim(posix_spawnattr_t *attributes,
+                                                 int disclaim);
+// Private but long-stable HIServices call (opencua's AX snapshot uses it too):
+// the CGWindowID behind an AX window element.
+extern AXError _AXUIElementGetWindow(AXUIElementRef element,
+                                     CGWindowID *identifier)
+    __attribute__((weak_import));
 
 static NSString *gRoot = nil;
 static NSString *gSegmentsDir = nil;
@@ -21,7 +31,10 @@ static NSString *const kPrivacyPolicyError =
 static BOOL gPaused = NO;
 static uint64_t gNextId = 1;
 static const double kSegmentWindowSeconds = 600.0;
-static const double kRetentionSeconds = 6 * 60 * 60;
+// Backstop only: `opencua history summarize` deletes summarized raw segments
+// after rawRetentionHours (default 48); this removes anything older that it
+// missed.
+static const double kRetentionSeconds = 48 * 60 * 60;
 
 static NSString *gCurrentSegmentId = nil;
 static long gCurrentEventCount = 0;
@@ -286,32 +299,222 @@ static NSDictionary *FrontmostApp(void) {
   };
 }
 
-static NSString *FocusedWindowTitle(pid_t pid) {
-  if (!AXIsProcessTrusted()) {
+// Every AX read is bounded: an app that hangs costs this recorder at most this
+// long per read instead of stalling input capture.
+static const float kAXReadTimeoutSeconds = 0.05f;
+static const NSUInteger kContextTextLimit = 200;
+static const NSUInteger kContextURLLimit = 2048;
+static BOOL gAXTrusted = NO;
+
+static void BoundAXReads(void) {
+  AXUIElementRef systemWide = AXUIElementCreateSystemWide();
+  AXUIElementSetMessagingTimeout(systemWide, kAXReadTimeoutSeconds);
+  CFRelease(systemWide);
+}
+
+static NSString *Clipped(NSString *text, NSUInteger limit) {
+  return text.length > limit
+             ? [text substringWithRange:
+                         [text rangeOfComposedCharacterSequencesForRange:
+                                   NSMakeRange(0, limit)]]
+             : text;
+}
+
+static NSString *ContextText(id value) {
+  if (![value isKindOfClass:NSString.class]) {
     return nil;
   }
-  AXUIElementRef appElement = AXUIElementCreateApplication(pid);
-  if (appElement == NULL) {
+  NSString *text = [value
+      stringByTrimmingCharactersInSet:NSCharacterSet
+                                          .whitespaceAndNewlineCharacterSet];
+  return text.length > 0 ? Clipped(text, kContextTextLimit) : nil;
+}
+
+// Role and labels of an element, in the order ElementFields reads them, then
+// its window and URL. AXValue is never read: what a field holds is not history.
+static NSArray<NSString *> *ElementAttributeNames(void) {
+  return @[
+    @"AXRole", @"AXSubrole", @"AXTitle", @"AXDescription", @"AXIdentifier",
+    @"AXPlaceholderValue", @"AXWindow", @"AXURL"
+  ];
+}
+
+// The contract's `element`: {role, subrole?, title?, description?,
+// identifier?, placeholder?}; nil without a role.
+static NSDictionary *ElementFields(NSArray *values) {
+  NSString *role = values.count >= 6 ? ContextText(values[0]) : nil;
+  if (role == nil) {
     return nil;
   }
-  CFTypeRef window = NULL;
-  NSString *title = nil;
-  if (AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute,
-                                    &window) == kAXErrorSuccess &&
-      window != NULL) {
-    CFTypeRef titleValue = NULL;
-    if (AXUIElementCopyAttributeValue((AXUIElementRef)window, kAXTitleAttribute,
-                                      &titleValue) == kAXErrorSuccess &&
-        titleValue != NULL) {
-      if (CFGetTypeID(titleValue) == CFStringGetTypeID()) {
-        title = [(__bridge NSString *)titleValue copy];
-      }
-      CFRelease(titleValue);
+  NSMutableDictionary *element =
+      [NSMutableDictionary dictionaryWithObject:role forKey:@"role"];
+  NSArray<NSString *> *keys =
+      @[ @"subrole", @"title", @"description", @"identifier", @"placeholder" ];
+  for (NSUInteger index = 0; index < keys.count; index++) {
+    NSString *text = ContextText(values[index + 1]);
+    if (text != nil) {
+      element[keys[index]] = text;
     }
-    CFRelease(window);
   }
-  CFRelease(appElement);
-  return title;
+  return element;
+}
+
+static BOOL IsSecureElement(NSDictionary *element) {
+  return [element[@"role"] isEqual:@"AXSecureTextField"] ||
+         [element[@"subrole"] isEqual:@"AXSecureTextField"];
+}
+
+// The contract's `document`: AXDocument is a URL string and AXURL a CFURL;
+// file URLs become `path`, anything else `url`. nil when neither says.
+static NSDictionary *DocumentFields(id document, id url) {
+  NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+  for (id value in @[ url ?: NSNull.null, document ?: NSNull.null ]) {
+    NSURL *parsed = [value isKindOfClass:NSURL.class] ? value
+                    : [value isKindOfClass:NSString.class]
+                        ? [NSURL URLWithString:value]
+                        : nil;
+    if (parsed.scheme.length == 0) {
+      continue;
+    }
+    if (parsed.isFileURL) {
+      if (fields[@"path"] == nil && parsed.path.length > 0) {
+        fields[@"path"] = parsed.path;
+      }
+    } else if (fields[@"url"] == nil) {
+      fields[@"url"] = Clipped(parsed.absoluteString, kContextURLLimit);
+    }
+  }
+  return fields.count > 0 ? fields : nil;
+}
+
+static NSArray *CopyAttributes(AXUIElementRef element,
+                               NSArray<NSString *> *names) {
+  CFArrayRef values = NULL;
+  if (AXUIElementCopyMultipleAttributeValues(
+          element, (__bridge CFArrayRef)names, 0, &values) != kAXErrorSuccess ||
+      values == NULL) {
+    return nil;
+  }
+  NSArray *copied = CFBridgingRelease(values);
+  return copied.count == names.count ? copied : nil;
+}
+
+static BOOL IsAXElement(id value) {
+  return value != nil &&
+         CFGetTypeID((__bridge CFTypeRef)value) == AXUIElementGetTypeID();
+}
+
+static AXUIElementRef CreateAppElement(pid_t pid) {
+  AXUIElementRef app = AXUIElementCreateApplication(pid);
+  if (app != NULL) {
+    AXUIElementSetMessagingTimeout(app, kAXReadTimeoutSeconds);
+  }
+  return app;
+}
+
+// An element-valued attribute of the app (its focused window or element),
+// retained; NULL when AX cannot say.
+static AXUIElementRef CopyAppElementAttribute(pid_t pid,
+                                              CFStringRef attribute) {
+  if (!gAXTrusted) {
+    return NULL;
+  }
+  AXUIElementRef app = CreateAppElement(pid);
+  if (app == NULL) {
+    return NULL;
+  }
+  CFTypeRef value = NULL;
+  AXError error = AXUIElementCopyAttributeValue(app, attribute, &value);
+  CFRelease(app);
+  if (error != kAXErrorSuccess || value == NULL) {
+    return NULL;
+  }
+  if (CFGetTypeID(value) != AXUIElementGetTypeID()) {
+    CFRelease(value);
+    return NULL;
+  }
+  return (AXUIElementRef)value;
+}
+
+// The app's element under a click, retained. A click on another app's window
+// (about to come forward) has no element of this app.
+static AXUIElementRef CopyElementAtPoint(pid_t pid, CGPoint point) {
+  if (!gAXTrusted) {
+    return NULL;
+  }
+  AXUIElementRef app = CreateAppElement(pid);
+  if (app == NULL) {
+    return NULL;
+  }
+  AXUIElementRef hit = NULL;
+  AXError error = AXUIElementCopyElementAtPosition(app, (float)point.x,
+                                                   (float)point.y, &hit);
+  CFRelease(app);
+  if (error != kAXErrorSuccess || hit == NULL) {
+    return NULL;
+  }
+  pid_t owner = 0;
+  if (AXUIElementGetPid(hit, &owner) != kAXErrorSuccess || owner != pid) {
+    CFRelease(hit);
+    return NULL;
+  }
+  return hit;
+}
+
+static CGWindowID WindowNumber(AXUIElementRef window) {
+  CGWindowID identifier = 0;
+  if (_AXUIElementGetWindow == NULL ||
+      _AXUIElementGetWindow(window, &identifier) != kAXErrorSuccess) {
+    return 0;
+  }
+  return identifier;
+}
+
+// What an event acted on, as the contract's optional `element`, `window`
+// ({title, windowID}) and `document` fields, ready to merge into the event.
+// A NULL element reads only the app's focused window.
+static NSDictionary *ReadActedContext(pid_t pid, AXUIElementRef element) {
+  NSMutableDictionary *context = [NSMutableDictionary dictionary];
+  if (!gAXTrusted) {
+    return context;
+  }
+  id window = nil;
+  id webURL = nil;
+  if (element != NULL) {
+    NSArray *values = CopyAttributes(element, ElementAttributeNames());
+    NSDictionary *fields = ElementFields(values);
+    if (fields != nil) {
+      context[@"element"] = fields;
+      if (IsAXElement(values[6])) {
+        window = values[6];
+      }
+      // A browser's page is an AXWebArea whose AXURL is the page address; on
+      // any other element (a link) AXURL is where it leads, not the document.
+      if ([fields[@"role"] isEqual:@"AXWebArea"]) {
+        webURL = values[7];
+      }
+    }
+  }
+  if (window == nil) {
+    window = CFBridgingRelease(
+        CopyAppElementAttribute(pid, kAXFocusedWindowAttribute));
+  }
+  if (window == nil) {
+    return context;
+  }
+  NSArray *values = CopyAttributes((__bridge AXUIElementRef)window,
+                                   @[ @"AXTitle", @"AXDocument", @"AXURL" ]);
+  context[@"window"] = @{
+    @"title" : ContextText(values.firstObject) ?: @"",
+    @"windowID" : @(WindowNumber((__bridge AXUIElementRef)window)),
+  };
+  NSDictionary *document =
+      DocumentFields(values == nil ? nil : values[1],
+                     webURL ?: (values == nil ? nil : values[2]));
+  if (document != nil) {
+    context[@"document"] = document;
+  }
+  return context;
 }
 
 static void LoadState(void) {
@@ -416,6 +619,173 @@ static NSMutableDictionary *EventShell(NSString *kind, NSDictionary *app) {
   return event;
 }
 
+// Typed characters coalesce into one keyboard.text_input per run: the same app
+// and focused element, ended by a focus or element change, a non-text key
+// (Return, Tab, Escape, arrows), a shortcut, a click, or kTextRunIdleSeconds
+// without typing. Backspace edits the pending run; the event keeps the first
+// character's timestamp. A run in a secure text field is never written.
+static const double kTextRunIdleSeconds = 2.0;
+static NSMutableDictionary *gRunEvent = nil;
+static NSMutableString *gRunText = nil;
+static AXUIElementRef gRunElement = NULL;
+static BOOL gRunSecure = NO;
+static CFAbsoluteTime gRunLastKey = 0;
+static dispatch_source_t gRunIdleTimer = nil;
+
+typedef NS_ENUM(NSInteger, TypedKey) {
+  TypedKeyIgnored,
+  TypedKeyText,
+  TypedKeyBackspace,
+  TypedKeyBoundary,
+};
+
+static TypedKey ClassifyTypedKey(NSString *chars) {
+  if (chars.length == 0) {
+    return TypedKeyIgnored; // a dead key: its character comes with the next key
+  }
+  if (chars.length == 1 && [chars characterAtIndex:0] == 0x7F) {
+    return TypedKeyBackspace;
+  }
+  for (NSUInteger index = 0; index < chars.length; index++) {
+    unichar character = [chars characterAtIndex:index];
+    // Control characters (Return, Enter, Tab, Escape) and the function-key
+    // range AppKit maps arrows, Home, End and forward delete into.
+    if (character < 0x20 || character == 0x7F ||
+        (character >= 0xF700 && character <= 0xF8FF)) {
+      return TypedKeyBoundary;
+    }
+  }
+  return TypedKeyText;
+}
+
+static void DiscardTextRun(void) {
+  gRunEvent = nil;
+  gRunText = nil;
+  gRunSecure = NO;
+  if (gRunElement != NULL) {
+    CFRelease(gRunElement);
+    gRunElement = NULL;
+  }
+}
+
+static void FlushTextRun(void) {
+  NSMutableDictionary *event = gRunEvent;
+  NSString *text = [gRunText copy];
+  BOOL secure = gRunSecure;
+  DiscardTextRun();
+  // An app excluded since the run began keeps what was typed in it.
+  if (event == nil || secure || text.length == 0 ||
+      !ShouldObserveApp(event[@"app"][@"bundleIdentifier"])) {
+    return;
+  }
+  event[@"keyboard"] = @{@"text" : text};
+  AppendEvent(event);
+}
+
+static BOOL SameRunTarget(NSDictionary *app, AXUIElementRef element) {
+  if (![gRunEvent[@"app"][@"processIdentifier"]
+          isEqual:app[@"processIdentifier"]]) {
+    return NO;
+  }
+  if (gRunElement == NULL || element == NULL) {
+    return gRunElement == element;
+  }
+  return CFEqual(gRunElement, element);
+}
+
+static void ArmTextRunIdle(void) {
+  if (gRunIdleTimer == nil) {
+    gRunIdleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                           dispatch_get_main_queue());
+    dispatch_source_set_event_handler(gRunIdleTimer, ^{
+      FlushTextRun();
+    });
+    dispatch_source_set_timer(gRunIdleTimer, DISPATCH_TIME_FOREVER,
+                              DISPATCH_TIME_FOREVER, 0);
+    dispatch_resume(gRunIdleTimer);
+  }
+  dispatch_source_set_timer(
+      gRunIdleTimer,
+      dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(kTextRunIdleSeconds * NSEC_PER_SEC)),
+      DISPATCH_TIME_FOREVER, 100 * NSEC_PER_MSEC);
+}
+
+// One unmodified key press. element is the app's focused element (NULL when
+// AX cannot say); readContext reads its contract fields and runs only when a
+// run starts.
+static void HandleTypedKey(NSDictionary *app, NSString *chars,
+                           AXUIElementRef element,
+                           NSDictionary * (^readContext)(void)) {
+  TypedKey kind = ClassifyTypedKey(chars);
+  if (kind == TypedKeyIgnored) {
+    return;
+  }
+  CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  if (gRunEvent != nil &&
+      (kind == TypedKeyBoundary || now - gRunLastKey >= kTextRunIdleSeconds ||
+       !SameRunTarget(app, element))) {
+    FlushTextRun();
+  }
+  if (kind == TypedKeyBoundary) {
+    return;
+  }
+  if (kind == TypedKeyBackspace) {
+    if (gRunEvent == nil) {
+      return; // nothing pending to edit
+    }
+    if (gRunText.length > 0) {
+      [gRunText
+          deleteCharactersInRange:
+              [gRunText
+                  rangeOfComposedCharacterSequenceAtIndex:gRunText.length - 1]];
+    }
+  } else {
+    if (gRunEvent == nil) {
+      gRunEvent = EventShell(@"keyboard.text_input", app);
+      NSDictionary *context = readContext();
+      [gRunEvent addEntriesFromDictionary:context];
+      // A field AX cannot name (timed out, untrusted, unresponsive app) may be
+      // a password field that does not turn on Secure Event Input, so its text
+      // is not written.
+      gRunSecure = element == NULL || context[@"element"] == nil ||
+                   IsSecureElement(context[@"element"]);
+      gRunText = [NSMutableString string];
+      gRunElement = element != NULL ? (AXUIElementRef)CFRetain(element) : NULL;
+    }
+    if (!gRunSecure) {
+      [gRunText appendString:chars];
+    }
+  }
+  gRunLastKey = now;
+  ArmTextRunIdle();
+}
+
+// The contract's keyboard.shortcut `modifiers`: the held modifiers, in this
+// order and spelling.
+static NSArray<NSString *> *ModifierNames(CGEventFlags flags) {
+  NSMutableArray<NSString *> *names = [NSMutableArray array];
+  if (flags & kCGEventFlagMaskCommand)
+    [names addObject:@"command"];
+  if (flags & kCGEventFlagMaskShift)
+    [names addObject:@"shift"];
+  if (flags & kCGEventFlagMaskAlternate)
+    [names addObject:@"option"];
+  if (flags & kCGEventFlagMaskControl)
+    [names addObject:@"control"];
+  return names;
+}
+
+// A shortcut or click ends the pending text run, so the run is written first.
+static void RecordInput(NSString *kind, NSDictionary *app, NSString *field,
+                        NSDictionary *payload, NSDictionary *context) {
+  FlushTextRun();
+  NSMutableDictionary *event = EventShell(kind, app);
+  [event addEntriesFromDictionary:context];
+  event[field] = payload;
+  AppendEvent(event);
+}
+
 static void PollFocus(void) {
   if (gPaused || !gPrivacyPolicySupported) {
     return;
@@ -425,11 +795,22 @@ static void PollFocus(void) {
     return;
   }
   NSString *bundleId = app[@"bundleIdentifier"];
-  NSString *title =
-      FocusedWindowTitle([app[@"processIdentifier"] intValue]) ?: @"";
-  NSString *focusKey = [NSString stringWithFormat:@"%@\t%@", bundleId, title];
+  NSDictionary *context =
+      ReadActedContext([app[@"processIdentifier"] intValue], NULL);
+  NSDictionary *window = context[@"window"] ?: @{
+    @"windowID" : @0,
+    @"title" : @""
+  };
+  NSString *windowKey =
+      [NSString stringWithFormat:@"%@\t%@\t", bundleId, window[@"windowID"]];
+  NSString *focusKey = [windowKey stringByAppendingString:window[@"title"]];
   if ([focusKey isEqualToString:gLastFocusKey]) {
     return;
+  }
+  // Another app or window ends the run; a title change (a document marked
+  // edited by the typing itself) does not.
+  if (![gLastFocusKey hasPrefix:windowKey]) {
+    FlushTextRun();
   }
   gLastFocusKey = focusKey;
   if (!ShouldObserveApp(bundleId)) {
@@ -437,7 +818,10 @@ static void PollFocus(void) {
     return;
   }
   NSMutableDictionary *event = EventShell(@"window.changed", app);
-  event[@"window"] = @{@"windowID" : @0, @"title" : title};
+  event[@"window"] = window;
+  if (context[@"document"] != nil) {
+    event[@"document"] = context[@"document"];
+  }
   AppendEvent(event);
 }
 
@@ -462,6 +846,7 @@ static CGEventRef TapCallback(CGEventTapProxy proxy, CGEventType type,
     }
     return cgEvent;
   }
+  pid_t pid = [app[@"processIdentifier"] intValue];
   if (type == kCGEventKeyDown) {
     CGEventFlags flags = CGEventGetFlags(cgEvent);
     BOOL hasCommandOrControl =
@@ -473,27 +858,45 @@ static CGEventRef TapCallback(CGEventTapProxy proxy, CGEventType type,
       NSString *text = (length > 0)
                            ? [NSString stringWithCharacters:chars length:length]
                            : @"";
-      NSMutableDictionary *event = EventShell(@"keyboard.shortcut", app);
-      event[@"keyboard"] = @{@"keyEquivalent" : text};
-      AppendEvent(event);
+      AXUIElementRef focused =
+          CopyAppElementAttribute(pid, kAXFocusedUIElementAttribute);
+      RecordInput(@"keyboard.shortcut", app, @"keyboard", @{
+        @"keyEquivalent" : text,
+        @"modifiers" : ModifierNames(flags),
+      },
+                  ReadActedContext(pid, focused));
+      if (focused != NULL) {
+        CFRelease(focused);
+      }
     } else if (!IsSecureEventInputEnabled()) {
       UniChar chars[16];
       UniCharCount length = 0;
       CGEventKeyboardGetUnicodeString(cgEvent, 16, &length, chars);
       if (length > 0) {
-        NSMutableDictionary *event = EventShell(@"keyboard.text_input", app);
-        event[@"keyboard"] =
-            @{@"text" : [NSString stringWithCharacters:chars length:length]};
-        AppendEvent(event);
+        AXUIElementRef focused =
+            CopyAppElementAttribute(pid, kAXFocusedUIElementAttribute);
+        HandleTypedKey(app, [NSString stringWithCharacters:chars length:length],
+                       focused, ^NSDictionary * {
+                         return ReadActedContext(pid, focused);
+                       });
+        if (focused != NULL) {
+          CFRelease(focused);
+        }
       }
+    } else {
+      // Secure input took over: the run in the previous field is complete.
+      FlushTextRun();
     }
   } else {
     NSString *button = (type == kCGEventRightMouseDown)   ? @"right"
                        : (type == kCGEventOtherMouseDown) ? @"other"
                                                           : @"left";
-    NSMutableDictionary *event = EventShell(@"mouse.click", app);
-    event[@"mouse"] = @{@"button" : button};
-    AppendEvent(event);
+    AXUIElementRef hit = CopyElementAtPoint(pid, CGEventGetLocation(cgEvent));
+    RecordInput(@"mouse.click", app, @"mouse", @{@"button" : button},
+                ReadActedContext(pid, hit));
+    if (hit != NULL) {
+      CFRelease(hit);
+    }
   }
   return cgEvent;
 }
@@ -521,6 +924,65 @@ static void InstallEventTap(void) {
   gInputMonitoringActive = YES;
 }
 
+static NSString *BuddySpeakingPath(void) {
+  return [gRoot.stringByDeletingLastPathComponent
+      stringByAppendingPathComponent:@"buddy/speaking.pid"];
+}
+
+// Runs `<launcher> arguments...` disclaimed, as cursor-overlay starts buddy
+// settings: a child charged to this helper's privacy identity could not reach
+// the network. finished gets the exit status (-1 when unknown) on the main
+// queue. Returns NO when the launcher could not be started.
+static BOOL RunLauncher(NSArray<NSString *> *arguments,
+                        void (^finished)(int status)) {
+  NSArray<NSString *> *command =
+      [@[ HistoryLauncherPath() ] arrayByAddingObjectsFromArray:arguments];
+  char **argv = calloc(command.count + 1, sizeof(char *));
+  for (NSUInteger index = 0; index < command.count; index++) {
+    argv[index] = (char *)command[index].UTF8String;
+  }
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+  responsibility_spawnattrs_setdisclaim(&attributes, 1);
+  posix_spawn_file_actions_t files;
+  posix_spawn_file_actions_init(&files);
+  posix_spawn_file_actions_addopen(&files, STDIN_FILENO, "/dev/null", O_RDONLY,
+                                   0);
+  posix_spawn_file_actions_addopen(&files, STDOUT_FILENO, "/dev/null", O_WRONLY,
+                                   0);
+  posix_spawn_file_actions_addopen(&files, STDERR_FILENO, "/dev/null", O_WRONLY,
+                                   0);
+  pid_t pid = 0;
+  int error = posix_spawn(&pid, argv[0], &files, &attributes, argv, environ);
+  posix_spawn_file_actions_destroy(&files);
+  posix_spawnattr_destroy(&attributes);
+  free(argv);
+  if (error != 0) {
+    return NO;
+  }
+  // Reaped here: nothing else in this process waits on the child.
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    int status = 0;
+    pid_t reaped;
+    do {
+      reaped = waitpid(pid, &status, 0);
+    } while (reaped < 0 && errno == EINTR);
+    int code = reaped == pid && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      finished(code);
+    });
+  });
+  return YES;
+}
+
+static void ShowLauncherUnavailable(void) {
+  NSAlert *alert = [[NSAlert alloc] init];
+  alert.messageText = @"Could not reach the opencua launcher";
+  alert.informativeText = @"Run setup, then restart history recording to "
+                           "refresh its launcher path.";
+  [alert runModal];
+}
+
 @interface HistoryRecorderDelegate
     : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @end
@@ -537,6 +999,8 @@ static void InstallEventTap(void) {
   gSettingsPath = [gRoot stringByAppendingPathComponent:@"settings.json"];
   gStatePath = [gRoot stringByAppendingPathComponent:@"state.json"];
   EnsureDir(gSegmentsDir);
+  BoundAXReads();
+  gAXTrusted = AXIsProcessTrusted();
   LoadSettings();
   LoadState();
   WriteState(gPaused ? @"paused" : @"running");
@@ -558,6 +1022,12 @@ static void InstallEventTap(void) {
 - (void)buildStatusItem {
   gStatusItem = [NSStatusBar.systemStatusBar
       statusItemWithLength:NSVariableStatusItemLength];
+  gStatusItem.menu = [self buildMenu];
+}
+
+// opencua's one menu bar menu: history, then the agent and buddy controls the
+// cursor-overlay status helper shows while this recorder is not running.
+- (NSMenu *)buildMenu {
   NSMenu *menu = [[NSMenu alloc] init];
   NSMenuItem *status =
       [[NSMenuItem alloc] initWithTitle:@"cua-history recording"
@@ -571,6 +1041,10 @@ static void InstallEventTap(void) {
   gExcludeItem.target = self;
   menu.delegate = self;
   [menu addItem:[NSMenuItem separatorItem]];
+  [menu addItemWithTitle:@"Open timeline"
+                  action:@selector(openTimeline:)
+           keyEquivalent:@""]
+      .target = self;
   NSMenuItem *suggestions =
       [[NSMenuItem alloc] initWithTitle:@"Suggested skills"
                                  action:NULL
@@ -592,6 +1066,14 @@ static void InstallEventTap(void) {
                   action:@selector(resumeAgents:)
            keyEquivalent:@""]
       .target = self;
+  [menu addItemWithTitle:@"Stop buddy talking"
+                  action:@selector(stopBuddyTalking:)
+           keyEquivalent:@""]
+      .target = self;
+  [menu addItemWithTitle:@"Buddy settings\u2026"
+                  action:@selector(openBuddySettings:)
+           keyEquivalent:@""]
+      .target = self;
   [menu addItem:[NSMenuItem separatorItem]];
   [menu addItemWithTitle:@"Pause recording"
                   action:@selector(pause:)
@@ -601,6 +1083,21 @@ static void InstallEventTap(void) {
                   action:@selector(resume:)
            keyEquivalent:@""]
       .target = self;
+  NSMenuItem *clear = [[NSMenuItem alloc] initWithTitle:@"Clear history"
+                                                 action:NULL
+                                          keyEquivalent:@""];
+  clear.submenu = [[NSMenu alloc] initWithTitle:@"Clear history"];
+  for (NSArray<NSString *> *span in @[
+         @[ @"Last 10 minutes", @"10m" ], @[ @"Last hour", @"1h" ],
+         @[ @"Last day", @"1d" ], @[ @"All", @"all" ]
+       ]) {
+    NSMenuItem *item = [clear.submenu addItemWithTitle:span[0]
+                                                action:@selector(clearHistory:)
+                                         keyEquivalent:@""];
+    item.target = self;
+    item.representedObject = span[1];
+  }
+  [menu addItem:clear];
   [menu addItem:[NSMenuItem separatorItem]];
   [menu addItemWithTitle:@"Reveal data folder"
                   action:@selector(reveal:)
@@ -611,7 +1108,64 @@ static void InstallEventTap(void) {
                   action:@selector(quit:)
            keyEquivalent:@""]
       .target = self;
-  gStatusItem.menu = menu;
+  return menu;
+}
+
+- (void)runLauncher:(NSArray<NSString *> *)arguments
+            failure:(NSString *)failure {
+  if (!RunLauncher(arguments, ^(int status) {
+        if (status != 0) {
+          gStatusItem.button.toolTip = failure;
+        }
+      })) {
+    ShowLauncherUnavailable();
+  }
+}
+
+- (void)openTimeline:(id)sender {
+  (void)sender;
+  [self runLauncher:@[ @"history", @"timeline", @"--open" ]
+            failure:@"Could not open the timeline."];
+}
+
+- (void)stopBuddyTalking:(id)sender {
+  (void)sender;
+  [self runLauncher:@[ @"buddy", @"stop" ]
+            failure:@"Could not stop buddy talking."];
+}
+
+- (void)openBuddySettings:(id)sender {
+  (void)sender;
+  [self runLauncher:@[ @"buddy", @"settings" ]
+            failure:@"Could not open buddy settings."];
+}
+
+// Clearing deletes recorded events and memories, so it asks first.
+- (void)clearHistory:(NSMenuItem *)sender {
+  NSString *span = sender.representedObject;
+  if (![span isKindOfClass:NSString.class]) {
+    return;
+  }
+  NSAlert *alert = [[NSAlert alloc] init];
+  alert.alertStyle = NSAlertStyleWarning;
+  alert.messageText =
+      [span isEqualToString:@"all"]
+          ? @"Clear all recorded history?"
+          : [NSString stringWithFormat:@"Clear history from the %@?",
+                                       sender.title.lowercaseString];
+  alert.informativeText =
+      @"Recorded activity from that period is deleted. This cannot be undone.";
+  [alert addButtonWithTitle:@"Clear"];
+  [alert addButtonWithTitle:@"Cancel"];
+  // An accessory app's alert takes Return and Escape only once active.
+  [NSApp activate];
+  if ([alert runModal] != NSAlertFirstButtonReturn) {
+    return;
+  }
+  // Text typed in the cleared period must not be written after the clear.
+  DiscardTextRun();
+  [self runLauncher:@[ @"history", @"clear", @"--last", span ]
+            failure:@"Could not clear history."];
 }
 
 - (void)refreshStatusTitle {
@@ -805,11 +1359,7 @@ static void InstallEventTap(void) {
     });
   };
   if (![task launchAndReturnError:NULL]) {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Could not reach the opencua launcher";
-    alert.informativeText = @"Run setup, then restart history recording to "
-                             "refresh its launcher path.";
-    [alert runModal];
+    ShowLauncherUnavailable();
   }
 }
 
@@ -857,9 +1407,13 @@ static void InstallEventTap(void) {
     lastPrune = now;
     PruneOldSegments(now);
   }
+  gAXTrusted = AXIsProcessTrusted();
   BOOL wasPaused = gPaused;
   LoadState();
   LoadSettings();
+  if (!wasPaused && gPaused) {
+    FlushTextRun(); // typed while recording, so it is kept
+  }
   if (!gPrivacyPolicySupported && !gPaused) {
     WriteState(@"paused");
   } else if (wasPaused && !gPaused) {
@@ -877,6 +1431,7 @@ static void InstallEventTap(void) {
 
 - (void)pause:(id)sender {
   (void)sender;
+  FlushTextRun();
   WriteState(@"paused");
   [self refreshStatusTitle];
 }
@@ -917,6 +1472,8 @@ static void InstallEventTap(void) {
     return stopped;
   if (item.action == @selector(excludeFrontApp:))
     return item.representedObject != nil;
+  if (item.action == @selector(stopBuddyTalking:))
+    return [NSFileManager.defaultManager fileExistsAtPath:BuddySpeakingPath()];
   return YES;
 }
 
@@ -928,6 +1485,7 @@ static void InstallEventTap(void) {
 
 - (void)quit:(id)sender {
   (void)sender;
+  FlushTextRun();
   WriteState(@"stopped");
   [NSApp terminate:nil];
 }

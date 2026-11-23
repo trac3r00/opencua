@@ -4,16 +4,22 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
+	type HistoryMemoryGenerator,
 	type HistorySegmentSummary,
 	type HistorySkillDetection,
 	type SkillDescription,
+	clearHistory,
 	deleteHistorySegments,
 	describeSkillCandidates,
+	historyMemoriesDir,
 	historyPaths,
+	listHistoryMemories,
 	listHistorySegments,
 	parseHistoryDuration,
 	readHistoryState,
+	readRawRetentionMs,
 	readSkillDescriptions,
+	readSkippedSkillCandidates,
 	setSkillDescriptionsEnabled,
 	skillDescriptionsEnabled,
 	writeHistoryState,
@@ -25,10 +31,26 @@ import { historyServiceStatus, installHistoryService, uninstallHistoryService } 
 
 type HistoryCommandOptions = {
 	readonly isJsonOutput: () => boolean;
+	/** Reveals a folder in Finder. A test passes a fake so nothing opens on the desktop. */
+	readonly reveal?: (path: string) => Promise<void>;
+	/** Writes memory titles and summaries; the owner's agent when omitted. */
+	readonly generate?: HistoryMemoryGenerator;
+	readonly now?: () => number;
+	/** IANA zone for memory day folders; the system zone when omitted. */
+	readonly timeZone?: string;
 };
+
+/** The recorder runs `history suggest --write` every ten minutes and waits for it, so writing memories is cut off here. */
+const MEMORY_BUDGET_MS = 60_000;
 
 export function registerHistoryCommands(program: Command, options: HistoryCommandOptions): void {
 	const history = program.command("history").description("Control the always-on cua-history watcher");
+	const now = options.now ?? Date.now;
+	const summarizeSeams = () => ({
+		now: now(),
+		...(options.timeZone === undefined ? {} : { timeZone: options.timeZone }),
+		...(options.generate === undefined ? {} : { generate: options.generate }),
+	});
 
 	history
 		.command("list")
@@ -84,11 +106,7 @@ export function registerHistoryCommands(program: Command, options: HistoryComman
 				}
 				const paths = historyPaths(resolveStateDir());
 				const deleted = deleteHistorySegments(paths, deletion);
-				// Suggestions are derived from the segments, so rebuild them: deleted activity must not stay in the menu.
-				const { suggestHistorySkills } = await import("@opencua/core");
-				const { writeMenuSuggestions } = await import("./history-suggest.js");
-				await mkdir(paths.root, { recursive: true, mode: 0o700 });
-				await writeMenuSuggestions(paths.root, await suggestHistorySkills(paths.root, { limit: 5 }));
+				await rebuildMenuSuggestions(paths.root);
 				if (options.isJsonOutput()) {
 					process.stdout.write(`${JSON.stringify({ deleted })}\n`);
 					return;
@@ -102,6 +120,67 @@ export function registerHistoryCommands(program: Command, options: HistoryComman
 		);
 
 	history
+		.command("clear")
+		.description("Delete what was recorded in the last period, raw segments and memories alike (no confirmation)")
+		.requiredOption("--last <period>", "how far back to clear: 10m, 1h, 1d, ... or all")
+		.action(async (command: { readonly last: string }) => {
+			const period =
+				command.last === "all" ? { all: true as const } : { withinMs: parseHistoryDuration(command.last) };
+			const paths = historyPaths(resolveStateDir());
+			const cleared = clearHistory(paths, period, now());
+			await rebuildMenuSuggestions(paths.root);
+			if (options.isJsonOutput()) {
+				process.stdout.write(`${JSON.stringify(cleared)}\n`);
+				return;
+			}
+			const what = command.last === "all" ? "all history" : `the last ${command.last}`;
+			process.stdout.write(
+				cleared.segments.length + cleared.memories.length + cleared.digests.length === 0
+					? `Nothing was recorded in ${what}.\n`
+					: `Cleared ${what}: ${cleared.segments.length} raw segment(s), ${cleared.memories.length} memory file(s) and ${cleared.digests.length} automatic summary file(s) deleted. Skill suggestions were rebuilt without them; recording continues.\n`,
+			);
+		});
+
+	history
+		.command("summarize")
+		.description("Write a memory for each stretch of recent work now, then delete raw segments past the retention")
+		.action(async () => {
+			const { formatSummarizeResult, summarizeHistoryNow } = await import("./history-digest.js");
+			const paths = historyPaths(resolveStateDir());
+			const result = await summarizeHistoryNow(paths, summarizeSeams());
+			process.stdout.write(
+				options.isJsonOutput()
+					? `${JSON.stringify(result)}\n`
+					: formatSummarizeResult(result, readRawRetentionMs(paths)),
+			);
+		});
+
+	history
+		.command("timeline")
+		.description("List memories by day and time with their apps and suggested skill")
+		.option("--day <date>", "only this day, as YYYY-MM-DD")
+		.option("--open", "reveal the memories folder in Finder")
+		.action(async (command: { readonly day?: string; readonly open?: boolean }) => {
+			if (command.day !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(command.day)) {
+				throw new Error("--day must be a date such as 2026-11-24.");
+			}
+			const { formatTimeline, timelineDays } = await import("./history-digest.js");
+			const paths = historyPaths(resolveStateDir());
+			const directory = historyMemoriesDir(paths);
+			const memories = listHistoryMemories(paths, command.day === undefined ? {} : { day: command.day });
+			process.stdout.write(
+				options.isJsonOutput()
+					? `${JSON.stringify({ directory, days: timelineDays(memories) })}\n`
+					: formatTimeline(memories, command.day),
+			);
+			if (command.open === true) {
+				// The menu's "Open timeline" runs this: an empty folder opening says more than nothing happening.
+				await mkdir(directory, { recursive: true, mode: 0o700 });
+				await (options.reveal ?? revealInFinder)(directory);
+			}
+		});
+
+	history
 		.command("suggest")
 		.description("List repeated workflows from recent history as skill suggestions, each described by a small model")
 		.option("--limit <count>", "Maximum suggestions", "5")
@@ -112,11 +191,39 @@ export function registerHistoryCommands(program: Command, options: HistoryComman
 			if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
 				throw new Error("--limit must be an integer from 1 to 20.");
 			}
-			const { suggestHistorySkills } = await import("@opencua/core");
-			const { formatSuggestions, menuSuggestions, writeMenuSuggestions } = await import("./history-suggest.js");
+			const {
+				formatSuggestions,
+				menuSuggestions,
+				suggestedHistorySkills,
+				withoutSkippedCandidates,
+				writeMenuSuggestions,
+			} = await import("./history-suggest.js");
 			const paths = historyPaths(resolveStateDir());
-			const detection = await suggestHistorySkills(paths.root, { limit });
-			const descriptions = await describedSuggestions(paths.root, detection, command.describe);
+			if (command.write === true) {
+				// Memories first, and raw segments past the retention go with them, so the suggestions below see what is left.
+				const { summarizeHistoryNow } = await import("./history-digest.js");
+				const budget = new AbortController();
+				// Cleared below, so a finished run leaves no timer holding the process open.
+				const timer = setTimeout(() => budget.abort(), MEMORY_BUDGET_MS);
+				try {
+					await summarizeHistoryNow(paths, {
+						...summarizeSeams(),
+						useAgent: command.describe,
+						signal: budget.signal,
+					});
+				} catch (error: unknown) {
+					// The menu still needs its suggestions when memories cannot be written; the failure is reported, not hidden.
+					process.stderr.write(
+						`History memories were not updated: ${error instanceof Error ? error.message : String(error)}\n`,
+					);
+				} finally {
+					clearTimeout(timer);
+				}
+			}
+			const found = await suggestedHistorySkills(paths.root, limit);
+			const descriptions = await describedSuggestions(paths.root, found, command.describe);
+			// Describing may have just recorded a candidate as navigation; it is dropped in this same run.
+			const detection = withoutSkippedCandidates(found, await readSkippedSkillCandidates(paths.root));
 			if (command.write === true) {
 				await mkdir(paths.root, { recursive: true, mode: 0o700 });
 				await writeMenuSuggestions(paths.root, detection, descriptions);
@@ -206,10 +313,9 @@ export function registerHistoryCommands(program: Command, options: HistoryComman
 				readonly web?: boolean;
 			}) => {
 				if (command.web !== true) {
-					const { suggestHistorySkills } = await import("@opencua/core");
-					const { formatSuggestions } = await import("./history-suggest.js");
+					const { formatSuggestions, suggestedHistorySkills } = await import("./history-suggest.js");
 					const root = historyPaths(resolveStateDir()).root;
-					const detection = await suggestHistorySkills(root, { limit: 5 });
+					const detection = await suggestedHistorySkills(root, 5);
 					process.stdout.write(formatSuggestions(detection, await describedSuggestions(root, detection, false)));
 					return;
 				}
@@ -335,6 +441,17 @@ export function registerHistoryCommands(program: Command, options: HistoryComman
 				`installed: ${status.installed}\nrunning: ${status.running}\nstate: ${status.state}${status.reason === undefined ? "" : ` (${status.reason})`}\ndata: ${status.eventStreamRootPath}\n`,
 			);
 		});
+}
+
+async function revealInFinder(path: string): Promise<void> {
+	await promisify(execFile)("/usr/bin/open", [path]);
+}
+
+/** Suggestions are derived from the segments, so they are rebuilt after a deletion: deleted activity must not stay in the menu. */
+async function rebuildMenuSuggestions(root: string): Promise<void> {
+	const { suggestedHistorySkills, writeMenuSuggestions } = await import("./history-suggest.js");
+	await mkdir(root, { recursive: true, mode: 0o700 });
+	await writeMenuSuggestions(root, await suggestedHistorySkills(root, 5));
 }
 
 function formatSegment(segment: HistorySegmentSummary): string {

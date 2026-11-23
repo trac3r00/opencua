@@ -80,3 +80,24 @@ describe("#given written settings with a malformed rule #when read back #then va
 		]);
 	});
 });
+
+describe("#given a settings file with a raw retention #when settings are written #then the retention is kept", () => {
+	it("keeps rawRetentionHours that the observation settings do not model", () => {
+		const fs = memoryFs();
+		fs.files.set("/state/cua-history/settings.json", JSON.stringify({ rawRetentionHours: 12 }));
+		writeHistorySettings(
+			paths,
+			{
+				defaultApplicationBehavior: "observe",
+				defaultURLBehavior: "observe",
+				observePrivateBrowsing: true,
+				rules: [],
+			},
+			fs,
+		);
+		expect(JSON.parse(fs.files.get("/state/cua-history/settings.json") ?? "{}")).toMatchObject({
+			rawRetentionHours: 12,
+			defaultApplicationBehavior: "observe",
+		});
+	});
+});

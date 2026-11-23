@@ -12,9 +12,18 @@ export interface HistoryWindow {
 
 export interface HistoryElement {
 	readonly role: string;
+	readonly subrole?: string;
 	readonly title?: string;
 	readonly description?: string;
+	readonly identifier?: string;
+	readonly placeholder?: string;
 	readonly value?: string;
+}
+
+/** The document or page the event happened in, when accessibility exposes it. */
+export interface HistoryDocument {
+	readonly url?: string;
+	readonly path?: string;
 }
 
 export interface HistoryAx {
@@ -37,11 +46,17 @@ interface HistoryEventBase {
 	readonly timestamp: string;
 }
 
+/** What an app event acted on. Events from older recorders carry neither field. */
+interface HistoryTarget {
+	readonly element?: HistoryElement;
+	readonly document?: HistoryDocument;
+}
+
 export interface SessionStartedEvent extends HistoryEventBase {
 	readonly kind: "session.started";
 }
 
-export interface WindowChangedEvent extends HistoryEventBase {
+export interface WindowChangedEvent extends HistoryEventBase, HistoryTarget {
 	readonly kind: "window.changed";
 	readonly app: HistoryApp;
 	readonly window: HistoryWindow;
@@ -55,21 +70,27 @@ export interface SelectionChangedEvent extends HistoryEventBase {
 	readonly selection: { readonly target: HistoryElement; readonly text?: string };
 }
 
-export interface KeyboardTextInputEvent extends HistoryEventBase {
+/** One typed run into one field; older recorders wrote one event per character. */
+export interface KeyboardTextInputEvent extends HistoryEventBase, HistoryTarget {
 	readonly kind: "keyboard.text_input";
 	readonly app: HistoryApp;
 	readonly window?: HistoryWindow;
 	readonly keyboard: { readonly text: string; readonly target?: HistoryElement };
 }
 
-export interface KeyboardShortcutEvent extends HistoryEventBase {
+export interface KeyboardShortcutEvent extends HistoryEventBase, HistoryTarget {
 	readonly kind: "keyboard.shortcut";
 	readonly app: HistoryApp;
 	readonly window?: HistoryWindow;
-	readonly keyboard: { readonly keyEquivalent: string; readonly target?: HistoryElement };
+	readonly keyboard: {
+		readonly keyEquivalent: string;
+		/** Held modifiers such as "command" or "shift"; absent in older events, which always held Command or Control. */
+		readonly modifiers?: readonly string[];
+		readonly target?: HistoryElement;
+	};
 }
 
-export interface MouseClickEvent extends HistoryEventBase {
+export interface MouseClickEvent extends HistoryEventBase, HistoryTarget {
 	readonly kind: "mouse.click";
 	readonly app: HistoryApp;
 	readonly window?: HistoryWindow;

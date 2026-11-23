@@ -1,8 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { link, lstat, mkdir, open, readdir, realpath, rename, rm } from "node:fs/promises";
 import { join, parse, resolve, sep } from "node:path";
+import {
+	type HistoryMemory,
+	type HistoryMemoryGenerator,
+	type HistoryPaths,
+	type HistorySummarizeResult,
+	readSkillDescriptions,
+	skillDescriptionsEnabled,
+	summarizeHistory,
+} from "@opencua/core/light";
 import { z } from "zod/v4";
-import { generateHistoryText } from "./history-agent.js";
+import { generateHistoryText, skillDescriptionCommand } from "./history-agent.js";
+import { suggestedHistorySkills } from "./history-suggest.js";
 import { listHistoryTimeline, readHistoryEvidence } from "./history-workflows.js";
 
 const DIGEST_DIRECTORY = "summaries";
@@ -10,6 +20,119 @@ const AUTOMATION_FILE = "automation.json";
 const MAX_DIGEST_BYTES = 128 * 1024;
 const MAX_DIGESTS = 100;
 const SEGMENT_ID = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z$/;
+const MEMORY_AGENT_TIMEOUT_MS = 45_000;
+const MEMORY_SKILL_LIMIT = 10;
+
+export interface SummarizeHistoryNowOptions {
+	/** Writes each memory's title and summary; the owner's small model through history-agent when omitted. */
+	readonly generate?: HistoryMemoryGenerator;
+	/** False writes every summary locally and asks no model. */
+	readonly useAgent?: boolean;
+	/** Aborting stops the agent; sessions it had not answered for wait for the next run. */
+	readonly signal?: AbortSignal;
+	readonly now?: number;
+	readonly timeZone?: string;
+}
+
+/**
+ * Writes memories for recent history and deletes raw segments past the retention. A memory names the repeated workflow
+ * seen in its session, under the title the owner already sees for that suggestion. The agent is asked only while skill
+ * descriptions are on, and never receives typed text.
+ */
+export async function summarizeHistoryNow(
+	paths: HistoryPaths,
+	options: SummarizeHistoryNowOptions = {},
+): Promise<HistorySummarizeResult> {
+	const detection = await suggestedHistorySkills(paths.root, MEMORY_SKILL_LIMIT);
+	const described = (await skillDescriptionsEnabled(paths.root)) ? await readSkillDescriptions(paths.root) : {};
+	const ownerAgent: HistoryMemoryGenerator = (prompt, signal) =>
+		generateHistoryText(prompt, {
+			...skillDescriptionCommand(),
+			timeoutMs: MEMORY_AGENT_TIMEOUT_MS,
+			label: "History summary",
+			...(signal === undefined ? {} : { signal }),
+		});
+	return await summarizeHistory(paths, {
+		...(options.now === undefined ? {} : { now: options.now }),
+		...(options.timeZone === undefined ? {} : { timeZone: options.timeZone }),
+		...(options.signal === undefined ? {} : { signal: options.signal }),
+		...(options.useAgent === false ? {} : { generate: options.generate ?? ownerAgent }),
+		skills: detection.candidates.map((candidate) => ({
+			id: candidate.id,
+			title: described[candidate.id]?.title ?? candidate.proposedName,
+			segmentIds: candidate.segmentIds,
+		})),
+	});
+}
+
+function count(amount: number, noun: string): string {
+	return `${amount} ${noun}${amount === 1 ? "" : "s"}`;
+}
+
+export function formatSummarizeResult(result: HistorySummarizeResult, retentionMs: number): string {
+	const written = result.created.length + result.updated.length;
+	const by = result.summarizer === "agent" ? "your agent" : "this Mac alone, with no model";
+	const lines = [
+		written === 0
+			? "No new memories: every stretch of recorded work already has one."
+			: `Wrote ${count(result.created.length, "new memory file")} and updated ${result.updated.length}, summarized by ${by}.`,
+		...[...result.created, ...result.updated].map((file) => `  ${file}`),
+		...(result.agentFailures === 0
+			? []
+			: [`${count(result.agentFailures, "session")} summarized locally because the agent failed.`]),
+		...(result.deferred === 0
+			? []
+			: [`${count(result.deferred, "session")} left for the next run because the agent was stopped.`]),
+		...(result.skipped === 0 ? [] : [`${count(result.skipped, "session")} had too little activity for a memory.`]),
+		...(result.expiredSegments.length === 0
+			? []
+			: [
+					`Deleted ${count(result.expiredSegments.length, "raw segment")} older than ${retentionMs / 3_600_000} hours; their memories are kept.`,
+				]),
+	];
+	return `${lines.join("\n")}\n`;
+}
+
+export interface TimelineDay {
+	readonly day: string;
+	readonly memories: readonly HistoryMemory[];
+}
+
+/** Memories grouped by day, in the order given (the timeline lists them newest first). */
+export function timelineDays(memories: readonly HistoryMemory[]): TimelineDay[] {
+	const days = new Map<string, HistoryMemory[]>();
+	for (const memory of memories) days.set(memory.day, [...(days.get(memory.day) ?? []), memory]);
+	return [...days.entries()].map(([day, entries]) => ({ day, memories: entries }));
+}
+
+function worked(memory: HistoryMemory): string {
+	const span = Date.parse(memory.end ?? "") - Date.parse(memory.start ?? "");
+	if (!Number.isFinite(span) || span < 0) return "";
+	const minutes = Math.max(1, Math.round(span / 60_000));
+	const hours = Math.floor(minutes / 60);
+	return hours === 0 ? `${minutes}m` : `${hours}h ${minutes % 60}m`;
+}
+
+export function formatTimeline(memories: readonly HistoryMemory[], day?: string): string {
+	if (memories.length === 0) {
+		return day === undefined
+			? "No memories yet. Run opencua history summarize to write them from recorded history.\n"
+			: `No memories on ${day}.\n`;
+	}
+	const lines: string[] = [];
+	for (const group of timelineDays(memories)) {
+		lines.push(group.day);
+		for (const memory of group.memories) {
+			const apps = memory.apps.length === 0 ? "" : `  [${memory.apps.join(", ")}]`;
+			const span = worked(memory);
+			lines.push(`  ${memory.time}  ${memory.title}${apps}${span.length === 0 ? "" : `  ${span}`}`);
+			if (memory.suggestedSkill !== undefined) {
+				lines.push(`         suggested skill: ${memory.suggestedSkill.title} (${memory.suggestedSkill.id})`);
+			}
+		}
+	}
+	return `${lines.join("\n")}\n`;
+}
 
 const suggestionSchema = z
 	.object({

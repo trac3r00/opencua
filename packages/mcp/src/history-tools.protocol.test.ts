@@ -1,15 +1,20 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { type HistorySkillDetection, type HistorySkillDraft, detectHistorySkillCandidates } from "@opencua/core";
+import { vi } from "@opencua/test-support";
 import { z } from "zod/v4";
 import {
+	type HistoryMemoryFile,
 	type HistoryObservationSettings,
 	type HistoryStatus,
+	type HistoryTimeline,
 	type HistoryToolSource,
 	registerHistoryTools,
 } from "./history-tools.js";
+import { createHarness } from "./protocol-client-harness.js";
+import { HISTORY_TOOL_NAMES, toolNamesFor } from "./tool-names.js";
 
 const DEFAULTS: HistoryObservationSettings = {
 	defaultApplicationBehavior: "observe",
@@ -27,6 +32,7 @@ class FakeHistory implements HistoryToolSource {
 			state: this.state,
 			eventStreamRootPath: "/root",
 			summariesPath: "/summaries",
+			memoriesPath: "/root/memories",
 			retentionHours: 6,
 			currentSegmentId: "2026-10-29T04-00-00Z",
 		};
@@ -52,19 +58,47 @@ class FakeHistory implements HistoryToolSource {
 	saved: HistorySkillDraft[] = [];
 
 	async suggestSkills(options: { readonly limit: number }): Promise<HistorySkillDetection> {
-		const step = (app: string, title: string) => ({
-			kind: "window.changed",
+		// A repeated Mail send with different recipients and subjects, in two recording sessions.
+		const mail = { name: "Mail", bundleIdentifier: "com.apple.mail" };
+		const typed = (field: string, text: string) => ({
+			kind: "keyboard.text_input",
 			timestamp: "2026-11-01T10:00:00Z",
-			app: { name: app },
-			window: { title },
+			app: mail,
+			keyboard: { text },
+			element: { role: "AXTextField", title: field },
 		});
-		const flow = [step("Safari", "Invoice"), step("Notes", "Ledger"), step("Mail", "Draft")];
-		return detectHistorySkillCandidates([{ id: "2026-11-01T10-00-00Z", events: [...flow, ...flow] }], options);
+		const send = {
+			kind: "keyboard.shortcut",
+			timestamp: "2026-11-01T10:00:00Z",
+			app: mail,
+			keyboard: { keyEquivalent: "d", modifiers: ["command", "shift"] },
+		};
+		const flow = (to: string, subject: string) => [typed("To", to), typed("Subject", subject), send];
+		return detectHistorySkillCandidates(
+			[
+				{ id: "2026-11-01T10-00-00Z", events: [...flow("ann@x.io", "Invoice 1"), ...flow("bo@x.io", "Invoice 2")] },
+				{ id: "2026-11-02T10-00-00Z", events: flow("cy@x.io", "Invoice 3") },
+			],
+			options,
+		);
 	}
 
 	async saveSkill(draft: HistorySkillDraft): Promise<string> {
 		this.saved.push(draft);
 		return `/skills/${draft.name}/SKILL.md`;
+	}
+
+	timelineCalls: { readonly day?: string; readonly limit: number }[] = [];
+	memories: HistoryTimeline["entries"] = [];
+
+	async timeline(options: { readonly day?: string; readonly limit: number }): Promise<HistoryTimeline> {
+		this.timelineCalls.push(options);
+		return { memoriesPath: "/root/memories", entries: this.memories.slice(0, options.limit), skipped: 0 };
+	}
+
+	async readMemory(path: string): Promise<HistoryMemoryFile> {
+		if (path !== "2026-11-23/0930-invoices.md") throw new Error(`No memory ${path}`);
+		return { path, bytes: 6, truncated: false, text: "# Paid" };
 	}
 }
 
@@ -138,11 +172,17 @@ describe("#given repeated recorded workflows #when suggest_skills is called #the
 		expect(result["candidates"]).toEqual([
 			expect.objectContaining({
 				number: 1,
-				occurrences: 2,
-				apps: ["Mail", "Notes", "Safari"],
-				steps: ["switch to Safari (invoice)", "switch to Notes (ledger)", "switch to Mail (draft)"],
+				occurrences: 3,
+				apps: ["Mail"],
+				steps: [
+					expect.stringContaining("to"),
+					expect.stringContaining("subject"),
+					expect.stringContaining("shift+cmd+d"),
+				],
 			}),
 		]);
+		const text = JSON.stringify(result);
+		for (const typedValue of ["ann@x.io", "Invoice 2", "cy@x.io"]) expect(text).not.toContain(typedValue);
 		expect(String(result["next"])).toContain("cua_history_save_skill");
 	});
 });
@@ -177,5 +217,70 @@ describe("#given an approved draft #when save_skill is called #then the source s
 		const bad = await client.callTool({ name: "cua_history_save_skill", arguments: { ...draft, name: "Bad Name" } });
 		expect(bad.isError).toBe(true);
 		expect(fake.saved).toEqual([draft]);
+	});
+});
+
+describe("#given memories #when cua_history_timeline is called #then entries come back with the default limit", () => {
+	it("passes day and the default limit through and returns the entries", async () => {
+		const fake = new FakeHistory();
+		fake.memories = [
+			{ path: "2026-11-23/0930-invoices.md", title: "Invoices", apps: ["Safari"], segments: [], summary: "Paid." },
+		];
+		const client = await connect(fake);
+
+		const result = payload(await client.callTool({ name: "cua_history_timeline", arguments: { day: "2026-11-23" } }));
+
+		expect(fake.timelineCalls).toEqual([{ day: "2026-11-23", limit: 20 }]);
+		expect(result).toMatchObject({ memoriesPath: "/root/memories", entries: fake.memories, skipped: 0 });
+		expect(result["next"]).toBeUndefined();
+	});
+
+	it("points at the raw segments when there are no memories", async () => {
+		const client = await connect(new FakeHistory());
+		const result = payload(await client.callTool({ name: "cua_history_timeline", arguments: { limit: 5 } }));
+		expect(result["entries"]).toEqual([]);
+		expect(String(result["next"])).toContain("cua_history_status");
+	});
+
+	it("rejects a malformed day and an out-of-range limit", async () => {
+		const fake = new FakeHistory();
+		const client = await connect(fake);
+		expect((await client.callTool({ name: "cua_history_timeline", arguments: { day: "../x" } })).isError).toBe(true);
+		expect((await client.callTool({ name: "cua_history_timeline", arguments: { limit: 101 } })).isError).toBe(true);
+		expect(fake.timelineCalls).toEqual([]);
+	});
+});
+
+describe("#given a memory path #when cua_history_read_memory is called #then the file or the refusal comes back", () => {
+	it("returns the memory text and surfaces a refused path as an error", async () => {
+		const client = await connect(new FakeHistory());
+		const read = payload(
+			await client.callTool({ name: "cua_history_read_memory", arguments: { path: "2026-11-23/0930-invoices.md" } }),
+		);
+		expect(read).toEqual({ path: "2026-11-23/0930-invoices.md", bytes: 6, truncated: false, text: "# Paid" });
+		const refused = await client.callTool({ name: "cua_history_read_memory", arguments: { path: "../state.json" } });
+		expect(refused.isError).toBe(true);
+	});
+});
+
+describe("#given the OPENCUA_HISTORY gate #when the server lists tools #then history tools appear only when it is on", () => {
+	const cleanup: (() => Promise<void>)[] = [];
+	afterEach(async () => {
+		vi.unstubAllEnvs();
+		for (const close of cleanup.splice(0)) await close();
+	});
+
+	it.each(["0", "1"])("lists exactly the gated tool names for OPENCUA_HISTORY=%s", async (flag) => {
+		vi.stubEnv("OPENCUA_HISTORY", flag);
+		vi.stubEnv("OPENCUA_UTM", "0");
+		vi.stubEnv("OPENCUA_BROWSER", "off");
+		const harness = await createHarness(undefined, undefined, undefined, {
+			serverOptions: { toolset: "lean", iphone: false },
+		});
+		cleanup.push(harness.close);
+		const names = (await harness.client.listTools()).tools.map((tool) => tool.name);
+		expect(names.sort()).toEqual([...toolNamesFor("lean", false, false, false, flag === "1")].sort());
+		for (const name of HISTORY_TOOL_NAMES) expect(names.includes(name)).toBe(flag === "1");
+		expect(names.includes("cua_history_timeline")).toBe(flag === "1");
 	});
 });
