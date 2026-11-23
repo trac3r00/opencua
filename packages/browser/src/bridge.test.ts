@@ -295,6 +295,45 @@ describe("BrowserBridge", () => {
 		expect(failure.message).toContain(extensionDirectory);
 	});
 
+	it("#given an extension that dropped #when a call arrives before it reconnects #then the call waits and is delivered after", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		bridges.push(bridge);
+		const port = await bridge.listen(0);
+		const first = await connect(port);
+		clients.push(first);
+		first.send(JSON.stringify({ token: "secret" }));
+		await nextJson(first);
+		first.close();
+		await once(bridge, "disconnected");
+
+		const request = bridge.request({ method: "open", url: "https://example.com/" });
+		const second = await connect(port);
+		clients.push(second);
+		second.send(JSON.stringify({ token: "secret" }));
+		await nextJson(second);
+		const packet = await nextJson(second);
+		second.send(JSON.stringify({ id: packet.id, ok: true, value: { tabId: 7 } }));
+
+		expect(packet.command).toMatchObject({ method: "open" });
+		await expect(request).resolves.toEqual({ tabId: 7 });
+	});
+
+	it("#given an extension that dropped and never comes back #when the wait runs out #then the call fails as not connected", async () => {
+		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
+		bridge.reconnectWaitMs = 20;
+		bridges.push(bridge);
+		const socket = await connect(await bridge.listen(0));
+		clients.push(socket);
+		socket.send(JSON.stringify({ token: "secret" }));
+		await nextJson(socket);
+		socket.close();
+		await once(bridge, "disconnected");
+
+		await expect(bridge.request({ method: "open", url: "https://example.com/" })).rejects.toMatchObject({
+			code: "disconnected",
+		});
+	});
+
 	it("#given a pending request #when the extension disconnects #then rejects without replay", async () => {
 		const bridge = new BrowserBridge(stopSource(), 1000, "secret");
 		bridges.push(bridge);
@@ -375,7 +414,7 @@ describe("BrowserBridge", () => {
 		await whenSettled(run, (settled) => expect(settled).resolves.toEqual({}));
 	});
 
-	it("#given a short command timeout #when a reply never arrives #then rejects and signals stop", async () => {
+	it("#given a short command timeout #when a reply never arrives #then cancels that action and keeps accepting input", async () => {
 		const bridge = new BrowserBridge(stopSource(), 25, "secret");
 		bridges.push(bridge);
 		const socket = await connect(await bridge.listen(0));
@@ -394,8 +433,14 @@ describe("BrowserBridge", () => {
 		const stopPacket = nextJson(socket);
 		await vi.advanceTimersByTimeAsync(25);
 		await rejected;
-		expect((await stopPacket).command).toEqual({ method: "stop" });
+		expect((await stopPacket).command).toEqual({ method: "cancel" });
 		expect(packet.command).toMatchObject({ method: "observe" });
+		const nextPacket = nextJson(socket);
+		const next = bridge.request({ method: "open", url: "https://example.com/" });
+		expect((await nextPacket).command).toMatchObject({ method: "open" });
+		const nextSettled = whenSettled(next, (settled) => expect(settled).rejects.toMatchObject({ code: "timeout" }));
+		await vi.advanceTimersByTimeAsync(25);
+		await nextSettled;
 	});
 
 	it("#given an active request #when its scope is cancelled #then rejects and denies further input checkpoints", async () => {

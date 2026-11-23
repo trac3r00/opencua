@@ -180,7 +180,8 @@ export type BrowserCommand =
 	| RunCommand
 	| { readonly method: "close"; readonly tabId: number }
 	| { readonly method: "handoff"; readonly reason: string }
-	| { readonly method: "stop" };
+	| { readonly method: "stop" }
+	| { readonly method: "cancel" };
 
 export const replySchema = z.discriminatedUnion("ok", [
 	z.object({ id: z.string(), ok: z.literal(true), value: z.unknown() }),

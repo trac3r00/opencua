@@ -215,6 +215,22 @@ describe("background worker ownership", () => {
 		expect(worker.stats().sent).toContainEqual({ event: "stop" });
 	});
 
+	it("#given a timed-out action the bridge cancelled #when the agent runs again on the same page #then it completes", async () => {
+		const worker = await harness();
+		await worker.dispatch({ command: "open", url: "https://example.com" });
+		await worker.dispatch({ command: "cancel" });
+		await expect(
+			worker.dispatch({
+				command: "run",
+				id: "after-cancel",
+				tabId: 100,
+				revision: "document1",
+				limits: { maxChars: 6000, maxElements: 80, fullPage: false },
+				steps: [{ action: "click", ref: 1 }],
+			}),
+		).resolves.toMatchObject({ completedSteps: 1 });
+	});
+
 	it("#given a tab moved into a user window #when closing #then refuses to remove it", async () => {
 		const worker = await harness();
 		await worker.dispatch({ command: "open", url: "https://example.com" });

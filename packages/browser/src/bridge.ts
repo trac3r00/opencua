@@ -40,6 +40,11 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 	private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
 	private socket: WebSocket | undefined;
 	private stopped = false;
+	private everConnected = false;
+	/** Set once a reconnect wait ran out, so later calls fail fast until the extension is back. */
+	private reconnectWaitSpent = false;
+	/** How long a call waits for a dropped extension to reconnect: its reconnect alarm fires every 30 s. */
+	reconnectWaitMs = 35_000;
 	private controlOwner: "agent" | "human" = "agent";
 	private reason: "taken_over" | "window_revealed" | "stopped" | undefined;
 	private handoff: HandoffRequest | undefined;
@@ -227,6 +232,8 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 				this.handoff = undefined;
 				this.epoch++;
 				ws.send(JSON.stringify({ ready: true }));
+				this.everConnected = true;
+				this.reconnectWaitSpent = false;
 				this.emit("connected");
 				return;
 			}
@@ -286,12 +293,41 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 		});
 	}
 
+	private waitForConnection(timeoutMs: number, signal: AbortSignal | undefined): Promise<boolean> {
+		return new Promise((resolve) => {
+			const done = (connected: boolean) => {
+				clearTimeout(timer);
+				this.off("connected", onConnected);
+				signal?.removeEventListener("abort", onAbort);
+				resolve(connected);
+			};
+			const onConnected = () => done(true);
+			const onAbort = () => done(false);
+			const timer = setTimeout(() => done(false), timeoutMs);
+			timer.unref();
+			this.once("connected", onConnected);
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
+	}
+
 	request(command: BrowserCommand): Promise<unknown> {
 		const signal = this.cancellation.getStore();
 		if (signal?.aborted)
 			return Promise.reject(new BrowserError("stopped", "Browser request was cancelled. Do not replay input."));
 		const socket = this.socket;
 		if (socket === undefined || socket.readyState !== WebSocket.OPEN) {
+			// An extension that was connected and dropped (its service worker slept, the browser restarted) comes back
+			// on its own within its reconnect alarm, so the call waits for it instead of failing the agent at once.
+			// One that never connected needs setup, which waiting cannot fix.
+			if (this.everConnected && !this.reconnectWaitSpent) {
+				return this.waitForConnection(this.reconnectWaitMs, signal).then((connected) => {
+					if (!connected) {
+						this.reconnectWaitSpent = true;
+						return Promise.reject(new BrowserError("disconnected", NOT_CONNECTED));
+					}
+					return this.request(command);
+				});
+			}
 			return Promise.reject(new BrowserError("disconnected", NOT_CONNECTED));
 		}
 		if ((command.method === "open" || command.method === "run") && this.controlOwner === "human") {
@@ -310,12 +346,14 @@ export class BrowserBridge extends EventEmitter implements BrowserTransport {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
 				cleanup();
-				this.stopped = true;
-				socket.send(JSON.stringify({ id: randomUUID(), command: { method: "stop" } }));
+				// A slow page ends this one action, not the session: the extension cancels what is in flight, and the next
+				// call is accepted. A stop here used to keep refusing every open and run, blaming the person, until they
+				// handed control back.
+				socket.send(JSON.stringify({ id: randomUUID(), command: { method: "cancel" } }));
 				reject(
 					new BrowserError(
 						"timeout",
-						`Browser ${command.method} timed out; input may have occurred. Re-observe, never replay.`,
+						`Browser ${command.method} timed out and was cancelled; input may have occurred. Observe again, never replay it.`,
 					),
 				);
 			}, this.timeoutMs);

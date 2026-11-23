@@ -225,7 +225,7 @@ function validStep(step) {
 
 function validCommand(command) {
 	if (typeof command.id !== "string" || command.id.length < 1 || command.id.length > 128) return false;
-	if (command.command === "stop") return true;
+	if (command.command === "stop" || command.command === "cancel") return true;
 	if (command.command === "handoff")
 		return typeof command.reason === "string" && command.reason.length >= 1 && command.reason.length <= 300;
 	if (command.command === "open")
@@ -322,6 +322,12 @@ async function dispatch(command) {
 	}
 	if (command.command === "stop") {
 		stopLocally();
+		return null;
+	}
+	if (command.command === "cancel") {
+		// The bridge gave up on the action in flight (it timed out): end it, and keep taking new ones.
+		rejectCheckpoints("Action cancelled");
+		for (const state of tabsOwned.values()) state.cancelled = true;
 		return null;
 	}
 	const readOnly = ["observe", "close", "find", "read", "wait", "screenshot"].includes(command.command);
@@ -597,6 +603,10 @@ async function runSteps(state, command) {
 	const window = await chrome.windows.get(state.windowId);
 	if (window.focused || window.state !== "minimized")
 		throw new Error("Background agent window was revealed. Stop and return it to the background before continuing.");
+	if (stopped) throw new Error("Actions stopped");
+	// A run is a new request: an earlier cancel or stop ended the actions in flight then, not this one; while the
+	// person holds control, `stopped` still refuses it.
+	state.cancelled = false;
 	const initialRevision = await evaluate(state, "revision");
 	if (initialRevision !== command.revision) throw new Error("Stale observation revision");
 	const contextGeneration = state.contextGeneration;
