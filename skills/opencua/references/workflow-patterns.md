@@ -70,6 +70,19 @@ failed work. Each entry's `images` indexes address the image blocks in the
 combined response, not image bytes embedded in JSON. Never retry successful
 entries when recovering failed ones.
 
+To work two apps side by side in one call (for example a note and a reminder
+written at the same time), arrange their windows in columns of one screen and
+drive both handles together; windows are moved and resized, never raised:
+
+```js
+const notes = apple.app("Notes"), reminders = apple.app("Reminders");
+await apple.arrange([notes, reminders], { gap: 8 });
+await Promise.all([
+	notes.observe().then(() => notes.type("Groceries")),
+	reminders.observe().then(() => reminders.type("Buy milk")),
+]);
+```
+
 Background app lanes can run concurrently; attended worker input is serialized.
 Cursor identities distinguish feedback, not independent native mice. The OS
 cursor, shared clipboard, menus and human input remain shared constraints.
