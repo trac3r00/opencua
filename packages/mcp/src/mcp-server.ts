@@ -6,6 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { BrowserError, connectBrowserController, registerBrowserTools } from "@opencua/browser";
 import {
 	IPhoneMirroring,
+	LAUNCH_WATCH_MILLISECONDS,
 	StopSwitch,
 	UTM,
 	currentSystemPrompts,
@@ -160,7 +161,7 @@ export function createMcpServer(
 				? {}
 				: {
 						opened: (pid: number, frontBefore: number | undefined) =>
-							foregroundKeeper.noteTouched(pid, frontBefore),
+							foregroundKeeper.noteTouched(pid, frontBefore, LAUNCH_WATCH_MILLISECONDS),
 					}),
 			background: resolvedComputer.delivery === "background",
 			reveal: unhideApplication,

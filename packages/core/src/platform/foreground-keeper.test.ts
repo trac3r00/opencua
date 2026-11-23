@@ -1,21 +1,23 @@
 import { describe, expect, it } from "bun:test";
 
-import { ForegroundKeeper } from "./foreground-keeper.js";
+import { ForegroundKeeper, LAUNCH_WATCH_MILLISECONDS } from "./foreground-keeper.js";
 
 const PERSON = 100;
 const CHROME = 200;
+const OTHER = 300;
 
 function harness(): {
 	readonly keeper: ForegroundKeeper;
-	readonly state: { front: number; now: number; idleSeconds: number };
+	readonly state: { front: number; now: number; mouseDownSeconds: number; command: boolean };
 	readonly restored: number[];
 } {
-	const state = { front: PERSON, now: 1_000, idleSeconds: 60 };
+	const state = { front: PERSON, now: 1_000, mouseDownSeconds: 60, command: false };
 	const restored: number[] = [];
 	const keeper = new ForegroundKeeper(
 		{
 			frontmostPid: () => state.front,
-			secondsSinceHumanInput: () => state.idleSeconds,
+			secondsSinceMouseDown: () => state.mouseDownSeconds,
+			commandHeld: () => state.command,
 			restore: async (pid) => {
 				restored.push(pid);
 				state.front = pid;
@@ -28,11 +30,19 @@ function harness(): {
 	return { keeper, state, restored };
 }
 
+/** Time passes with the keeper polling, as its timer would, while the person's app stays in front. */
+async function idle(keeper: ForegroundKeeper, state: { now: number }, milliseconds: number, step = 50): Promise<void> {
+	for (let elapsed = 0; elapsed < milliseconds; elapsed += step) {
+		state.now += step;
+		await keeper.check();
+	}
+}
+
 describe("#given input sent to a background app #when that app takes the front #then the person's app is restored", () => {
 	it("restores the app that was in front before the input", async () => {
 		const { keeper, state, restored } = harness();
 		keeper.noteTouched(CHROME);
-		state.now += 2_000;
+		await idle(keeper, state, 2_000);
 		state.front = CHROME;
 
 		const result = await keeper.check();
@@ -45,9 +55,43 @@ describe("#given input sent to a background app #when that app takes the front #
 		const { keeper, state, restored } = harness();
 		keeper.noteTouched(CHROME);
 		state.front = CHROME;
-		state.now += 500;
+		state.now += 50;
 		keeper.noteTouched(CHROME);
-		state.now += 500;
+		state.now += 50;
+
+		await keeper.check();
+
+		expect(restored).toEqual([PERSON]);
+	});
+
+	it("#when the person kept typing in their own app meanwhile #then it is still restored", async () => {
+		const { keeper, state, restored } = harness();
+		keeper.noteTouched(CHROME);
+		await idle(keeper, state, 3_000);
+		state.front = CHROME;
+
+		await keeper.check();
+
+		expect(restored).toEqual([PERSON]);
+	});
+
+	it("#when the person clicked inside their own app seconds before the steal #then it is still restored", async () => {
+		const { keeper, state, restored } = harness();
+		keeper.noteTouched(CHROME);
+		await idle(keeper, state, 3_000);
+		state.mouseDownSeconds = 2;
+		state.front = CHROME;
+
+		await keeper.check();
+
+		expect(restored).toEqual([PERSON]);
+	});
+
+	it("#when a launched app takes the front 20 s later #then the launch watch still restores", async () => {
+		const { keeper, state, restored } = harness();
+		keeper.noteTouched(CHROME, PERSON, LAUNCH_WATCH_MILLISECONDS);
+		await idle(keeper, state, 20_000, 250);
+		state.front = CHROME;
 
 		await keeper.check();
 
@@ -55,13 +99,38 @@ describe("#given input sent to a background app #when that app takes the front #
 	});
 });
 
-describe("#given the person used the keyboard or mouse #when the app is in front #then nothing is restored", () => {
-	it("treats a real input event after the action as the person's own switch", async () => {
+describe("#given the person switched apps themselves #when the touched app is in front #then nothing is restored", () => {
+	it("treats a mouse press just before the switch as the person's click on it", async () => {
 		const { keeper, state, restored } = harness();
 		keeper.noteTouched(CHROME);
-		state.now += 3_000;
-		state.idleSeconds = 1;
+		await idle(keeper, state, 3_000);
+		state.now += 50;
+		state.mouseDownSeconds = 0.08;
 		state.front = CHROME;
+
+		expect(await keeper.check()).toBeUndefined();
+		expect(restored).toEqual([]);
+	});
+
+	it("treats Command seen just before the switch as Command-Tab", async () => {
+		const { keeper, state, restored } = harness();
+		keeper.noteTouched(CHROME);
+		await idle(keeper, state, 3_000);
+		state.command = true;
+		await keeper.check();
+		state.command = false;
+		state.now += 50;
+		state.front = CHROME;
+
+		expect(await keeper.check()).toBeUndefined();
+		expect(restored).toEqual([]);
+	});
+
+	it("leaves a third app the person brought forward alone", async () => {
+		const { keeper, state, restored } = harness();
+		keeper.noteTouched(CHROME);
+		state.now += 500;
+		state.front = OTHER;
 
 		expect(await keeper.check()).toBeUndefined();
 		expect(restored).toEqual([]);

@@ -24,6 +24,10 @@ export interface FocusRestoreToken {
 const skyLight = koffi.load("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight");
 const coreGraphics = koffi.load("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics");
 const objc = koffi.load("/usr/lib/libobjc.A.dylib");
+const applicationServices = koffi.load("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices");
+const GetProcessPID = applicationServices.func("GetProcessPID", "int32_t", ["void *", "_Out_ int32_t *"]) as KoffiFunc<
+	(psn: Buffer, pid: number[]) => number
+>;
 const CG_POINT = koffi.struct("SLCGPoint", { x: "double", y: "double" });
 
 /** Background per-process delivery: the event reaches one app without the HID stream, focus or the pointer. */
@@ -274,6 +278,16 @@ export function focusGuardFor(window: SkyLightTargetWindow): FocusRestoreToken |
 	return { previousPsn, targetPsn };
 }
 
+/**
+ * The pid of the process the WindowServer has in front. It can differ from the app AppKit reports active: an app
+ * still finishing its launch holds the front while no running application is marked active yet.
+ */
+export function frontProcessPid(): number | undefined {
+	const psn = frontProcessSerialNumber();
+	const pid = [0];
+	return psn !== null && GetProcessPID(psn, pid) === 0 && pid[0] !== undefined && pid[0] > 0 ? pid[0] : undefined;
+}
+
 export function processSerialNumbersMatch(left: Buffer, right: Buffer): boolean {
 	return left.equals(right);
 }
@@ -284,6 +298,17 @@ export function processSerialNumbersMatch(left: Buffer, right: Buffer): boolean 
  */
 export function restoreFrontProcessNoWindows(token: FocusRestoreToken): boolean {
 	return SLPSSetFrontProcessWithOptions(token.previousPsn, 0, K_CPS_NO_WINDOWS) === 0;
+}
+
+/**
+ * Puts the app that owns `windowId` in front without raising any of its windows, as restoreFrontProcessNoWindows
+ * does for a token: the fast way to hand the front back to the person's app after another app took it.
+ */
+export function setFrontProcessOfWindowNoWindows(windowId: number): boolean {
+	const psn = processSerialNumberForWindow(windowId);
+	// User-generated makes it a real activation, so the app shows itself active at once; without it the app went on
+	// drawing its windows inactive for over a second after it was back in front.
+	return psn !== null && SLPSSetFrontProcessWithOptions(psn, 0, K_CPS_NO_WINDOWS | K_CPS_USER_GENERATED) === 0;
 }
 
 export function postCoreGraphicsEventToWindowOwner(window: SkyLightTargetWindow, event: CGEventRef): boolean {
