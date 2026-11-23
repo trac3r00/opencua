@@ -7,8 +7,7 @@ import { listWindows } from "./macos-ffi/window-list.js";
 import { getRunningApplications } from "./macos-ffi/workspace.js";
 import { hidPhysicalInputProbe } from "./macos-physical-intent.js";
 
-const FAST_RESTORE_ATTEMPTS = 3;
-const FAST_RESTORE_POLLS = 6;
+const FAST_RESTORE_ATTEMPTS = 24;
 const FAST_RESTORE_POLL_MILLISECONDS = 25;
 
 /** The WindowServer's front process: a launching app holds the front before AppKit reports any app active. */
@@ -29,13 +28,12 @@ async function restorePersonApp(pid: number): Promise<boolean> {
 	if (window === undefined) {
 		return false;
 	}
-	// An app still finishing its own activation can take the front back once more, so the fast path is retried.
+	// An app still finishing its launch takes the front again and again (Chrome held it 0.8 s against three slower
+	// tries), so the front is handed back on every short poll until it stays.
 	for (let attempt = 0; attempt < FAST_RESTORE_ATTEMPTS && setFrontProcessOfWindowNoWindows(window.id); attempt += 1) {
-		for (let poll = 0; poll < FAST_RESTORE_POLLS; poll += 1) {
-			await new Promise((resolve) => setTimeout(resolve, FAST_RESTORE_POLL_MILLISECONDS));
-			if (frontmostPid() === pid) {
-				return true;
-			}
+		await new Promise((resolve) => setTimeout(resolve, FAST_RESTORE_POLL_MILLISECONDS));
+		if (frontmostPid() === pid) {
+			return true;
 		}
 	}
 	const application = getRunningApplications().find((candidate) => candidate.pid === pid);
