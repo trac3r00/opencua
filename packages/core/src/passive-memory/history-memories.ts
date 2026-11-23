@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { type Dirent, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import {
+	type Dirent,
+	linkSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	renameSync,
+	rmSync,
+	rmdirSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import type { HistoryPaths } from "./history-control.js";
 import {
@@ -847,6 +857,51 @@ function withMemoriesLock<T>(paths: HistoryPaths, run: () => T): T {
 	}
 }
 
+/**
+ * Replaces the memory at `path` with `text` only if it still holds what the summarizer wrote (`sha256`), without a
+ * window in which an owner's save can be overwritten: the file is first moved aside, its content checked there, and
+ * the new text is linked in only where no file stands (a save that landed meanwhile is kept). An edited memory goes
+ * back in place. Returns whether the memory was replaced.
+ */
+function replaceUntouched(path: string, sha256: string, text: string): boolean {
+	const directory = join(path, "..");
+	const aside = join(directory, `.${randomUUID()}.old`);
+	const fresh = join(directory, `.${randomUUID()}.tmp`);
+	try {
+		try {
+			renameSync(path, aside);
+		} catch {
+			return false; // removed by the owner
+		}
+		const current = readRegularFile(aside, MAX_MEMORY_BYTES);
+		if (current === undefined || digest(current) !== sha256) {
+			linkBack(aside, path);
+			return false;
+		}
+		writeFileSync(fresh, text, { flag: "wx", mode: 0o600 });
+		try {
+			linkSync(fresh, path);
+		} catch (error: unknown) {
+			if (error instanceof Error && "code" in error && error.code === "EEXIST") return false; // the owner saved
+			linkBack(aside, path);
+			throw error;
+		}
+		return true;
+	} finally {
+		rmSync(fresh, { force: true });
+		rmSync(aside, { force: true });
+	}
+}
+
+/** Puts a moved-aside memory back, unless a newer file already stands at its path. */
+function linkBack(aside: string, path: string): void {
+	try {
+		linkSync(aside, path);
+	} catch (error: unknown) {
+		if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+	}
+}
+
 function writeIndex(paths: HistoryPaths, records: readonly MemoryRecord[]): void {
 	const text = `${JSON.stringify({ version: 1, memories: records }, null, "\t")}\n`;
 	replaceFile(ensureMemoriesDir(paths), INDEX_FILE, text);
@@ -1000,9 +1055,11 @@ export async function summarizeHistory(
 					skill === undefined ? undefined : { id: skill.id, title: clean(skill.title, TEXT_LIMITS.title) },
 				);
 				// Checked again right before the write: an edit made while the agent was answering still wins.
-				if (previous?.file !== undefined && isUntouched(paths, previous)) {
-					const [day = "", name = ""] = previous.file.split("/");
-					replaceFile(join(historyMemoriesDir(paths), day), name, body);
+				if (
+					previous?.file !== undefined &&
+					previous.sha256 !== undefined &&
+					replaceUntouched(join(historyMemoriesDir(paths), previous.file), previous.sha256, body)
+				) {
 					updated.push(previous.file);
 					record = { ...span, file: previous.file, sha256: digest(body) };
 				} else if (previous?.file !== undefined) {

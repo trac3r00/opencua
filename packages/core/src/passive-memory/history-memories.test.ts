@@ -489,6 +489,30 @@ describe("#given a memory already written #when history is summarized again #the
 		]);
 	});
 
+	it("keeps an edit the owner saved while the agent was answering, and leaves no scratch file behind", async () => {
+		writeSegment(segmentId("10:00:00"), reportSegment());
+		await setSkillDescriptionsEnabled(paths.root, true);
+		const [file = ""] = (
+			await summarizeHistory(paths, { now: ms("10:12:00"), timeZone: "UTC", generate: async () => agentAnswer })
+		).created;
+		writeSegment(segmentId("10:10:00"), clicks("Xcode", "10:11:00", 3));
+		const edited = `${readMemory(file)}\nSaved while the agent was answering.\n`;
+
+		const second = await summarizeHistory(paths, {
+			now: ms("10:25:00"),
+			timeZone: "UTC",
+			generate: async () => {
+				writeFileSync(join(historyMemoriesDir(paths), file), edited);
+				return agentAnswer;
+			},
+		});
+
+		expect(readMemory(file)).toBe(edited);
+		expect(second.updated).toEqual([]);
+		const day = join(historyMemoriesDir(paths), file.split("/")[0] ?? "");
+		expect(readdirSync(day).filter((name) => name.startsWith("."))).toEqual([]);
+	});
+
 	it("does not bring back a memory the owner deleted, with or without new activity", async () => {
 		writeSegment(segmentId("10:00:00"), untilEight());
 		await setSkillDescriptionsEnabled(paths.root, false);
