@@ -36,6 +36,8 @@ const harnessSchema = z.object({
 async function harness(
 	options: {
 		navigateAfterClick?: boolean;
+		/** Reads of the agent window that still answer "normal" after it was told to minimize. */
+		minimizeLag?: number;
 		frameAfterClick?: "child" | "main";
 		stopAfterPrepare?: "stop" | "cancel";
 	} = {},
@@ -50,6 +52,7 @@ async function harness(
 		let contextId=0, debuggerListener, checkpointAllowed=true;
 		const removed=[], sent=[], windowUpdates=[];
 		const session={};
+		let minimizeLag=options.minimizeLag??0;
 		let badge='';
 		let runtimeListener;
 		const focusListeners=[];
@@ -64,7 +67,7 @@ async function harness(
 			alarms:{create(){},onAlarm:event},
 			windows:{
 				create:async(options)=>{window.state=options.state;if(options.focused)foreground=10;return window;},
-				get:async()=>window,update:async(_id,options)=>{windowUpdates.push(options);window.state=options.state;window.focused=options.focused===true;return window},
+				get:async()=>{if(minimizeLag>0&&window.state==='minimized'){minimizeLag--;return {...window,state:'normal'}}return window},update:async(_id,options)=>{windowUpdates.push(options);window.state=options.state;window.focused=options.focused===true;return window},
 				remove:async()=>{},onRemoved:event,onFocusChanged:focusEvent,onBoundsChanged:event
 			},
 			tabs:{
@@ -149,6 +152,12 @@ async function harness(
 }
 
 describe("background worker ownership", () => {
+	it("#given Chromium still reports the new window as normal while it minimizes #when opening a page #then it waits for the minimize instead of failing", async () => {
+		const worker = await harness({ minimizeLag: 3 });
+		await expect(worker.dispatch({ command: "open", url: "https://example.com" })).resolves.toBeDefined();
+		expect(worker.stats().created).toBe(1);
+	});
+
 	it("#given two pages #when opening both #then reuses one minimized window without activating it", async () => {
 		const worker = await harness();
 		await worker.dispatch({ command: "open", url: "https://example.com/a" });

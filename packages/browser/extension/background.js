@@ -2,6 +2,8 @@ const DEFAULT_PORT = 47953;
 const MAX_MESSAGE = 4_000_000;
 const NAVIGATION_READ_BUDGET_MS = 10_000;
 const NAVIGATION_RETRY_MS = 100;
+const MINIMIZE_POLLS = 20;
+const MINIMIZE_POLL_MS = 50;
 const CHECKPOINT_TIMEOUT_MS = 10_000;
 import { pageRuntime } from "./page-runtime.js";
 
@@ -432,6 +434,19 @@ async function giveBack() {
 	}
 }
 
+/**
+ * Chromium on macOS answers "normal" for a window it was just told to minimize until the minimize animation ends,
+ * so the state is read again for a bounded while before the window counts as not minimized.
+ */
+async function minimizedWindow(windowId) {
+	let window = await chrome.windows.get(windowId);
+	for (let attempt = 0; attempt < MINIMIZE_POLLS && (window.state !== "minimized" || window.focused); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, MINIMIZE_POLL_MS));
+		window = await chrome.windows.get(windowId);
+	}
+	return window;
+}
+
 async function openTab(url) {
 	const parsed = new URL(url);
 	if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Only HTTP(S) URLs are allowed");
@@ -443,7 +458,7 @@ async function openTab(url) {
 				// macOS Chromium may ignore state in create(). Apply it before the
 				// window becomes an input target and before any page is loaded.
 				await chrome.windows.update(window.id, { state: "minimized" });
-				const background = await chrome.windows.get(window.id);
+				const background = await minimizedWindow(window.id);
 				if (background.state !== "minimized" || background.focused) {
 					await chrome.windows.remove(window.id);
 					throw new Error("Chromium could not create a minimized background window");
