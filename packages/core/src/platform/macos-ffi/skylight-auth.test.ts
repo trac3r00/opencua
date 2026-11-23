@@ -97,22 +97,31 @@ describe("#given SkyLight focus primitives #when a host window is targeted #then
 	});
 });
 
-describe("#given background activation #when an app is told it is active #then only that process gets one record and the front app is not changed", () => {
-	it("posts one activation record naming the window to the target psn, and never sets the front process", async () => {
+describe("#given background activation #when an app is told it is active #then only that process gets records and the front app is not changed", () => {
+	it("posts the activation record and the two key-window records naming the window to the target psn, and never sets the front process", async () => {
 		const skyLight = await loadSkyLight(true);
 		const targetPsn = Buffer.from([1, 0, 0, 0, 2, 0, 0, 0]);
 
 		expect(skyLight.setProcessAppActive(targetPsn, 11, true)).toBe(true);
 
-		expect(koffiMock.skyLightFunctions.SLPSPostEventRecordTo).toHaveBeenCalledTimes(1);
-		const [psn, record] = koffiMock.skyLightFunctions.SLPSPostEventRecordTo.mock.calls[0] as unknown as [
-			Buffer,
-			Buffer,
-		];
-		expect(psn).toBe(targetPsn);
-		expect(record.readUInt32LE(0x3c)).toBe(11);
-		expect(record[0x8a]).toBe(0x01);
+		const calls = koffiMock.skyLightFunctions.SLPSPostEventRecordTo.mock.calls as unknown as [Buffer, Buffer][];
+		expect(calls.map(([psn]) => psn)).toEqual([targetPsn, targetPsn, targetPsn]);
+		expect(calls.map(([, record]) => record.readUInt32LE(0x3c))).toEqual([11, 11, 11]);
+		expect(calls.map(([, record]) => record[0x08])).toEqual([0x0d, 0x01, 0x02]);
+		expect(calls[0]?.[1][0x8a]).toBe(0x01);
+		expect(calls.slice(1).map(([, record]) => record[0x3a])).toEqual([0x10, 0x10]);
 		expect(koffiMock.skyLightFunctions.SLPSSetFrontProcessWithOptions).not.toHaveBeenCalled();
+	});
+
+	it("posts only the deactivation record when the app is told it is no longer active", async () => {
+		const skyLight = await loadSkyLight(true);
+		const targetPsn = Buffer.from([1, 0, 0, 0, 2, 0, 0, 0]);
+
+		expect(skyLight.setProcessAppActive(targetPsn, 11, false)).toBe(true);
+
+		const calls = koffiMock.skyLightFunctions.SLPSPostEventRecordTo.mock.calls as unknown as [Buffer, Buffer][];
+		expect(calls.length).toBe(1);
+		expect(calls[0]?.[1][0x8a]).toBe(0x02);
 	});
 });
 

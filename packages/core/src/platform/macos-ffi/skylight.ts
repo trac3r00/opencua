@@ -197,8 +197,10 @@ export function activateWindowWithoutRaise(window: SkyLightTargetWindow): boolea
 
 /**
  * Tells one app it is (or is no longer) active, as cua-driver's background activation does, so it takes the next
- * background click instead of spending it on activating its window. The front app, window order and the person's
- * focus do not change: the record goes to that process only.
+ * background click instead of spending it on activating its window. Telling it active also makes `windowId` the
+ * app's key window, the window its keys and window commands go to: the activation record alone leaves the key window
+ * where the app had it (measured with two TextEdit documents). The front app, window order and the person's focus do
+ * not change: the records go to that process only.
  */
 export function setProcessAppActive(psn: Buffer, windowId: number, active: boolean): boolean {
 	const record = Buffer.alloc(0xf8);
@@ -206,7 +208,26 @@ export function setProcessAppActive(psn: Buffer, windowId: number, active: boole
 	record[0x08] = 0x0d;
 	record.writeUInt32LE(windowId, 0x3c);
 	record[0x8a] = active ? 0x01 : 0x02;
-	return SLPSPostEventRecordTo(psn, record) === 0;
+	const told = SLPSPostEventRecordTo(psn, record) === 0;
+	return active ? told && makeKeyWindowInProcess(psn, windowId) : told;
+}
+
+/**
+ * The two synthetic window-server records (types 0x01 and 0x02, flagged 0x10, an all-ones 16-byte span at 0x20) that
+ * make `windowId` key inside its own process without ordering it forward, as yabai's focus-without-raise sends them.
+ */
+function makeKeyWindowInProcess(psn: Buffer, windowId: number): boolean {
+	let posted = true;
+	for (const type of [0x01, 0x02]) {
+		const record = Buffer.alloc(0xf8);
+		record[0x04] = 0xf8;
+		record[0x08] = type;
+		record[0x3a] = 0x10;
+		record.fill(0xff, 0x20, 0x30);
+		record.writeUInt32LE(windowId, 0x3c);
+		posted = SLPSPostEventRecordTo(psn, record) === 0 && posted;
+	}
+	return posted;
 }
 
 /** Moves the person's focus to `window` and returns what restores it (attended delivery only). */

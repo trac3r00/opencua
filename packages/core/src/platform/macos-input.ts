@@ -117,19 +117,36 @@ let keyboardWindowFocuser: (pid: number, windowId: number) => Promise<void> = as
 	if (focusedId === windowId || focusedWindowIsModal(pid)) {
 		return;
 	}
-	if (focusedId !== undefined) {
-		// An untitled focused window is a helper of the target's own interaction (Finder's rename field
-		// editor, a popover); raising the target over it would end that interaction. Only another
-		// document window takes the keys away from the target. The WindowServer hides every title from a
-		// process without Screen Recording, so accessibility names the window when the listing does not.
-		const listedTitle = (await openWindowsForTargeting()).find((window) => window.id === focusedId)?.title;
-		const focusedTitle = listedTitle || windowTitlesForPid(pid).get(focusedId);
-		if (!focusedTitle) {
-			return;
-		}
+	if (focusedId !== undefined && !(await isUntitledHelperWindow(pid, focusedId))) {
 		throw new Error("keyboard target is not the app's focused window; refusing to raise it over the user's work");
 	}
 };
+
+/**
+ * An untitled focused window is a helper of the target's own interaction (Finder's rename field editor, a popover);
+ * raising the target over it, or naming the target key, would end that interaction. Only another document window
+ * takes the keys away from the target. The WindowServer hides every title from a process without Screen Recording,
+ * so accessibility names the window when the listing does not.
+ */
+async function isUntitledHelperWindow(pid: number, windowId: number, of?: SkyLightTargetWindow): Promise<boolean> {
+	const listed = (await openWindowsForTargeting()).find((window) => window.id === windowId);
+	if (listed?.title || windowTitlesForPid(pid).get(windowId)) {
+		return false;
+	}
+	// Asked for one window, a helper belongs to it only when it lies inside that window, as a rename field or a
+	// popover does; an untitled popup over another of the app's windows (a browser extension's) is not its own.
+	// A focused window that is no longer listed has closed: it holds nothing of the target's.
+	return of === undefined || (listed !== undefined && containsRect(of.bounds, listed.bounds));
+}
+
+function containsRect(outer: Rect, inner: Rect): boolean {
+	return (
+		inner.x >= outer.x &&
+		inner.y >= outer.y &&
+		inner.x + inner.width <= outer.x + outer.width &&
+		inner.y + inner.height <= outer.y + outer.height
+	);
+}
 
 /**
  * Some apps activate themselves in response to background input (Finder's Go to Folder panel), which
@@ -217,6 +234,10 @@ export function setScreenLayoutSourceForTesting(source: () => ScreenLayout | und
 
 /** How many focus-settle intervals attended delivery waits for a raised window to become key: 40 x 25 ms by default. */
 const ATTENDED_FOREGROUND_POLLS = 40;
+/** Polls (each one focus-settle period) for an app behind the person's to report a window it was told is key. */
+const KEY_WINDOW_BEHIND_POLLS = 40;
+/** Polls between repeated namings of the window, while the app has not reported it key. */
+const KEY_WINDOW_RENAME_POLLS = 4;
 
 /** Logged when an app was told it is active but no point is provably clear for its primer click. */
 const PRIMER_SKIPPED_MESSAGE =
@@ -514,7 +535,11 @@ export class MacOSInputController {
 		}
 		this.cancelActivationRelease(pid);
 		const held = this.activations.get(pid);
-		if (held?.window.id === window.id) {
+		// A hold names the window the app was told is key, but the app moves its key window on its own (a popup or
+		// another window opened by the last action), so the hold is reused only while the app does not report a
+		// different focused window.
+		const focusedId = held?.window.id === window.id ? focusedWindowIdForPid(pid) : undefined;
+		if (held?.window.id === window.id && (focusedId === undefined || focusedId === window.id)) {
 			return true;
 		}
 		const guard = focusGuardFor(window);
@@ -535,6 +560,63 @@ export class MacOSInputController {
 			await postActivationPrimer(this.mousePostFor(pid), window, primerPoint);
 		}
 		return true;
+	}
+
+	/**
+	 * Keys and window commands go to an app's key window, and an app behind the person's moves its key window on its
+	 * own: a popup or second window opened by the previous action takes it. Under background delivery the observed
+	 * window is named key to its app with the same per-process record activateBehind sends (no raise, the person's
+	 * front app and focus untouched), then accessibility is polled, bounded, until it reports that window (Chromium
+	 * applies it asynchronously). Nothing is done for the person's own front app (its key window is where they type),
+	 * a modal, or an untitled helper window of the target's own interaction; the callers' checks still decide.
+	 */
+	private async keyWindowBehind(pid: number, window: SkyLightTargetWindow): Promise<void> {
+		if (!this.isBackground || !this.backgroundActivation || isOwnedSurfacePid(pid)) {
+			return;
+		}
+		const focusedId = focusedWindowIdForPid(pid);
+		// Unknown focus is left to the callers' checks unless the call is bound to this very window, which they
+		// would refuse anyway.
+		const bound = currentInputScope()?.target?.windowId === window.id;
+		if (
+			focusedId === window.id ||
+			(focusedId === undefined && !bound) ||
+			focusedWindowIsModal(pid) ||
+			(focusedId !== undefined && (await isUntitledHelperWindow(pid, focusedId, window)))
+		) {
+			return;
+		}
+		const guard = focusGuardFor(window);
+		if (guard === null) {
+			return;
+		}
+		// The key window it has now is told it lost focus first, as a person's click on another of the app's windows
+		// does. Measured on TextEdit with two documents behind the person's app: once the app holds one window key, the
+		// first naming of another is usually dropped and a repeat lands (10 of 10 switches, about 200 ms each), so the
+		// names are sent again while waiting for accessibility to report the window.
+		const name = (current: number | undefined): boolean => {
+			if (current !== undefined) {
+				setProcessAppActive(guard.targetPsn, current, false);
+			}
+			return setProcessAppActive(guard.targetPsn, window.id, true);
+		};
+		if (!name(focusedId)) {
+			return;
+		}
+		this.activations.set(pid, { window, psn: guard.targetPsn });
+		this.syncExitHook();
+		focusStealWatcher(window);
+		const poll = Math.max(1, gestureFocusSettleMilliseconds());
+		for (let attempt = 1; attempt <= KEY_WINDOW_BEHIND_POLLS; attempt += 1) {
+			await delayMilliseconds(poll);
+			const current = focusedWindowIdForPid(pid);
+			if (current === window.id) {
+				return;
+			}
+			if (attempt % KEY_WINDOW_RENAME_POLLS === 0) {
+				name(current);
+			}
+		}
 	}
 
 	/** An input call on `pid` starts: the app's idle release waits until every call on it has ended. */
@@ -639,6 +721,9 @@ export class MacOSInputController {
 		this.beforeInput();
 		if (this.isBackground && !currentOnscreenWindowIds()?.includes(window.id)) {
 			const target = await this.windowByIdForPid(pid, window.id, undefined, true);
+			if (target !== undefined) {
+				await this.keyWindowBehind(pid, target);
+			}
 			if (target === undefined || focusedWindowIdForPid(pid) !== window.id) {
 				throw new Error("off-Space command target is unavailable or is not the app's verified focused window");
 			}
@@ -654,6 +739,7 @@ export class MacOSInputController {
 				this.dropActivationHold(pid);
 			}
 		}
+		await this.keyWindowBehind(pid, window);
 		await keyboardWindowFocuser(pid, window.id);
 		if (currentInputScope()?.target?.windowId !== undefined && focusedWindowIdForPid(pid) !== window.id) {
 			throw new Error("observed command target is not the verified focused window; input refused");
@@ -1478,6 +1564,7 @@ export class MacOSInputController {
 		}
 		this.targetWindowsByPid.set(pid, targetWindow);
 		if (action === "keyboard") {
+			await this.keyWindowBehind(pid, targetWindow);
 			if (this.isBackground && !currentOnscreenWindowIds()?.includes(targetWindow.id)) {
 				if (focusedWindowIdForPid(pid) !== targetWindow.id) {
 					throw new Error(
