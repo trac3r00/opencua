@@ -108,12 +108,24 @@ async function copyToClipboard(value: string): Promise<boolean> {
 	});
 }
 
+/**
+ * Chromium browsers ignore their internal pages (brave://extensions) when asked through `open -a`; measured on Brave,
+ * nothing opened. AppleScript can: a new tab in the front window, without activating the browser. A browser that is
+ * not running, or AppleScript that is refused, falls back to `open`.
+ */
 async function openInBackground(browser: BrowserInstall): Promise<boolean> {
+	const application = basename(browser.appPath, ".app");
+	const script = `tell application "${application}" to tell window 1 to make new tab with properties {URL:"${browser.extensionsUrl}/"}`;
 	try {
-		await execFileAsync("open", ["-g", "-a", browser.appPath, browser.extensionsUrl], { timeout: 5000 });
+		await execFileAsync("osascript", ["-e", script], { timeout: 10_000 });
 		return true;
 	} catch {
-		return false;
+		try {
+			await execFileAsync("open", ["-g", "-a", browser.appPath, browser.extensionsUrl], { timeout: 5000 });
+			return true;
+		} catch {
+			return false;
+		}
 	}
 }
 
