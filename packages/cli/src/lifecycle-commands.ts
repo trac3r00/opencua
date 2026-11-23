@@ -1178,6 +1178,46 @@ export function registerLifecycleCommands(program: Command, options: LifecycleCo
 		});
 
 	program
+		.command("onboard")
+		.description(
+			"First-run setup in one command: grant opencua-mcp its macOS permissions, then build and connect OpenCUA Browser and register it with your agent clients",
+		)
+		.option("--no-open", "print how to open System Settings and the extensions page instead of opening them")
+		.option("--browser <name>", "Brave, Google Chrome, Microsoft Edge, Arc, Vivaldi, Chromium, or Aside")
+		.action(async (commandOptions: { readonly open: boolean; readonly browser?: string }) => {
+			const json = options.isJsonOutput();
+			const permissions = await runPermissionsGrantCommand({ open: commandOptions.open, wait: true }, json);
+			if (permissions !== 0) {
+				print("Permissions are not all granted yet; run opencua onboard again once they are.");
+				process.exitCode = permissions;
+				return;
+			}
+			const { setupForkBrowser } = await import("./browser-commands.js");
+			const { locateFork } = await import("./browser-fork.js");
+			if (locateFork() === undefined) {
+				print(
+					"macOS permissions are granted. OpenCUA Browser is not installed; run opencua browser setup for the built-in browser bridge.",
+				);
+				return;
+			}
+			const browser = await setupForkBrowser(
+				{
+					wait: true,
+					open: commandOptions.open,
+					register: true,
+					...(commandOptions.browser === undefined ? {} : { browser: commandOptions.browser }),
+				},
+				print,
+			);
+			print(
+				browser.connected
+					? "Done: permissions granted, OpenCUA Browser connected, and its skill registered with your agents."
+					: "Permissions are granted. Load the extension as shown above, then run opencua onboard again.",
+			);
+			process.exitCode = browser.connected ? 0 : 1;
+		});
+
+	program
 		.command("doctor")
 		.description(
 			'Check this Mac, the native binaries, the signed helper, the permissions of "opencua-mcp" and the MCP client registrations without raising a permission prompt; exits 0 when ready, 1 otherwise',

@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { Command } from "commander";
 import { z } from "zod";
+import { buildFork, connectedBrowsers, linkBsk, locateFork, registerSkill } from "./browser-fork.js";
 import { resolveLayout } from "./layout.js";
 
 const execFileAsync = promisify(execFile);
@@ -166,6 +167,67 @@ async function waitForConnection(timeoutMs: number, onProgress: (elapsedMs: numb
 	return await readStatus();
 }
 
+/**
+ * Setup for OpenCUA Browser (the BrowserSkill fork): build what is missing, put `bsk` on PATH, hand the person the one
+ * click (Load unpacked, path on the clipboard, extensions page opened behind their work), wait until `bsk browsers`
+ * lists the extension, then register the skill with the agent clients.
+ */
+export async function setupForkBrowser(
+	options: BrowserSetupOptions & { readonly register?: boolean },
+	report: (line: string) => void = () => undefined,
+): Promise<{
+	readonly extensionPath: string;
+	readonly browser: BrowserInstall | undefined;
+	readonly opened: boolean;
+	readonly clipboard: boolean;
+	readonly connected: boolean;
+	readonly built: readonly string[];
+	readonly bskOnPath: boolean;
+	readonly skill?: string;
+	readonly instructions: string;
+}> {
+	const fork = locateFork();
+	if (fork === undefined) throw new Error("OpenCUA Browser (the BrowserSkill fork) was not found");
+	const built = await buildFork(fork, report);
+	const link = linkBsk(fork);
+	if (!link.linked) report(`${link.path} is another program; using ${fork.bsk} directly.`);
+	const extensionPath = options.extension ?? fork.extension;
+	let connected = (await connectedBrowsers(fork)).length > 0;
+	let browser: BrowserInstall | undefined;
+	let opened = false;
+	let clipboard = false;
+	let instructions = "The OpenCUA Browser extension is already connected.";
+	if (!connected) {
+		const browsers = detectChromiumBrowsers(resolveLayout().home);
+		browser =
+			browsers.find((candidate) => candidate.name.toLowerCase() === options.browser?.toLowerCase()) ?? browsers[0];
+		clipboard = await copyToClipboard(extensionPath);
+		opened = options.open && browser !== undefined ? await openInBackground(browser) : false;
+		instructions = browserSetupInstructions(browser, extensionPath);
+		report(instructions);
+		if (options.wait && (process.stdout.isTTY || process.env["OPENCUA_BROWSER_WAIT"] === "1")) {
+			report("Waiting for the extension to connect (up to 120 seconds)...");
+			const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+			while (!connected && Date.now() < deadline) {
+				await sleep(1000);
+				connected = (await connectedBrowsers(fork)).length > 0;
+			}
+		}
+	}
+	const skill = options.register === true ? await registerSkill(fork) : undefined;
+	return {
+		extensionPath,
+		browser,
+		opened,
+		clipboard,
+		connected,
+		built,
+		bskOnPath: link.linked,
+		...(skill === undefined ? {} : { skill }),
+		instructions,
+	};
+}
+
 export async function setupBrowser(
 	options: BrowserSetupOptions,
 	report: (line: string) => void = () => undefined,
@@ -237,25 +299,39 @@ export function registerBrowserCommands(program: Command, options: BrowserComman
 		.option("--no-open", "do not open the browser's extensions page in the background")
 		.option("--browser <name>", "Brave, Google Chrome, Microsoft Edge, Arc, Vivaldi, Chromium, or Aside")
 		.option("--extension <path>", "use this unpacked extension directory")
-		.action(async (flags: { wait: boolean; open: boolean; browser?: string; extension?: string }) => {
-			const report = options.isJsonOutput()
-				? (line: string) => process.stderr.write(`${line}\n`)
-				: (line: string) => process.stdout.write(`${line}\n`);
-			const value = await setupBrowser(flags, report);
-			const output = {
-				ok: true,
-				extensionPath: value.extensionPath,
-				browser: value.browser?.name,
-				opened: value.opened,
-				clipboard: value.clipboard,
-				connected: value.status.connected,
-				daemonRunning: value.status.daemonRunning,
-				instructions: value.instructions,
-			};
-			if (options.isJsonOutput()) process.stdout.write(`${JSON.stringify(output)}\n`);
-			else if (!value.status.connected)
-				process.stdout.write("\nAfter loading the extension, check with: opencua browser status\n");
-		});
+		.option("--register", "OpenCUA Browser: also install its skill and MCP entry into the detected agent clients")
+		.action(
+			async (flags: { wait: boolean; open: boolean; browser?: string; extension?: string; register?: boolean }) => {
+				const report = options.isJsonOutput()
+					? (line: string) => process.stderr.write(`${line}\n`)
+					: (line: string) => process.stdout.write(`${line}\n`);
+				if (locateFork() !== undefined) {
+					const fork = await setupForkBrowser(flags, report);
+					if (options.isJsonOutput()) process.stdout.write(`${JSON.stringify({ ok: true, ...fork })}\n`);
+					else
+						process.stdout.write(
+							fork.connected
+								? "OpenCUA Browser is connected.\n"
+								: "\nAfter loading the extension, check with: bsk browsers\n",
+						);
+					return;
+				}
+				const value = await setupBrowser(flags, report);
+				const output = {
+					ok: true,
+					extensionPath: value.extensionPath,
+					browser: value.browser?.name,
+					opened: value.opened,
+					clipboard: value.clipboard,
+					connected: value.status.connected,
+					daemonRunning: value.status.daemonRunning,
+					instructions: value.instructions,
+				};
+				if (options.isJsonOutput()) process.stdout.write(`${JSON.stringify(output)}\n`);
+				else if (!value.status.connected)
+					process.stdout.write("\nAfter loading the extension, check with: opencua browser status\n");
+			},
+		);
 
 	browser
 		.command("status")
