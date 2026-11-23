@@ -179,7 +179,7 @@ function closeOpenedMenu(application: AXUIElementRef, title: string, accessibili
 
 function disabledReason(application: AXUIElementRef, accessibility: MenuAccessibility): string {
 	return accessibility.booleanAttribute(application, "AXFrontmost") === false
-		? "is disabled: the app is in the background, and macOS disables window commands such as Save, Close and Select All until the app is active"
+		? "is disabled: the app is in the background, and macOS disables window commands such as Save, Close and Select All until the app is active; press the window's own button for it instead (find_elements, e.g. Reminders' Add Reminder)"
 		: "is disabled";
 }
 
