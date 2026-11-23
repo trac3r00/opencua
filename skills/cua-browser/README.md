@@ -13,7 +13,7 @@ continuing. Do not guess the answers.
 Allowed:
 
 - Build `packages/browser` and `packages/cli`.
-- Install or restart the login LaunchAgent `com.browser_skill_omo.daemon`.
+- Install or restart the login LaunchAgent `com.opencua.browser.daemon`.
 - Write the native messaging host manifest for Brave and open its extensions page in the
   background.
 - Copy the unpacked-extension folder path to the clipboard.
@@ -109,10 +109,10 @@ If the person chooses **Show changes first**, print these before continuing:
 ```text
 Build:    pnpm --filter @opencua/browser build
 Install:  /opt/homebrew/bin/node packages/browser/dist/cli.js install
-LaunchAgent: ~/Library/LaunchAgents/com.browser_skill_omo.daemon.plist
-Native host: ~/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.browser_skill_omo.bridge.json
+LaunchAgent: ~/Library/LaunchAgents/com.opencua.browser.daemon.plist
+Native host: ~/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.opencua.browser.json
 State:    ~/.opencua (owner-only browser-connection.json)
-Logs:     ~/Library/Logs/Browser-Skill-OmO/
+Logs:     ~/Library/Logs/OpenCUA Browser/
 Then ask again before running them.
 ```
 
@@ -135,9 +135,9 @@ test -f packages/browser/dist/cli.js
 loads a newly built daemon. Expect:
 
 ```text
-Installed Browser-Skill-OmO service.
-LaunchAgent: /Users/<you>/Library/LaunchAgents/com.browser_skill_omo.daemon.plist
-Native host: /Users/<you>/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.browser_skill_omo.bridge.json
+Installed OpenCUA Browser service.
+LaunchAgent: /Users/<you>/Library/LaunchAgents/com.opencua.browser.daemon.plist
+Native host: /Users/<you>/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.opencua.browser.json
 ```
 
 Then pair the extension. `setup` copies the extension folder to the clipboard, opens the
@@ -268,7 +268,7 @@ Give the person a short report with these fields, using only what you observed:
 ```text
 Browser:        <name and version>
 Extension:      mlnfdbnljbighojpekgblaphpojllkdf, connected
-Daemon:         com.browser_skill_omo.daemon, running
+Daemon:         com.opencua.browser.daemon, running
 Port:           local only; never print the pairing token
 Smoke test:     open_many p1+p2, wait matched, finish, spaces 0
 Window check:   no window appeared / failed / unverified
@@ -283,7 +283,7 @@ Uninstall:      opencua browser uninstall, then remove the unpacked extension
 | `node -v` says Bun | Use `/opt/homebrew/bin/node` for `install` and the daemon command; reinstall so the LaunchAgent records real Node |
 | `browser package is not built` | Run `pnpm --filter @opencua/browser build` |
 | `opencua: command not found` | Use `node packages/cli/dist/cli.js` or install the CLI package |
-| `extension: not connected` | Reload the unpacked extension; confirm the native host JSON exists; read the `StandardErrorPath` in `~/Library/LaunchAgents/com.browser_skill_omo.daemon.plist`. The installer creates `~/Library/Logs/Browser-Skill-OmO/`; if that directory is missing, `mkdir -p` it and restart the agent with `launchctl kickstart -k gui/$(id -u)/com.browser_skill_omo.daemon` |
+| `extension: not connected` | Reload the unpacked extension; confirm the native host JSON exists; read the `StandardErrorPath` in `~/Library/LaunchAgents/com.opencua.browser.daemon.plist`. The installer creates `~/Library/Logs/OpenCUA Browser/`; if that directory is missing, `mkdir -p` it and restart the agent with `launchctl kickstart -k gui/$(id -u)/com.opencua.browser.daemon` |
 | Port 47953 already in use | `lsof -nP -iTCP:47953 -sTCP:LISTEN`; do not kill an unrelated process; use a manual daemon on `OPENCUA_BROWSER_PORT` |
 | Wrong browser selected | `opencua browser uninstall`, load the extension in the intended browser, then repeat with `--browser` |
 | Page moved to a user window | Stop. The extension pauses input on a move; do not move it back silently |

@@ -1,6 +1,6 @@
 {
 	"manifest_version": 3,
-	"name": "Browser-Skill-OmO",
+	"name": "OpenCUA Browser",
 	"version": "0.1.0",
 	"key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6U5oMuVELSmZ5uJl6CAjrqY+8AA/QD1ch5TiBMXFTUEVxL3OHKDPrkV7KLdJtCg+hvWDCUxU4Z4SoJBUXpUNmBa5HjiXd8LWxW3YMFjER7SxqLys49KILgYwqwMgqDTeX2pBh12ryEeVMGZ4/2CsDKrgbeA/FyXJh9Qsp0pUzMK+JnyryhpILE59cxOVR/vE7yyq92temvCGZi6LA221iKSQEt6Opg6CEHYFstVqbAKGWPR/dqkHEDLGXhY6jkfdXvu5DmQeCNNMgSiVHd8gAJXznrzBpAHWN3ypnX+o80TNzmXwDX37zpbZGlpVlWYRi5n9mJfCErk6LFQ8Qt0PLQIDAQAB",
 	"minimum_chrome_version": "125",
@@ -13,6 +13,6 @@
 	"options_page": "options.html",
 	"action": {
 		"default_popup": "popup.html",
-		"default_title": "Browser-Skill-OmO"
+		"default_title": "OpenCUA Browser"
 	}
 }

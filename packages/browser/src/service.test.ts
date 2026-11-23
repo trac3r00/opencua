@@ -53,6 +53,43 @@ describe("browser service artifacts", () => {
 		expect(extensionId).toBe(EXTENSION_ID);
 	});
 
+	it("#given the pre-rename Browser Skill OmO registration #when installing #then it is unloaded and its files are removed", async () => {
+		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-legacy-"));
+		directories.push(homeDirectory);
+		const legacyPlist = join(homeDirectory, "Library", "LaunchAgents", "com.browser_skill_omo.daemon.plist");
+		const legacyManifest = join(
+			homeDirectory,
+			"Library",
+			"Application Support",
+			"BraveSoftware/Brave-Browser",
+			"NativeMessagingHosts",
+			"com.browser_skill_omo.bridge.json",
+		);
+		for (const path of [legacyPlist, legacyManifest]) {
+			await mkdir(dirname(path), { recursive: true });
+			await writeFile(path, "legacy");
+		}
+		const calls: string[][] = [];
+		await installBrowserService({
+			extensionId: EXTENSION_ID,
+			homeDirectory,
+			systemApplicationsDirectory: join(homeDirectory, "SystemApplications"),
+			packageRoot: join(homeDirectory, "package"),
+			platform: "darwin",
+			stateDirectory: join(homeDirectory, "state"),
+			isPortListening: async () => false,
+			launchctl: async (args) => {
+				calls.push([...args]);
+				const legacy = args[1]?.endsWith("com.browser_skill_omo.daemon") === true;
+				return { code: args[0] === "print" && !legacy ? 113 : 0, stderr: "" };
+			},
+		});
+
+		expect(calls).toContainEqual(["bootout", expect.stringMatching(/com\.browser_skill_omo\.daemon$/)]);
+		await expect(stat(legacyPlist)).rejects.toMatchObject({ code: "ENOENT" });
+		await expect(stat(legacyManifest)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
 	it("#given a relative state directory #when installing #then all persisted state references are absolute", async () => {
 		const homeDirectory = await mkdtemp(join(tmpdir(), "browser-relative-state-"));
 		directories.push(homeDirectory);
@@ -222,9 +259,9 @@ describe("browser service artifacts", () => {
 			nativeHostLauncher: "/tmp/home/state/browser-native-host",
 			stateDirectory: "/tmp/home/state",
 			cliProgram: "/tmp/package/dist/cli.js",
-			logDirectory: "/tmp/home/Library/Logs/Browser-Skill-OmO",
-			stdoutLog: "/tmp/home/Library/Logs/Browser-Skill-OmO/stdout.log",
-			stderrLog: "/tmp/home/Library/Logs/Browser-Skill-OmO/stderr.log",
+			logDirectory: "/tmp/home/Library/Logs/OpenCUA Browser",
+			stdoutLog: "/tmp/home/Library/Logs/OpenCUA Browser/stdout.log",
+			stderrLog: "/tmp/home/Library/Logs/OpenCUA Browser/stderr.log",
 		};
 		const plist = renderLaunchAgent(paths, "/opt/node/bin/node");
 
@@ -277,6 +314,7 @@ describe("browser service artifacts", () => {
 		});
 
 		expect(calls).toEqual([
+			["print", "gui/501/com.browser_skill_omo.daemon"],
 			["print", `gui/501/${SERVICE_LABEL}`],
 			["bootstrap", "gui/501", paths.launchAgent],
 		]);
@@ -477,7 +515,10 @@ describe("browser service artifacts", () => {
 			}),
 		).rejects.toThrow();
 
-		expect(calls).toEqual([["print", `gui/501/${SERVICE_LABEL}`]]);
+		expect(calls).toEqual([
+			["print", "gui/501/com.browser_skill_omo.daemon"],
+			["print", `gui/501/${SERVICE_LABEL}`],
+		]);
 	});
 
 	it("#given the Brave extension registration #when rendering the native host manifest #then restricts it to the expected extension", () => {

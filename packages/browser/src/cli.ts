@@ -121,7 +121,7 @@ export async function cliMain(args: readonly string[]): Promise<void> {
 				if (rest.length !== 0) throw new Error(usage);
 				const paths = await installBrowserService();
 				process.stdout.write(
-					`Installed Browser-Skill-OmO service.\nLaunchAgent: ${paths.launchAgent}\nNative host: ${paths.nativeHostManifest}\n`,
+					`Installed OpenCUA Browser service.\nLaunchAgent: ${paths.launchAgent}\nNative host: ${paths.nativeHostManifest}\n`,
 				);
 				return;
 			}
@@ -134,7 +134,7 @@ export async function cliMain(args: readonly string[]): Promise<void> {
 				if (rest.length !== 0) throw new Error(usage);
 				const paths = await uninstallBrowserService();
 				process.stdout.write(
-					`Removed Browser-Skill-OmO service registration.\nLaunchAgent: ${paths.launchAgent}\nNative host: ${paths.nativeHostManifest}\n`,
+					`Removed OpenCUA Browser service registration.\nLaunchAgent: ${paths.launchAgent}\nNative host: ${paths.nativeHostManifest}\n`,
 				);
 				return;
 			}

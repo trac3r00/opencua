@@ -47,7 +47,7 @@ function stopLocally() {
 }
 
 async function localConnection() {
-	const connection = await chrome.runtime.sendNativeMessage("com.browser_skill_omo.bridge", {
+	const connection = await chrome.runtime.sendNativeMessage("com.opencua.browser", {
 		method: "connection",
 	});
 	if (
@@ -58,7 +58,7 @@ async function localConnection() {
 		typeof connection.token !== "string" ||
 		!/^[0-9a-f]{64}$/i.test(connection.token)
 	)
-		throw new Error("Install the local Browser-Skill-OmO service before connecting.");
+		throw new Error("Install the local OpenCUA Browser service before connecting.");
 	return { port: connection.port, token: connection.token };
 }
 

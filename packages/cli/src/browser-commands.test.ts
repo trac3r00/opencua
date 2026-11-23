@@ -101,8 +101,8 @@ describe("#given a running daemon registered only in Brave #when setup runs for 
 			running: true,
 			connectionReady: true,
 			launchAgent: paths.launchAgent,
-			nativeHostManifest: "/tmp/Brave/NativeMessagingHosts/com.browser_skill_omo.bridge.json",
-			missingNativeHostManifests: ["/tmp/Google/Chrome/NativeMessagingHosts/com.browser_skill_omo.bridge.json"],
+			nativeHostManifest: "/tmp/Brave/NativeMessagingHosts/com.opencua.browser.json",
+			missingNativeHostManifests: ["/tmp/Google/Chrome/NativeMessagingHosts/com.opencua.browser.json"],
 		});
 
 		await setupBrowser({ wait: false, open: false, browser: "Google Chrome" });

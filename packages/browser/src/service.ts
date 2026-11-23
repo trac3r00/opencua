@@ -12,8 +12,11 @@ import { connectionToken, readConnection, writeConnection } from "./connection.j
 
 const execFileAsync = promisify(execFile);
 
-export const SERVICE_LABEL = "com.browser_skill_omo.daemon";
-export const NATIVE_HOST_NAME = "com.browser_skill_omo.bridge";
+export const SERVICE_LABEL = "com.opencua.browser.daemon";
+export const NATIVE_HOST_NAME = "com.opencua.browser";
+/** Names from before the rename to OpenCUA Browser; install removes their registrations. */
+export const LEGACY_SERVICE_LABEL = "com.browser_skill_omo.daemon";
+export const LEGACY_NATIVE_HOST_NAME = "com.browser_skill_omo.bridge";
 export const EXTENSION_ID = "mlnfdbnljbighojpekgblaphpojllkdf";
 export const extensionIdSchema = z.string().regex(/^[a-p]{32}$/);
 export const DEFAULT_PORT = 47953;
@@ -97,7 +100,7 @@ function nativeHostManifestPath(libraryDirectory: string, browserDirectory: stri
 
 function pathsFor(homeDirectory: string, packageRoot: string, stateDirectory: string): ServicePaths {
 	const libraryDirectory = join(homeDirectory, "Library");
-	const logDirectory = join(libraryDirectory, "Logs", "Browser-Skill-OmO");
+	const logDirectory = join(libraryDirectory, "Logs", "OpenCUA Browser");
 	const nativeHostManifests = SUPPORTED_BROWSERS.map((browser) =>
 		nativeHostManifestPath(libraryDirectory, browser.supportDirectory),
 	);
@@ -160,7 +163,7 @@ export function renderNativeHostManifest(paths: ServicePaths, extensionId = EXTE
 	return `${JSON.stringify(
 		{
 			name: NATIVE_HOST_NAME,
-			description: "Browser-Skill-OmO local connection metadata",
+			description: "OpenCUA Browser local connection metadata",
 			path: paths.nativeHostLauncher,
 			type: "stdio",
 			allowed_origins: [`chrome-extension://${extensionId}/`],
@@ -303,6 +306,33 @@ function serviceContext(options: ServiceOptions) {
 	};
 }
 
+/**
+ * Before the rename to OpenCUA Browser the daemon and native host had other names. Their LaunchAgent would keep the
+ * port and their manifests would keep answering an old extension, so install unloads and removes them.
+ */
+async function removeLegacyRegistration(context: ReturnType<typeof serviceContext>): Promise<void> {
+	const legacyTarget = `${context.domain}/${LEGACY_SERVICE_LABEL}`;
+	if ((await context.launchctl(["print", legacyTarget])).code === 0) {
+		await context.launchctl(["bootout", legacyTarget]);
+	}
+	const libraryDirectory = join(context.homeDirectory, "Library");
+	await rm(join(libraryDirectory, "LaunchAgents", `${LEGACY_SERVICE_LABEL}.plist`), { force: true });
+	await Promise.all(
+		SUPPORTED_BROWSERS.map((browser) =>
+			rm(
+				join(
+					libraryDirectory,
+					"Application Support",
+					browser.supportDirectory,
+					"NativeMessagingHosts",
+					`${LEGACY_NATIVE_HOST_NAME}.json`,
+				),
+				{ force: true },
+			),
+		),
+	);
+}
+
 export async function installBrowserService(options: ServiceOptions = {}): Promise<ServicePaths> {
 	const context = serviceContext(options);
 	if ((options.platform ?? process.platform) !== "darwin") {
@@ -318,6 +348,7 @@ export async function installBrowserService(options: ServiceOptions = {}): Promi
 		await ensurePrivateLog(path);
 	}
 	const connection = await initializeConnectionMetadata(context.stateDirectory);
+	await removeLegacyRegistration(context);
 
 	const previous = await context.launchctl(["print", context.serviceTarget]);
 	if (previous.code === 0) {
