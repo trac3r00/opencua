@@ -143,10 +143,29 @@ describe("run_script #given an app with two documents #when a handle is bound to
 		const payload = await runScript(harness, `return await apple.windows("Finder");`);
 
 		expect(payload["value"]).toEqual([
-			{ window_id: 71, pid: 1234, app: "Finder", title: "a.txt", bounds: BOUNDS },
-			{ window_id: 72, pid: 1234, app: "Finder", title: "b.txt", bounds: BOUNDS },
+			{
+				window_id: 71,
+				window_ref: expect.stringMatching(/^w-[0-9a-f]{8}$/),
+				pid: 1234,
+				app: "Finder",
+				title: "a.txt",
+				bounds: BOUNDS,
+			},
+			{
+				window_id: 72,
+				window_ref: expect.stringMatching(/^w-[0-9a-f]{8}$/),
+				pid: 1234,
+				app: "Finder",
+				title: "b.txt",
+				bounds: BOUNDS,
+			},
 		]);
-		expect(probe.asked).toContainEqual({ titlesFor: [1234], includeOffscreen: true, withSpaces: true });
+		expect(probe.asked).toContainEqual({
+			titlesFor: [1234],
+			includeOffscreen: true,
+			withSpaces: true,
+			privacyFor: [1234],
+		});
 	});
 });
 
@@ -192,5 +211,43 @@ describe("get_app_state #given window_id named a window #when actions follow", (
 			{ kind: "setValue", pid: 1234, id: 20, value: "one" },
 			{ kind: "setValue", pid: 1234, id: 21, value: "two" },
 		]);
+	});
+});
+
+describe("run_script #given two windows that share a title #when the agent comes back with a window_ref #then it lands on the same window", () => {
+	it("#then each window keeps one ref across calls, the ref binds a handle, and an unknown ref is refused", async () => {
+		const computer = new TwoDocuments();
+		const probe = async (): Promise<readonly TopLevelWindow[]> => [
+			{ id: 71, ownerPid: 1234, ownerName: "Finder", title: "Bookmarks", bounds: BOUNDS },
+			{ id: 72, ownerPid: 1234, ownerName: "Finder", title: "Bookmarks", bounds: BOUNDS },
+		];
+		const harness = await createHarness(computer, probe);
+		closeHarness = harness.close;
+
+		const first = await runScript(
+			harness,
+			`return (await apple.windows("Finder")).map((w) => [w.window_id, w.window_ref]);`,
+		);
+		const second = await runScript(
+			harness,
+			`return (await apple.windows("Finder")).map((w) => [w.window_id, w.window_ref]);`,
+		);
+		const pairs = (first["value"] as [number, string][]) ?? [];
+		const refOf72 = pairs.find(([id]) => id === 72)?.[1];
+		const bound = await runScript(
+			harness,
+			`const state = await apple.app("Finder", { window: "${refOf72}" }).observe();
+			let unknown;
+			try { await apple.app("Finder", { window: "w-00000000" }).observe(); } catch (error) { unknown = error.refused; }
+			return { windowId: state.windowId, windowRef: state.windowRef, unknown };`,
+		);
+
+		expect(second["value"]).toEqual(first["value"]);
+		expect(new Set(pairs.map(([, ref]) => ref)).size).toBe(2);
+		expect(refOf72).toMatch(/^w-[0-9a-f]{8}$/);
+		expect(bound).toMatchObject({
+			ok: true,
+			value: { windowId: 72, windowRef: refOf72, unknown: "window-not-found" },
+		});
 	});
 });

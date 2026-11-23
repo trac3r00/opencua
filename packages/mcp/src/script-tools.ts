@@ -3,7 +3,13 @@ import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { parseElementIndex } from "@opencua/core";
-import { activeSpaceId, managedDisplaySpaces, spaceTypeFor } from "@opencua/core";
+import {
+	type ScreenFrames,
+	activeSpaceId,
+	managedDisplaySpaces,
+	spaceTypeFor,
+	visibleScreenFrames,
+} from "@opencua/core";
 import type { DockAction, DockSnapshot, ElementQuery, GuardedComputerInterface, TopLevelWindow } from "@opencua/core";
 import { z } from "zod/v4";
 import type { AppleScriptGuardSession } from "./applescript-session.js";
@@ -24,6 +30,7 @@ import type { TerminalGuardSession } from "./terminal-session.js";
 import type { ToolContent, ToolResult } from "./tool-result.js";
 import { MAX_RUN_STEPS, elementQuerySchema, handsSpecSchema, runStepSchema } from "./tool-schemas.js";
 import type { RunStep } from "./tool-schemas.js";
+import { WINDOW_REF_PATTERN, windowForRef } from "./window-refs.js";
 
 const MAX_CODE_LENGTH = 20_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -47,6 +54,38 @@ const observationOptionsSchema = z
 	})
 	.strict();
 
+/** snake_case spellings agents write for the observe options, and hints that have no effect here. */
+const OBSERVE_OPTION_ALIASES: Readonly<Record<string, string>> = {
+	diff_only: "diffOnly",
+	max_elements: "maxElements",
+	include_screenshot: "includeScreenshot",
+	include_menu_bar: "includeMenuBar",
+	subtree_of: "subtreeOf",
+	visible_only: "visibleOnly",
+	element_format: "elementFormat",
+};
+const IGNORED_OBSERVE_OPTIONS: ReadonlySet<string> = new Set(["profile"]);
+
+function observeOptions(options: unknown): unknown {
+	if (!isRecord(options)) {
+		return options ?? {};
+	}
+	return Object.fromEntries(
+		Object.entries(options)
+			.filter(([key]) => !IGNORED_OBSERVE_OPTIONS.has(key))
+			.map(([key, value]) => [OBSERVE_OPTION_ALIASES[key] ?? key, value]),
+	);
+}
+
+let visibleFramesSource: () => readonly ScreenFrames[] | undefined = visibleScreenFrames;
+
+/** Test seam for the screens' usable frames; production asks AppKit. */
+export function setVisibleFramesSourceForTesting(
+	source: (() => readonly ScreenFrames[] | undefined) | undefined,
+): void {
+	visibleFramesSource = source ?? visibleScreenFrames;
+}
+
 const runScriptSchema = z.object({
 	code: z.string().min(1).max(MAX_CODE_LENGTH),
 	timeout_ms: z.number().int().min(1).max(MAX_TIMEOUT_MS).optional(),
@@ -56,13 +95,14 @@ const runScriptSchema = z.object({
 
 const RUN_SCRIPT_DESCRIPTION = `Run trusted async JavaScript with guarded actions; no persistent state or require/process/import (not a security sandbox).
 const app=apple.app("Finder",{window:"title or id"}); await apple.apps(); await apple.windows("App"). Window title must match uniquely.
-app.observe(options); app.find(query); app.click(target,options); app.setValue(target,value); app.type(text); app.press(keys); app.selectText(target,text,options); app.secondaryAction(target,action); app.menu(path); app.scroll(target,direction,pages); app.drag(from,to,options).
+app.observe(options); app.find(query); app.click(target|{x,y},options); app.setValue(target,value); app.type(text); app.press(keys); app.selectText(target,text,options); app.secondaryAction(target,action); app.menu(path); app.scroll(target,direction,pages); app.drag(from,to,options).
 Targets are observed ids or unique queries {role,label,label_contains,value_contains,text,index}. IDs/coordinates need observe/find first; queries and keyboard/menu actions observe themselves. Scroll modifiers are refused.
 app.waitFor(target|{window_title},options); app.verify(checks,options); app.step(step); app.batch(steps,options); app.chain(steps) (fast; batch verifies intermediate targets by default); app.reveal(query,findOptions) only scrolls.
 app.hands({chunks:[{keyboard:[steps],pointer:[steps],vision:{}}...]},{expect}) runs each chunk's lanes at once (type while pointing while capturing), chunk after chunk, in one call; pointer steps need observed ids or x/y.
 Find options: scrollWithin,maxPages,vision,direction. OCR needs Screen Recording and finds click targets, not AX values.
 const dock=apple.dock(); await dock.observe(); dock.click/showMenu/cancel(target). Dock actions need explicit approval and attended delivery.
 apple.terminal(): run/read; approval required. apple.osascript(source,{language,args,timeoutMs}): AppleScript/JXA; screen-taking statements refused.
+apple.arrange([a,b]) tiles windows; then use Promise.all.
 apple.spaces(): active()/displays() read-only; apple.menubar(): observe(), press(observedId), guarded.
 Refusals throw ScriptActionError; read_only forbids mutations. Timeout/cancellation stop input. Attended actions serialize; background apps overlap. Returns {ok,value,log,actions}.`;
 
@@ -429,6 +469,10 @@ class ScriptRun {
 		} catch (error: unknown) {
 			return { activeSpaceId: undefined, reason: errorMessage(error) };
 		}
+	}
+
+	visibleFrames(): readonly ScreenFrames[] {
+		return visibleFramesSource() ?? [];
 	}
 
 	spacesDisplays(): ReturnType<typeof managedDisplaySpaces> {
@@ -824,10 +868,23 @@ class ScriptRun {
 			return selector;
 		}
 		let windows: readonly TopLevelWindow[];
+		let pid: number;
 		try {
-			windows = (await this.session.windowsOf(target.app)).windows;
+			({ pid, windows } = await this.session.windowsOf(target.app));
 		} catch (error: unknown) {
 			throw this.refuseWindow(target, errorMessage(error), "app-not-running");
+		}
+		if (WINDOW_REF_PATTERN.test(selector)) {
+			const named = windowForRef(selector);
+			if (named === undefined || named.pid !== pid || !windows.some((window) => window.id === named.windowId)) {
+				throw this.refuseWindow(
+					target,
+					`window ref ${selector} names no open ${target.app} window (it was closed, or belongs to another app); list them again with apple.windows("${target.app}")`,
+					"window-not-found",
+				);
+			}
+			target.windowId = named.windowId;
+			return named.windowId;
 		}
 		if (target.windowId !== undefined && windows.some((window) => window.id === target.windowId)) {
 			return target.windowId;
@@ -859,10 +916,17 @@ class ScriptRun {
 	}
 
 	observe(target: AppTarget, options: unknown): Promise<unknown> {
-		const parsed = observationOptionsSchema.safeParse(options ?? {});
+		const parsed = observationOptionsSchema.safeParse(observeOptions(options));
 		if (!parsed.success) {
+			const valid = Object.keys(observationOptionsSchema.shape).join(", ");
 			throw invalid(
-				`invalid observe options: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
+				`invalid observe options: ${parsed.error.issues
+					.map((issue) =>
+						issue.code === "unrecognized_keys"
+							? `unknown key ${issue.keys.map((key) => JSON.stringify(key)).join(", ")}`
+							: `${issue.path.join(".")}: ${issue.message}`,
+					)
+					.join("; ")}; valid keys: ${valid}`,
 			);
 		}
 		const { diffOnly, maxElements, includeScreenshot, includeMenuBar, subtreeOf, visibleOnly, elementFormat } =
@@ -1187,6 +1251,8 @@ async function perform(
 			return run.spacesActive();
 		case "spacesDisplays":
 			return run.spacesDisplays();
+		case "visibleFrames":
+			return run.visibleFrames();
 		case "menubarObserve":
 			return await run.menubarObserve();
 		case "menubarPress":

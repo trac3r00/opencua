@@ -18,6 +18,7 @@ function probeWith(windows: readonly TopLevelWindow[]): () => Promise<readonly T
 	return async () => windows;
 }
 
+const WINDOW_REF = expect.stringMatching(/^w-[0-9a-f]{8}$/);
 describe("window discovery #given a machine with on-screen windows #when the agent asks what it can target #then it gets ids and geometry", () => {
 	it("lists window id, pid, app, title and bounds", async () => {
 		const harness = await createHarness(
@@ -40,9 +41,10 @@ describe("window discovery #given a machine with on-screen windows #when the age
 
 		expect(result.isError).toBeFalsy();
 		expect(payload["windows"]).toEqual([
-			{ window_id: 38574, pid: 489, app: "Finder", title: "opencua", bounds: WINDOW_BOUNDS },
+			{ window_id: 38574, window_ref: WINDOW_REF, pid: 489, app: "Finder", title: "opencua", bounds: WINDOW_BOUNDS },
 			{
 				window_id: 38580,
+				window_ref: WINDOW_REF,
 				pid: 76409,
 				app: "TextEdit",
 				title: "scratch.txt",
@@ -67,7 +69,14 @@ describe("window discovery #given a machine with on-screen windows #when the age
 		const payload = jsonPayload(await harness.client.callTool({ name: "list_windows", arguments: {} }));
 
 		expect(payload["windows"]).toEqual([
-			{ window_id: 8337, pid: 42729, app: "Calculator", title: "Calculator", bounds: WINDOW_BOUNDS },
+			{
+				window_id: 8337,
+				window_ref: WINDOW_REF,
+				pid: 42729,
+				app: "Calculator",
+				title: "Calculator",
+				bounds: WINDOW_BOUNDS,
+			},
 		]);
 	});
 
@@ -102,6 +111,7 @@ describe("window discovery #given a machine with on-screen windows #when the age
 		expect(payload["windows"]).toEqual([
 			{
 				window_id: 1,
+				window_ref: WINDOW_REF,
 				pid: 489,
 				app: "Finder",
 				title: "here",
@@ -112,6 +122,7 @@ describe("window discovery #given a machine with on-screen windows #when the age
 			},
 			{
 				window_id: 2,
+				window_ref: WINDOW_REF,
 				pid: 42729,
 				app: "Calculator",
 				title: "Calculator",
@@ -139,7 +150,7 @@ describe("window discovery #given a machine with on-screen windows #when the age
 		);
 
 		expect(payload["windows"]).toEqual([
-			{ window_id: 1, pid: 1234, app: "Finder", title: "here", bounds: WINDOW_BOUNDS },
+			{ window_id: 1, window_ref: WINDOW_REF, pid: 1234, app: "Finder", title: "here", bounds: WINDOW_BOUNDS },
 		]);
 	});
 

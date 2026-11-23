@@ -90,6 +90,15 @@ function queryFields(source: unknown): Record<string, string> {
 	return fields;
 }
 
+/** A screenshot point `{x, y}` given where a target goes, or undefined. */
+function pointFields(target: unknown): { readonly x: number; readonly y: number } | undefined {
+	const x = pick(target, "x");
+	const y = pick(target, "y");
+	return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
+		? { x, y }
+		: undefined;
+}
+
 /** A target is an element id (number or string) or a query object with an optional match index. */
 function targetFields(target: unknown): Record<string, unknown> {
 	if (
@@ -101,7 +110,9 @@ function targetFields(target: unknown): Record<string, unknown> {
 	if (isRecord(target)) {
 		const fields = queryFields(target);
 		if (Object.keys(fields).length === 0) {
-			throw invalid("a target object needs at least one of role, label, label_contains, value_contains, or text");
+			throw invalid(
+				"a target object needs at least one of role, label, label_contains, value_contains, or text (or {x, y} for click)",
+			);
 		}
 		const index = target["index"];
 		return { target: fields, ...(typeof index === "number" ? { target_index: index } : {}) };
@@ -139,7 +150,9 @@ function targetWithFind(target: unknown, options: unknown): Record<string, unkno
 const stepBuilders = Object.freeze({
 	click: (target: unknown, options?: unknown): StepObject => ({
 		type: "click",
-		...targetWithFind(target, options),
+		...(isRecord(target) && Object.keys(queryFields(target)).length === 0 && pointFields(target) !== undefined
+			? pointFields(target)
+			: targetWithFind(target, options)),
 		...defined({
 			click_count: pick(options, "clickCount") ?? pick(options, "click_count"),
 			mouse_button: pick(options, "mouseButton") ?? pick(options, "mouse_button"),
@@ -287,6 +300,164 @@ function sleep(milliseconds: unknown): Promise<void> {
 	});
 }
 
+/** A lane step written with `kind` instead of `type`, or a bare pointer point, gets the step type it means. */
+function laneSteps(steps: unknown, pointer: boolean): unknown {
+	if (!Array.isArray(steps)) {
+		return steps;
+	}
+	return steps.map((step: unknown) => {
+		if (!isRecord(step) || step["type"] !== undefined) {
+			return step;
+		}
+		if (typeof step["kind"] === "string") {
+			const { kind, ...rest } = step;
+			return { type: kind, ...rest };
+		}
+		return pointer && pointFields(step) !== undefined ? { type: "click", ...step } : step;
+	});
+}
+
+function handsSpec(spec: unknown): unknown {
+	const chunks = pick(spec, "chunks");
+	if (!isRecord(spec) || !Array.isArray(chunks)) {
+		return spec;
+	}
+	return {
+		...spec,
+		chunks: chunks.map((chunk: unknown) =>
+			isRecord(chunk)
+				? {
+						...chunk,
+						...(chunk["pointer"] === undefined ? {} : { pointer: laneSteps(chunk["pointer"], true) }),
+						...(chunk["keyboard"] === undefined ? {} : { keyboard: laneSteps(chunk["keyboard"], false) }),
+					}
+				: chunk,
+		),
+	};
+}
+
+/** Timers for scripts that wait the usual way; each fires at most MAX_SLEEP_MS later. */
+const scriptTimerHandles = new Map<number, ReturnType<typeof setTimeout>>();
+let nextTimer = 1;
+const scriptTimers = Object.freeze({
+	setTimeout: (callback: unknown, milliseconds?: unknown): number => {
+		if (typeof callback !== "function") {
+			throw invalid("setTimeout needs a function");
+		}
+		const duration = typeof milliseconds === "number" && Number.isFinite(milliseconds) ? milliseconds : 0;
+		const id = nextTimer++;
+		scriptTimerHandles.set(
+			id,
+			setTimeout(
+				() => {
+					scriptTimerHandles.delete(id);
+					callback();
+				},
+				Math.min(Math.max(0, duration), MAX_SLEEP_MS),
+			),
+		);
+		return id;
+	},
+	clearTimeout: (id: unknown): void => {
+		if (typeof id !== "number") {
+			return;
+		}
+		const timer = scriptTimerHandles.get(id);
+		if (timer !== undefined) {
+			clearTimeout(timer);
+			scriptTimerHandles.delete(id);
+		}
+	},
+});
+
+const MAX_ARRANGED_WINDOWS = 6;
+
+interface ArrangeHandle {
+	readonly name: string;
+	readonly observe: (options?: unknown) => Promise<unknown>;
+	readonly step: (raw: unknown) => Promise<unknown>;
+}
+
+function isArrangeHandle(value: unknown): value is ArrangeHandle {
+	return (
+		isRecord(value) &&
+		typeof value["name"] === "string" &&
+		typeof value["observe"] === "function" &&
+		typeof value["step"] === "function"
+	);
+}
+
+function rectFrom(value: unknown): { x: number; y: number; width: number; height: number } | undefined {
+	const [x, y, width, height] = ["x", "y", "width", "height"].map((key) => pick(value, key));
+	return typeof x === "number" && typeof y === "number" && typeof width === "number" && typeof height === "number"
+		? { x, y, width, height }
+		: undefined;
+}
+
+/**
+ * Put the windows of several app handles side by side in equal columns of one screen's usable area (the screen the
+ * first window is on unless options.screen names an index), so they can be watched and driven at once. Each window
+ * is moved and resized through accessibility, never raised or focused; the apps' frames are set concurrently.
+ */
+async function arrange(handles: unknown, options?: unknown): Promise<unknown> {
+	if (!Array.isArray(handles) || handles.length === 0 || handles.length > MAX_ARRANGED_WINDOWS) {
+		throw invalid(`apple.arrange takes 1 to ${MAX_ARRANGED_WINDOWS} handles from apple.app(...)`);
+	}
+	const apps: ArrangeHandle[] = handles.map((handle: unknown) => {
+		if (!isArrangeHandle(handle)) {
+			throw invalid("apple.arrange takes handles from apple.app(...)");
+		}
+		return handle;
+	});
+	const gapOption = pick(options, "gap");
+	const gap = typeof gapOption === "number" && Number.isFinite(gapOption) ? Math.max(0, gapOption) : 0;
+	const states = await Promise.all(apps.map((app) => app.observe({ maxElements: 1, includeScreenshot: false })));
+	const listed = await Promise.all(apps.map((app) => call("windows", undefined, [app.name])));
+	const elsewhere = apps.filter((_app, index) => {
+		const windowId = pick(states[index], "windowId");
+		const windows = Array.isArray(listed[index]) ? listed[index] : [];
+		const offSpace = (window: unknown): boolean => pick(window, "space") === "other";
+		// The observed window when the observation names it; otherwise every window the app has.
+		return windowId === undefined
+			? windows.length > 0 && windows.every(offSpace)
+			: windows.some((window: unknown) => pick(window, "window_id") === windowId && offSpace(window));
+	});
+	if (elsewhere.length > 0) {
+		throw invalid(
+			`apple.arrange cannot bring ${elsewhere.map((app) => app.name).join(", ")} here: its window is on another Space, and macOS lets no app move a window between Spaces. Ask the person to bring it to this Space (or open a new window of it here), then arrange again.`,
+		);
+	}
+	const screens = await call("visibleFrames", undefined, []);
+	const areas = Array.isArray(screens) ? screens.map((screen: unknown) => rectFrom(pick(screen, "visible"))) : [];
+	const screenOption = pick(options, "screen");
+	const first = rectFrom(pick(states[0], "windowBounds"));
+	const center = first === undefined ? undefined : { x: first.x + first.width / 2, y: first.y + first.height / 2 };
+	const area =
+		typeof screenOption === "number"
+			? areas[screenOption]
+			: (areas.find(
+					(candidate) =>
+						candidate !== undefined &&
+						center !== undefined &&
+						center.x >= candidate.x &&
+						center.x < candidate.x + candidate.width &&
+						center.y >= candidate.y &&
+						center.y < candidate.y + candidate.height,
+				) ?? areas[0]);
+	if (area === undefined) {
+		throw invalid("apple.arrange could not read the screen layout (or options.screen names no screen)");
+	}
+	const width = Math.floor((area.width - gap * (apps.length - 1)) / apps.length);
+	const frames = apps.map((_app, index) => ({
+		x: Math.round(area.x + index * (width + gap)),
+		y: Math.round(area.y),
+		width,
+		height: Math.floor(area.height),
+	}));
+	await Promise.all(apps.map((app, index) => app.step({ type: "set_window_frame", ...frames[index] })));
+	return apps.map((app, index) => ({ app: app.name, frame: frames[index] }));
+}
+
 function handleSpec(
 	app: string,
 	options: unknown,
@@ -304,7 +475,9 @@ function handleSpec(
 	if (typeof window === "number" && Number.isSafeInteger(window) && window > 0) {
 		return { app, window };
 	}
-	throw invalid("window is a window title (or a unique part of one) or a window_id from apple.windows()");
+	throw invalid(
+		"window is a window_ref (w-...) or window_id from apple.windows(), or a window title (or a unique part of one)",
+	);
 }
 
 function makeAppHandle(target: WorkerTarget): Readonly<Record<string, unknown>> {
@@ -313,6 +486,7 @@ function makeAppHandle(target: WorkerTarget): Readonly<Record<string, unknown>> 
 		name: target.app,
 		...(target.window === undefined ? {} : { window: target.window }),
 		observe: (options?: unknown) => call("observe", target, [options]),
+		getAppState: (options?: unknown) => call("observe", target, [options]),
 		find: (query: unknown, options?: unknown) => call("find", target, [query, options]),
 		click: (element: unknown, options?: unknown) => act(stepBuilders.click(element, options)),
 		drag: (from: unknown, to: unknown, options?: unknown) => act(stepBuilders.drag(from, to, options)),
@@ -337,7 +511,7 @@ function makeAppHandle(target: WorkerTarget): Readonly<Record<string, unknown>> 
 		},
 		batch: (raws: unknown, options?: unknown) => call("batch", target, [raws, options]),
 		chain: (raws: unknown, options?: unknown) => call("chain", target, [raws, options]),
-		hands: (spec: unknown, options?: unknown) => call("hands", target, [spec, options]),
+		hands: (spec: unknown, options?: unknown) => call("hands", target, [handsSpec(spec), options]),
 		verify: (checks?: unknown, options?: unknown) => call("verify", target, [checks, options]),
 	});
 }
@@ -358,6 +532,7 @@ const apple = Object.freeze({
 		return call("windows", undefined, [name]);
 	},
 	steps: stepBuilders,
+	arrange,
 	dock: () =>
 		Object.freeze({
 			observe: () => call("dockObserve", undefined, []),
@@ -401,7 +576,7 @@ async function execute(code: string): Promise<ScriptOutcome> {
 		return { ok: false, kind: "syntax-error", error: errorMessage(error) };
 	}
 	const context = createContext(
-		{ apple, log, console: { log, info: log, warn: log, error: log }, sleep },
+		{ apple, log, console: { log, info: log, warn: log, error: log }, sleep, ...scriptTimers },
 		{ codeGeneration: { strings: false, wasm: false } },
 	);
 	try {

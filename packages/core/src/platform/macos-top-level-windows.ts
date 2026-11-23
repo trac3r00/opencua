@@ -10,6 +10,41 @@ export interface TopLevelWindow {
 	readonly bounds: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
 	/** Where the window lives among Spaces; absent when the WindowServer places it on none (unknown or on every Space). */
 	readonly space?: WindowSpace;
+	/** A browser's private (incognito) window; set only for apps listed in privacyFor. */
+	readonly private?: true;
+}
+
+/**
+ * Browsers name a private window only in the title they give accessibility ("Page - Brave (Private)", "(Incognito)",
+ * "InPrivate", "Private Browsing"); the WindowServer title is the page title alone.
+ */
+export function isPrivateBrowserTitle(title: string): boolean {
+	return /(\((private|incognito)\)|inprivate|private browsing)\s*$/i.test(title.trim());
+}
+
+/** Mark the private windows of the apps asked, asking each app's accessibility titles once. */
+export function markPrivateWindows(
+	windows: readonly TopLevelWindow[],
+	privacyFor: readonly number[],
+	titlesOfApp: (pid: number) => ReadonlyMap<number, string>,
+): readonly TopLevelWindow[] {
+	const wanted = new Set(privacyFor);
+	const answers = new Map<number, ReadonlyMap<number, string>>();
+	return windows.map((window) => {
+		if (!wanted.has(window.ownerPid)) {
+			return window;
+		}
+		let titles = answers.get(window.ownerPid);
+		if (titles === undefined) {
+			try {
+				titles = titlesOfApp(window.ownerPid);
+			} catch {
+				titles = new Map();
+			}
+			answers.set(window.ownerPid, titles);
+		}
+		return isPrivateBrowserTitle(titles.get(window.id) ?? window.title) ? { ...window, private: true } : window;
+	});
 }
 
 export interface WindowSpace {
@@ -32,6 +67,8 @@ export interface TopLevelWindowOptions {
 	readonly titlesFor?: "all" | readonly number[];
 	/** Say which Space and display each window is on, and whether that Space is the one shown now. */
 	readonly withSpaces?: boolean;
+	/** Apps (by pid) whose private browser windows are marked; one accessibility request per app. */
+	readonly privacyFor?: readonly number[];
 }
 
 /** A source of on-screen top-level windows, as the MCP session consumes it. */
@@ -59,8 +96,10 @@ export async function listTopLevelWindows(options: TopLevelWindowOptions = {}): 
 			},
 		});
 	}
-	const titled =
+	const filled =
 		options.titlesFor === undefined ? summaries : fillWindowTitles(summaries, options.titlesFor, windowTitlesForPid);
+	const titled =
+		options.privacyFor === undefined ? filled : markPrivateWindows(filled, options.privacyFor, windowTitlesForPid);
 	return options.withSpaces === true
 		? placeOnSpaces(titled, spacesForWindows(titled.map((window) => window.id)), managedDisplaySpaces())
 		: titled;

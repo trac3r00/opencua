@@ -6,8 +6,10 @@ import {
 	type InputObservation,
 	type SystemPrompt,
 	axUnavailableNote,
+	isPrivateBrowserTitle,
 } from "@opencua/core";
 import { UNTRUSTED_CONTENT_NOTE, detectUntrustedContent } from "./untrusted-content.js";
+import { windowRef } from "./window-refs.js";
 
 export type ToolContent =
 	| { readonly type: "text"; readonly text: string }
@@ -733,7 +735,7 @@ function stateToolResult(
 	options: { readonly boundDiff?: boolean; readonly elementFormat?: ElementFormat | undefined } = {},
 	extraImages: readonly ToolContent[] = [],
 ): ToolResult {
-	const payload: Record<string, unknown> = { ...state, screenshotBase64: undefined };
+	const payload: Record<string, unknown> = { ...state, screenshotBase64: undefined, ...windowIdentity(state) };
 	const imageAvailable = state.screenshotBase64.length > 0;
 	const bounds = state.windowBounds;
 	// Native window observations already map AX frames into screenshot pixels.
@@ -1026,6 +1028,14 @@ export function openAppResult(payload: Record<string, unknown>, error: string | 
 	return error === undefined ? { content } : { isError: true, content };
 }
 
+/** The observed window's stable ref, and whether it is a browser's private window. */
+function windowIdentity(state: AppState): Record<string, unknown> {
+	return {
+		...(state.windowId === undefined ? {} : { windowRef: windowRef(state.pid, state.windowId) }),
+		...(state.windowTitle !== undefined && isPrivateBrowserTitle(state.windowTitle) ? { privateWindow: true } : {}),
+	};
+}
+
 function observationContext(state: AppState): Record<string, unknown> {
 	return {
 		app: state.app,
@@ -1035,6 +1045,7 @@ function observationContext(state: AppState): Record<string, unknown> {
 		axAvailable: state.axAvailable,
 		...(state.windowId === undefined ? {} : { windowId: state.windowId }),
 		...(state.windowTitle === undefined ? {} : { windowTitle: state.windowTitle }),
+		...windowIdentity(state),
 		...(state.windowBounds === undefined ? {} : { windowBounds: state.windowBounds }),
 		display: state.display,
 		...(state.displays === undefined ? {} : { displays: state.displays }),

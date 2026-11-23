@@ -30,6 +30,7 @@ export type CallMethod =
 	| "osascript"
 	| "spacesActive"
 	| "spacesDisplays"
+	| "visibleFrames"
 	| "menubarObserve"
 	| "menubarPress";
 

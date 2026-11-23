@@ -1,7 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { vi } from "@opencua/test-support";
 
-import { type TopLevelWindow, fillWindowTitles, placeOnSpaces } from "./macos-top-level-windows.js";
+import {
+	type TopLevelWindow,
+	fillWindowTitles,
+	isPrivateBrowserTitle,
+	markPrivateWindows,
+	placeOnSpaces,
+} from "./macos-top-level-windows.js";
 
 const BOUNDS = { x: 0, y: 0, width: 400, height: 300 };
 
@@ -46,6 +52,35 @@ describe("fillWindowTitles #given window titles the WindowServer withheld (no Sc
 		});
 
 		expect(filled.map((entry) => entry.title)).toEqual(["", "", "", "Shown"]);
+	});
+});
+
+describe("markPrivateWindows #given a browser with a private and a regular window showing one site", () => {
+	it("#when the app's accessibility titles name the private one #then only it is marked, asking the app once", () => {
+		const listed = [window(1, 10, "RPLAY"), window(2, 10, "RPLAY"), window(3, 20, "Other")];
+		const titlesOfApp = vi.fn(
+			(_pid: number) =>
+				new Map([
+					[1, "RPLAY - Brave (Private)"],
+					[2, "RPLAY - Brave"],
+				]),
+		);
+
+		const marked = markPrivateWindows(listed, [10], titlesOfApp);
+
+		expect(marked.map((entry) => entry.private === true)).toEqual([true, false, false]);
+		expect(titlesOfApp.mock.calls).toEqual([[10]]);
+	});
+
+	it.each<[string, boolean]>([
+		["Page - Brave (Private)", true],
+		["Page - Google Chrome (Incognito)", true],
+		["Page - Microsoft Edge InPrivate", true],
+		["Page — Private Browsing", true],
+		["Private notes - Notes", false],
+		["Page - Brave", false],
+	])("#when the title is %s #then private is %s", (title, expected) => {
+		expect(isPrivateBrowserTitle(title)).toBe(expected);
 	});
 });
 

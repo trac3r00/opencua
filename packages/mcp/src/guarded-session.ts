@@ -85,6 +85,7 @@ import {
 	verificationResult,
 } from "./tool-result.js";
 import type { RunStep } from "./tool-schemas.js";
+import { windowRef } from "./window-refs.js";
 
 const VERIFY_POLL_INTERVAL_MILLISECONDS = 150;
 /** How long the vision lane waits for the refresher's next frame before a live capture. */
@@ -513,6 +514,7 @@ export class GuardedSession {
 								titlesFor: pid === undefined ? "all" : [pid],
 								includeOffscreen: true,
 								withSpaces: true,
+								...(pid === undefined ? {} : { privacyFor: [pid] }),
 							})
 						).filter((window) => pid === undefined || window.ownerPid === pid);
 			const prompts = this.systemPromptProbe === undefined ? [] : this.systemPromptProbe();
@@ -520,9 +522,11 @@ export class GuardedSession {
 				JSON.stringify({
 					windows: windows.map((window) => ({
 						window_id: window.id,
+						window_ref: windowRef(window.ownerPid, window.id),
 						pid: window.ownerPid,
 						app: window.ownerName,
 						title: window.title,
+						...(window.private === true ? { private: true } : {}),
 						bounds: window.bounds,
 						...(window.space === undefined
 							? {}

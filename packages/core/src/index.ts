@@ -81,7 +81,9 @@ export {
 	type WindowProbe,
 	type WindowSpace,
 	fillWindowTitles,
+	isPrivateBrowserTitle,
 	listTopLevelWindows,
+	markPrivateWindows,
 	placeOnSpaces,
 } from "./platform/macos-top-level-windows.js";
 export { type ListedWindow, listWindows } from "./platform/macos-ffi/window-list.js";
@@ -267,6 +269,7 @@ export {
 	spawnOpenLauncher,
 } from "./platform/macos-open-app.js";
 export { setWindowFrame } from "./platform/macos-window-frame.js";
+export { type ScreenFrames, visibleScreenFrames } from "./platform/macos-ffi/screen-frames.js";
 export {
 	type DockAction,
 	type DockSnapshot,
