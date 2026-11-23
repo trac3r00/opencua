@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { Command } from "commander";
@@ -172,6 +172,29 @@ async function waitForConnection(timeoutMs: number, onProgress: (elapsedMs: numb
  * click (Load unpacked, path on the clipboard, extensions page opened behind their work), wait until `bsk browsers`
  * lists the extension, then register the skill with the agent clients.
  */
+/** The fork's one human step, shortest path first: drag the revealed folder onto the page, or paste its path. */
+export function forkSetupInstructions(browser: BrowserInstall | undefined, extensionPath: string): string {
+	const page =
+		browser === undefined ? "your browser's extensions page" : `${browser.extensionsUrl} in ${browser.name}`;
+	return [
+		"One step to connect OpenCUA Browser (about 10 seconds):",
+		`  1. In ${page} (opened for you), turn on Developer mode (top right).`,
+		`  2. Drag the selected "${basename(extensionPath)}" folder from the Finder window onto that page.`,
+		"     Or click Load unpacked, press Command-Shift-G, Command-V (the path is on the clipboard), Return, Select.",
+		`     Folder: ${extensionPath}`,
+		"  3. Done: this command notices the connection by itself.",
+	].join("\n");
+}
+
+async function revealInFinder(path: string): Promise<boolean> {
+	try {
+		await execFileAsync("open", ["-R", path], { timeout: 5000 });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export async function setupForkBrowser(
 	options: BrowserSetupOptions & { readonly register?: boolean },
 	report: (line: string) => void = () => undefined,
@@ -203,7 +226,9 @@ export async function setupForkBrowser(
 			browsers.find((candidate) => candidate.name.toLowerCase() === options.browser?.toLowerCase()) ?? browsers[0];
 		clipboard = await copyToClipboard(extensionPath);
 		opened = options.open && browser !== undefined ? await openInBackground(browser) : false;
-		instructions = browserSetupInstructions(browser, extensionPath);
+		// The person asked for setup and is at the keyboard, so the folder is shown for the drag.
+		if (options.open && process.stdout.isTTY) await revealInFinder(extensionPath);
+		instructions = forkSetupInstructions(browser, extensionPath);
 		report(instructions);
 		if (options.wait && (process.stdout.isTTY || process.env["OPENCUA_BROWSER_WAIT"] === "1")) {
 			report("Waiting for the extension to connect (up to 120 seconds)...");
