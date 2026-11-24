@@ -106,8 +106,13 @@ describe("run_script realm #given a value the script can touch #when it climbs t
 		expect(new Set(answers(payload))).toEqual(new Set([BLOCKED]));
 	});
 
-	it("#when the script hands the host an object with callbacks #then the callbacks get the script realm's values", async () => {
-		const { payload } = await runScript(`
+	// Bun 1.4.4 on x86_64 segfaults the whole test process when the host calls back into functions a run_script object
+	// carries (reproduced under Rosetta; bun.report/1.4.4/mt138afee6i3F3). The server runs run_script on Node, and arm64
+	// Bun runs these two checks.
+	it.skipIf(process.arch === "x64")(
+		"#when the script hands the host an object with callbacks #then the callbacks get the script realm's values",
+		async () => {
+			const { payload } = await runScript(`
 			const captured = [];
 			const fake = {
 				name: "Finder",
@@ -118,13 +123,17 @@ describe("run_script realm #given a value the script can touch #when it climbs t
 			return captured.map(reach);
 		`);
 
-		expect(payload["ok"]).toBe(true);
-		expect(answers(payload)).not.toEqual([]);
-		expect(new Set(answers(payload))).toEqual(new Set([BLOCKED]));
-	});
+			expect(payload["ok"]).toBe(true);
+			expect(answers(payload)).not.toEqual([]);
+			expect(new Set(answers(payload))).toEqual(new Set([BLOCKED]));
+		},
+	);
 
-	it("#when the script replaces Array.prototype.map and Promise.prototype.then #then no host function passes through them", async () => {
-		const { payload } = await runScript(`
+	// Same Bun x86_64 crash as above.
+	it.skipIf(process.arch === "x64")(
+		"#when the script replaces Array.prototype.map and Promise.prototype.then #then no host function passes through them",
+		async () => {
+			const { payload } = await runScript(`
 			const seen = [];
 			const map = Array.prototype.map;
 			const then = Promise.prototype.then;
@@ -137,16 +146,12 @@ describe("run_script realm #given a value the script can touch #when it climbs t
 			return seen.filter((value) => typeof value === "function").map(reach).filter((answer) => answer !== "${BLOCKED}");
 		`);
 
-		expect(payload).toMatchObject({ ok: true, value: [] });
-	});
+			expect(payload).toMatchObject({ ok: true, value: [] });
+		},
+	);
 
-	// Bun 1.4.4 on x86_64 segfaults the whole test process when a worker overflows its stack and then calls back into
-	// native code (bun.report/1.4.4/mt138afee6i3F3); the membrane rule this checks is the same on every architecture,
-	// and arm64 runs it.
-	it.skipIf(process.arch === "x64")(
-		"#when the script exhausts the stack around a host call #then the overflow error is still the script realm's",
-		async () => {
-			const { payload } = await runScript(`
+	it("#when the script exhausts the stack around a host call #then the overflow error is still the script realm's", async () => {
+		const { payload } = await runScript(`
 			const realms = new Set();
 			let caught = 0;
 			const probe = () => {
@@ -160,9 +165,8 @@ describe("run_script realm #given a value the script can touch #when it climbs t
 			return { caught: caught > 0, realms: [...realms].filter((answer) => !answer.startsWith("blocked:")) };
 		`);
 
-			expect(payload).toMatchObject({ ok: true, value: { caught: true, realms: [] } });
-		},
-	);
+		expect(payload).toMatchObject({ ok: true, value: { caught: true, realms: [] } });
+	});
 
 	it("#when the script asks for a dynamic import or a ShadowRealm #then neither gives it the worker's realm", async () => {
 		const { payload } = await runScript(`

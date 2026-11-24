@@ -19,9 +19,31 @@ const overlayMock = vi.hoisted(() => ({
 }));
 
 vi.mock("./macos-ffi/lock-screen.js", () => ({ isScreenLocked: () => false }));
-// Attended keys activate their app; the fake keeps that off the real desktop.
+// Attended keys activate their app; the fake keeps that off the real desktop. The fake app 42 then counts as in front
+// with window 12 focused, so attended delivery does not depend on which app the machine running the tests has in front.
+const FAKE_APP = 42;
+const FAKE_WINDOW = 12;
+const activated = new Set<number>();
 const actualWorkspace = { ...(await import("./macos-ffi/workspace.js")) };
-vi.mock("./macos-ffi/workspace.js", () => ({ ...actualWorkspace, activateApplication: vi.fn(() => true) }));
+vi.mock("./macos-ffi/workspace.js", () => ({
+	...actualWorkspace,
+	activateApplication: vi.fn((pid: number) => {
+		activated.add(pid);
+		return true;
+	}),
+}));
+const actualSkyLight = { ...(await import("./macos-ffi/skylight.js")) };
+vi.mock("./macos-ffi/skylight.js", () => ({
+	...actualSkyLight,
+	focusGuardFor: (window: Parameters<typeof actualSkyLight.focusGuardFor>[0]) =>
+		window.id === FAKE_WINDOW && activated.has(FAKE_APP) ? null : actualSkyLight.focusGuardFor(window),
+}));
+const actualAccessibility = { ...(await import("./macos-ffi/accessibility.js")) };
+vi.mock("./macos-ffi/accessibility.js", () => ({
+	...actualAccessibility,
+	focusedWindowIdForPid: (pid: number) =>
+		pid === FAKE_APP && activated.has(FAKE_APP) ? FAKE_WINDOW : actualAccessibility.focusedWindowIdForPid(pid),
+}));
 vi.mock("./macos-ffi/coregraphics.js", () => ({
 	K_CG_EVENT_FLAG_MASK_ALTERNATE: 0x00080000,
 	K_CG_EVENT_FLAG_MASK_COMMAND: 0x00100000,
@@ -38,6 +60,7 @@ vi.mock("./macos-ffi/coregraphics.js", () => ({
 describe("#given MacOSInputController keyboard input", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		activated.clear();
 	});
 
 	it("#when pressing a key with hold milliseconds #then releases after the hold duration", async () => {
