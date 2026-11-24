@@ -31,6 +31,8 @@ export interface BuddySettingsUiOptions {
 	readonly hudBinary?: string | undefined;
 	readonly secrets?: SecretStore;
 	readonly fetch?: typeof fetch;
+	/** The voices `say` offers; defaults to asking `say -v ?`. */
+	readonly voices?: typeof systemVoices;
 }
 
 async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -107,8 +109,8 @@ export async function startBuddySettingsUi(
 				active = undefined;
 			}
 			const [hasElevenLabsKey, voices, apps] = await Promise.all([
-				readElevenLabsKey().then((key) => key !== undefined),
-				systemVoices(),
+				readElevenLabsKey(secrets).then((key) => key !== undefined),
+				(options.voices ?? systemVoices)(),
 				Promise.all(
 					APP_PRESETS.map(async (preset) => {
 						const connection = settings.apps[preset.id];

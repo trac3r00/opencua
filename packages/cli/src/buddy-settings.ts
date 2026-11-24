@@ -165,8 +165,8 @@ export const keychain: SecretStore = {
 
 const ELEVENLABS_SERVICE = "dev.opencua.buddy.elevenlabs";
 
-export async function readElevenLabsKey(): Promise<string | undefined> {
-	return process.env["ELEVENLABS_API_KEY"] || (await keychain.read(ELEVENLABS_SERVICE));
+export async function readElevenLabsKey(store: Pick<SecretStore, "read"> = keychain): Promise<string | undefined> {
+	return process.env["ELEVENLABS_API_KEY"] || (await store.read(ELEVENLABS_SERVICE));
 }
 
 export async function saveElevenLabsKey(key: string): Promise<void> {

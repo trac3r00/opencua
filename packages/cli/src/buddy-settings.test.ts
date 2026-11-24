@@ -189,7 +189,12 @@ function memorySecrets(): SecretStore & { readonly saved: Map<string, string> } 
 describe("settings page #given the local settings server", () => {
 	it("#when a request lacks the secret path #then it is refused; with it, settings are read and saved", async () => {
 		const state = scratch();
-		const ui = await startBuddySettingsUi({ stateDir: state });
+		// The keychain and `say -v ?` are the machine's own: on a slow CI runner they alone outlast the test's deadline.
+		const ui = await startBuddySettingsUi({
+			stateDir: state,
+			secrets: memorySecrets(),
+			voices: async () => [{ name: "Samantha", locale: "en_US" }],
+		});
 		try {
 			const origin = new URL(ui.url).origin;
 			expect((await fetch(`${origin}/api/state`)).status).toBe(404);
