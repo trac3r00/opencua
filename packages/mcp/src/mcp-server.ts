@@ -348,7 +348,7 @@ export function createMcpServer(
 		"find_elements",
 		{
 			description:
-				"Find ranked ids/scoped refs and one-use token. All query fields match; role ignores AX/case, label normalizes whitespace, text ignores case. Misses return near misses; pixels opt-in.",
+				"Find ranked ids/scoped refs and one-use token. All query fields match; role ignores AX/case, label normalizes whitespace and also matches common synonyms (OK/Done, 보내기/Send), text ignores case. Misses return near misses; pixels opt-in.",
 			inputSchema: findElementsSchema,
 			annotations: READ_ONLY_ANNOTATIONS,
 		},
