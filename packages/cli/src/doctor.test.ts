@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -11,6 +12,8 @@ import {
 	macosSupported,
 	parseSelfCheckOutput,
 	readNativeInputs,
+	readRtk,
+	rtkVersionOutput,
 } from "./doctor.js";
 
 const nativeDir = join(dirname(fileURLToPath(import.meta.url)), "../../core/native");
@@ -341,6 +344,65 @@ describe("#given conditions that leave the install working #when the doctor eval
 		expect(report.checks.find((item) => item.id === "stop-switch")?.status).toBe("warn");
 		expect(report.checks.find((item) => item.id === "native-capture")?.status).toBe("warn");
 		expect(report.nextSteps).toHaveLength(2);
+	});
+});
+
+describe("#given rtk on PATH or not #when the doctor evaluates it #then a missing rtk is a suggestion, never a failure", () => {
+	it("reports the rtk version when it is installed", () => {
+		const report = evaluateDoctor({ ...readyFacts(), rtk: { version: "1.2.1" } });
+
+		const rtk = report.checks.find((item) => item.id === "rtk");
+		expect(rtk?.status).toBe("ok");
+		expect(rtk?.summary).toContain("rtk 1.2.1 on PATH");
+		expect(report.ready).toBe(true);
+	});
+
+	it("warns with the install command when rtk is missing, and stays ready", () => {
+		const report = evaluateDoctor({ ...readyFacts(), rtk: { version: undefined } });
+
+		const rtk = report.checks.find((item) => item.id === "rtk");
+		expect(rtk?.status).toBe("warn");
+		expect(rtk?.fix).toContain("brew install rtk && rtk init -g");
+		expect(report.ready).toBe(true);
+		expect(report.nextSteps).toHaveLength(1);
+		expect(report.nextSteps[0]).toBe(rtk?.fix);
+	});
+
+	it("looks rtk up by running rtk --version and keeps only the version", () => {
+		const calls: string[] = [];
+		const found = readRtk((file, args) => {
+			calls.push([file, ...args].join(" "));
+			return "rtk 1.2.1";
+		});
+
+		expect(calls).toEqual(["rtk --version"]);
+		expect(found).toEqual({ version: "1.2.1" });
+		expect(readRtk(() => undefined)).toEqual({ version: undefined });
+		expect(readRtk(() => "")).toEqual({ version: undefined });
+	});
+
+	it("reads the version from an rtk on PATH and gives up on one that hangs", () => {
+		const bin = mkdtempSync(join(tmpdir(), "opencua-doctor-rtk-"));
+		try {
+			const rtk = join(bin, "rtk");
+			writeFileSync(rtk, "#!/bin/sh\necho 'rtk 9.9.9'\n", { mode: 0o755 });
+			expect(rtkVersionOutput({ PATH: bin })).toBe("rtk 9.9.9");
+
+			writeFileSync(rtk, "#!/bin/sh\nexec sleep 30\n", { mode: 0o755 });
+			const started = Date.now();
+			expect(rtkVersionOutput({ PATH: `${bin}:/bin:/usr/bin` }, 200)).toBeUndefined();
+			expect(Date.now() - started).toBeLessThan(5_000);
+
+			expect(rtkVersionOutput({ PATH: join(bin, "missing") })).toBeUndefined();
+		} finally {
+			rmSync(bin, { recursive: true, force: true });
+		}
+	});
+
+	it("adds no rtk check when rtk was not looked up", () => {
+		const report = evaluateDoctor(readyFacts());
+
+		expect(report.checks.some((item) => item.id === "rtk")).toBe(false);
 	});
 });
 
