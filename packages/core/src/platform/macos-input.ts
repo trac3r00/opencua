@@ -196,6 +196,24 @@ export function setBackgroundPasteForTesting(
 	clipboardText = text;
 }
 
+/** Whether attended input would reach the target: its app is in front, and the target window is the app's focused one. */
+let attendedForeground: (
+	pid: number,
+	window: SkyLightTargetWindow,
+) => { readonly appInFront: boolean; readonly windowFocused: boolean } = (pid, window) => ({
+	appInFront: focusGuardFor(window) === null,
+	windowFocused: focusedWindowIdForPid(pid) === window.id,
+});
+
+export function setAttendedForegroundForTesting(source: typeof attendedForeground | undefined): void {
+	attendedForeground =
+		source ??
+		((pid, window) => ({
+			appInFront: focusGuardFor(window) === null,
+			windowFocused: focusedWindowIdForPid(pid) === window.id,
+		}));
+}
+
 export function setKeyboardPidResolverForTesting(resolver: (pid: number) => number): void {
 	keyboardPidResolver = resolver;
 }
@@ -444,7 +462,11 @@ export class MacOSInputController {
 	 */
 	private async bringForward(pid: number, window: SkyLightTargetWindow): Promise<void> {
 		if (!this.postsGlobally(pid)) return;
-		if (focusGuardFor(window) === null && focusedWindowIdForPid(pid) === window.id) return;
+		const ready = (): boolean => {
+			const state = attendedForeground(pid, window);
+			return state.appInFront && state.windowFocused;
+		};
+		if (ready()) return;
 		activateApplication(pid);
 		raiseWindowInApp(pid, window.id);
 		// A click on a window that is not yet key is spent making it key (an app without first-mouse ignores it), so input
@@ -453,11 +475,11 @@ export class MacOSInputController {
 		const poll = Math.max(1, gestureFocusSettleMilliseconds());
 		for (let attempt = 0; attempt < ATTENDED_FOREGROUND_POLLS; attempt += 1) {
 			await delayMilliseconds(poll);
-			if (focusGuardFor(window) === null && focusedWindowIdForPid(pid) === window.id) {
+			if (ready()) {
 				return;
 			}
 		}
-		if (focusGuardFor(window) !== null) {
+		if (!attendedForeground(pid, window).appInFront) {
 			throw new Error(`attended delivery could not bring app ${pid} to the front; input refused`);
 		}
 	}
