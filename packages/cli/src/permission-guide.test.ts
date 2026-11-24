@@ -332,6 +332,77 @@ describe("#given a permission changes while the guide is open #when the next pan
 	});
 });
 
+describe("#given an Accessibility switch that shows on for an earlier build of the helper #when the guide asks #then it clears that stale decision first", () => {
+	// On bob-mini (macOS 26.7) the TCC row for dev.opencua.mcp read auth_value 2 (on) with the csreq of the previous
+	// ad-hoc build, so System Settings showed the switch on while macOS refused the rebuilt helper.
+	it("resets Accessibility before the request and ends with it granted", async () => {
+		let stale = true;
+		let pending = false;
+		const mac: FakeMac = {
+			state: { accessibility: false, screenRecording: true, automation: {} },
+			onRequest: {
+				accessibility: () => {
+					pending = !stale;
+				},
+				"switch-on": () => {
+					if (pending) mac.state.accessibility = true;
+				},
+			},
+			switchesOn: [true],
+		};
+		const { deps, calls } = fake(mac);
+
+		const outcome = await grantPermissions(
+			{ mode: "terminal", openPanes: true, extraAutomationTargets: [] },
+			{
+				...deps,
+				resetDecision: (service) => {
+					calls.push(`reset ${service}`);
+					stale = false;
+				},
+			},
+		);
+
+		expect(calls.slice(0, 2)).toEqual(["reset Accessibility", "request accessibility"]);
+		expect(outcome.granted).toEqual(["Accessibility"]);
+	});
+
+	it("never clears a decision when the helper's report could not be read", async () => {
+		const mac: FakeMac = {
+			state: { accessibility: true, screenRecording: true, automation: {} },
+			onRequest: {},
+			switchesOn: [false, false],
+		};
+		const { deps, calls } = fake(mac);
+		let reads = 0;
+		// The first read answers, so the guide starts; every later read fails, as a helper that timed out would.
+		const read = () => (reads++ === 0 ? deps.read() : undefined);
+
+		await grantPermissions(
+			{ mode: "terminal", openPanes: false, extraAutomationTargets: [] },
+			{ ...deps, read, resetDecision: (service) => calls.push(`reset ${service}`) },
+		);
+
+		expect(calls.filter((call) => call.startsWith("reset"))).toEqual([]);
+	});
+
+	it("resets Input Monitoring the same way when cua-history needs it", async () => {
+		const mac: FakeMac = {
+			state: { accessibility: true, screenRecording: true, inputMonitoring: false, automation: {} },
+			onRequest: {},
+			switchesOn: [false],
+		};
+		const { deps, calls } = fake(mac);
+
+		await grantPermissions(
+			{ mode: "terminal", openPanes: false, extraAutomationTargets: [], inputMonitoring: true },
+			{ ...deps, resetDecision: (service) => calls.push(`reset ${service}`) },
+		);
+
+		expect(calls).toContain("reset ListenEvent");
+	});
+});
+
 describe("#given an earlier Screen Recording decision on record #when the guide asks #then it clears that decision first so macOS shows its dialog", () => {
 	function staleMac() {
 		let stale = true;

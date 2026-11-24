@@ -664,6 +664,12 @@ ok "built core, mcp, cli, pi-extension, agent and browser"
 
 # --- 8. Signed helper app ----------------------------------------------------------------------------------------
 
+# The helper's designated requirement: what macOS's permission entries are bound to. Empty when there is no helper.
+helper_requirement() {
+	[[ -d "$helper_app" ]] || return 0
+	/usr/bin/codesign -d -r- "$helper_app" 2>&1 | sed -n 's/^.*designated => //p'
+}
+
 step "signed helper app (\"opencua-mcp\")"
 if [[ "$host_os" == Darwin ]]; then
 helper_reason=""
@@ -704,10 +710,21 @@ else
 			warn "could not remove the old dev.applecua.mcp permission entries; remove the stale \"opencua-mcp\" in Privacy & Security"
 		fi
 	fi
+	# macOS keeps a permission for the code requirement it was granted to. When the rebuild changes that requirement
+	# (an ad-hoc build is pinned to its exact hash), the old entries stay switched on in System Settings while macOS
+	# refuses the new helper, so they are cleared and step 12 asks once more.
+	previous_requirement="$(helper_requirement)"
 	OPENCUA_NODE="$helper_node_source" "$repo/scripts/build-tcc-helper.sh" 2>&1 | sed 's/^/          /'
 	if ! helper_problem="$(helper_smoke)"; then
 		fail "the freshly built helper failed its smoke run: $helper_problem" \
 			"re-run with --rebuild-helper; if it fails again, set OPENCUA_NODE to a node from https://nodejs.org"
+	fi
+	if [[ -n "$previous_requirement" && "$previous_requirement" != "$(helper_requirement)" ]]; then
+		helper_bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$helper_app/Contents/Info.plist" 2>/dev/null || true)"
+		for service in Accessibility ScreenCapture ListenEvent; do
+			/usr/bin/tccutil reset "$service" "${helper_bundle_id:-dev.opencua.mcp}" >/dev/null 2>&1 || true
+		done
+		info "the rebuilt helper has a new code identity, so its old Accessibility, Screen Recording and Input Monitoring entries were cleared; grant them once in step 12"
 	fi
 	ok "built $helper_app ($(helper_identity)) bundling Node $("$helper_node" --version)"
 fi

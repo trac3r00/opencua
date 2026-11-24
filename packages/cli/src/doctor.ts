@@ -417,7 +417,7 @@ function helperChecks(facts: DoctorFacts): DoctorCheck[] {
 }
 
 function permissionFix(grant: string, pane: string): string {
-	return `Grant ${grant} to "${HELPER_DISPLAY_NAME}": run ${GRANT_COMMAND}, which shows macOS's dialog, opens System Settings > Privacy & Security > ${pane} and waits until it is on. Restart your MCP client afterwards.`;
+	return `Grant ${grant} to "${HELPER_DISPLAY_NAME}": run ${GRANT_COMMAND}, which shows macOS's dialog, opens System Settings > Privacy & Security > ${pane} and waits until it is on. If the switch there already shows on, it was granted to an earlier build of the helper, which macOS no longer accepts: ${GRANT_COMMAND} clears that entry first, so switch it on once more. Restart your MCP client afterwards.`;
 }
 
 function automationChecks(automation: SelfCheckReport["automation"]): DoctorCheck[] {

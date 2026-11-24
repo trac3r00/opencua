@@ -19,16 +19,20 @@ export interface PermissionRequestAnswer {
 	readonly automation?: Readonly<Record<string, AutomationStatus>>;
 }
 
+/** The `tccutil` service names of the permissions the guide walks through. */
+export type TccService = "Accessibility" | "ScreenCapture" | "ListenEvent";
+
 export interface GrantDependencies {
 	readonly read: () => HelperPermissions | undefined;
 	/** Shows macOS's dialogs for the helper; an Automation dialog blocks until it is answered. */
 	readonly request: (kinds: readonly string[]) => PermissionRequestAnswer | undefined;
 	readonly openUrl: (url: string) => Promise<boolean>;
 	/**
-	 * Clears the helper's own earlier decision for a TCC service. macOS shows no Screen Recording dialog, and lists
-	 * nothing to switch on, while an older decision (a past Deny, an earlier build) is on record.
+	 * Clears the helper's own earlier decision for a TCC service. A decision recorded for an earlier build keeps its
+	 * switch on in System Settings while macOS refuses the rebuilt helper (its code requirement no longer matches), and
+	 * an older Deny keeps macOS from showing a dialog at all; the guide calls this only while the permission is off.
 	 */
-	readonly resetDecision?: (service: "ScreenCapture") => void;
+	readonly resetDecision?: (service: TccService) => void;
 	/** Re-checks until `granted` holds or the person skips; true when it holds. */
 	readonly waitFor: (granted: () => boolean) => Promise<boolean>;
 	readonly print: (text: string) => void;
@@ -143,7 +147,7 @@ export async function grantPermissions(options: GrantOptions, deps: GrantDepende
 		readonly pane: string;
 		readonly url: string;
 		readonly kind: string;
-		readonly tccService?: "ScreenCapture";
+		readonly tccService: TccService;
 		readonly why: string;
 		readonly has: (current: HelperPermissions | undefined) => boolean;
 	}[] = [];
@@ -153,6 +157,7 @@ export async function grantPermissions(options: GrantOptions, deps: GrantDepende
 			pane: "Accessibility",
 			url: PRIVACY_PANES.accessibility,
 			kind: "accessibility",
+			tccService: "Accessibility",
 			why: "read app windows and send clicks and keys",
 			has: (current: HelperPermissions | undefined) => current?.accessibility === true,
 		},
@@ -172,6 +177,7 @@ export async function grantPermissions(options: GrantOptions, deps: GrantDepende
 			pane: "Input Monitoring",
 			url: PRIVACY_PANES.inputMonitoring,
 			kind: "input-monitoring",
+			tccService: "ListenEvent",
 			why: "record the keystrokes and clicks cua-history keeps",
 			has: (current: HelperPermissions | undefined) => current?.inputMonitoring === true,
 		});
@@ -195,7 +201,8 @@ export async function grantPermissions(options: GrantOptions, deps: GrantDepende
 		}
 		deps.print(`\n${grant.label} lets ${NAME} ${grant.why}.`);
 		deps.print(`  macOS shows a dialog for ${NAME}: choose Open System Settings, then switch on ${NAME}.`);
-		if (grant.tccService !== undefined) {
+		// Only a fresh report that says off allows clearing: an unreadable report says nothing about the switch.
+		if (current !== undefined) {
 			deps.resetDecision?.(grant.tccService);
 		}
 		deps.request([grant.kind]);
@@ -219,13 +226,9 @@ export async function grantPermissions(options: GrantOptions, deps: GrantDepende
 					? `Could not verify ${grant.label}: the helper did not return a fresh permission report. Run opencua doctor.`
 					: `${notInTime}: the latest check from ${NAME} still reports ${grant.label} off. Grant it later with ${GRANT_COMMAND}`,
 			);
-			if (finalState !== undefined && grant.kind === "accessibility") {
+			if (finalState !== undefined) {
 				deps.print(
-					"If its switch is already on, reset the stale TCC decision, then grant it again: tccutil reset Accessibility dev.opencua.mcp",
-				);
-			} else if (finalState !== undefined && grant.kind === "screen-recording") {
-				deps.print(
-					"If its switch is already on, reset the stale TCC decision, then grant it again: tccutil reset ScreenCapture dev.opencua.mcp",
+					`If its switch is already on, it belongs to an earlier build of ${NAME} and macOS ignores it. Clear it, then grant it again: tccutil reset ${grant.tccService} dev.opencua.mcp`,
 				);
 			}
 			missing.push(grant.label);
