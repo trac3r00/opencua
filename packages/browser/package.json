@@ -1,6 +1,6 @@
 {
 	"name": "@opencua/browser",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"type": "module",
 	"description": "Compact Chromium browser automation with the opencua stop gate",
 	"bin": {

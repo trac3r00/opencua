@@ -1,6 +1,6 @@
 {
 	"name": "@opencua/pi-extension",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
 	"type": "module",
 	"description": "Pi coding agent extension bridging to the guarded opencua MCP server for macOS computer control",

@@ -19,6 +19,7 @@ import {
 	withCursorIdentity,
 } from "@opencua/core/isolated";
 import { z } from "zod/v4";
+import { SERVER_INFO } from "./server-info.js";
 
 type Supervisor = Pick<
 	TartGuestSupervisor,
@@ -199,7 +200,7 @@ function text(value: unknown) {
 class OwnedDesktopServer extends McpServer {
 	constructor(private readonly dispose: () => Promise<void>) {
 		super(
-			{ name: "opencua-isolated", version: "0.1.0" },
+			{ name: "opencua-isolated", version: SERVER_INFO.version },
 			{
 				instructions:
 					"Operate only this configured agent-owned macOS guest. Start it, then observe before each action. " +

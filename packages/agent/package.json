@@ -1,6 +1,6 @@
 {
 	"name": "@opencua/agent",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"type": "module",
 	"description": "Decision-layer agent: an indexed action space over opencua observations and one fan-out decision per step",
 	"keywords": ["computer-use", "agent", "decision", "systemone", "jev", "macos", "ios", "accessibility"],
